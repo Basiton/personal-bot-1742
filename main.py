@@ -106,57 +106,78 @@ class UltimateCommentBot:
     
     def setup_handlers(self):
         @self.bot_client.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    await event.respond(
-        "**@commentcom_bot ULTIMATE**
+        async def start_handler(event):
+            await event.respond(
+                "**@commentcom_bot ULTIMATE**
 
 "
-        f"Владелец: `{BOT_OWNER_ID}`
+                f"Владелец: `{BOT_OWNER_ID}`
 "
-        f"Админов: `{len(self.admins)}`
+                f"Админов: `{len(self.admins)}`
 
 "
-        f"Аккаунтов: `{len(self.accounts_data)}`
+                f"Аккаунтов: `{len(self.accounts_data)}`
 "
-        f"Каналов: `{len(self.channels)}`
+                f"Каналов: `{len(self.channels)}`
 "
-        f"Шаблонов: `{len(self.templates)}`
+                f"Шаблонов: `{len(self.templates)}`
 
 "
-        "**/help** - все команды"
-    )
-            await event.respond(text)
+                "**/help** - все команды"
+            )
         
         @self.bot_client.on(events.NewMessage(pattern='/help'))
         async def help_handler(event):
-            help_text = """**📱 АККАУНТЫ:**
-`/auth +79123456789 [proxy]` - авторизовать
-`/listaccounts` - список
-`/delaccount +79123456789` - удалить
+            await event.respond(
+                "**📱 АККАУНТЫ:**
+"
+                "`/auth +79123456789 [proxy]` - авторизовать
+"
+                "`/listaccounts` - список
+"
+                "`/delaccount +79123456789` - удалить
 
-**📢 КАНАЛЫ:**
-`/addchannel @username` - добавить
-`/listchannels` - список
-`/delchannel @username` - удалить
+"
+                "**📢 КАНАЛЫ:**
+"
+                "`/addchannel @username` - добавить
+"
+                "`/listchannels` - список
+"
+                "`/delchannel @username` - удалить
 
-**💬 КОММЕНТАРИИ:**
-`/listtemplates` - шаблоны
-`/addtemplate Текст!` - новый
-`/edittemplate 1 Текст` - изменить
-`/del-template 2` - удалить
-`/cleartemplates` - очистить
+"
+                "**💬 КОММЕНТАРИИ:**
+"
+                "`/listtemplates` - шаблоны
+"
+                "`/addtemplate Текст!` - новый
+"
+                "`/edittemplate 1 Текст` - изменить
+"
+                "`/del-template 2` - удалить
+"
+                "`/cleartemplates` - очистить
 
-**🤖 АВТО:**
-`/startmon` - ЗАПУСТИТЬ
-`/stopmon` - остановить
+"
+                "**🤖 АВТО:**
+"
+                "`/startmon` - ЗАПУСТИТЬ
+"
+                "`/stopmon` - остановить
 
-**🔗 BIO:**
-`/addbio t.me/link` - добавить
-`/setbio` - применить всем
+"
+                "**🔗 BIO:**
+"
+                "`/addbio t.me/link` - добавить
+"
+                "`/setbio` - применить всем
 
-**👑 АДМИНЫ:**
-`/addadmin 123456789` - новый админ"""
-            await event.respond(help_text)
+"
+                "**👑 АДМИНЫ:**
+"
+                "`/addadmin 123456789` - новый админ"
+            )
         
         @self.bot_client.on(events.NewMessage(pattern='/auth'))
         async def auth_account(event):
@@ -169,17 +190,19 @@ async def start_handler(event):
                     proxy_parts = parts[2].split(':')
                     if len(proxy_parts) == 4:
                         proxy = (proxy_parts[0], int(proxy_parts[1]), proxy_parts[2], proxy_parts[3])
-                text = f"Авторизуем: `{phone}`
-Проверьте терминал!"
-                await event.respond(text)
+                await event.respond(f"Авторизуем: `{phone}`
+Проверьте терминал!")
                 result = await self.authorize_account(phone, proxy)
                 if result:
                     self.accounts_data[phone] = result
                     self.save_data()
-                    text = f"✅ **{result['name']}** авторизован!
-@{result.get('username', 'нет')}
-`{phone}` ✅ АКТИВЕН"
-                    await event.respond(text)
+                    await event.respond(
+                        f"✅ **{result['name']}** авторизован!
+"
+                        f"@{result.get('username', 'нет')}
+"
+                        f"`{phone}` ✅ АКТИВЕН"
+                    )
                 else:
                     await event.respond("❌ Ошибка авторизации!")
             except Exception as e:
@@ -332,12 +355,16 @@ async def start_handler(event):
                 await event.respond("Сначала авторизуйте аккаунты! /auth")
                 return
             self.monitoring = True
-            text = f"""АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ!
+            await event.respond(
+                f"АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ!
 
-Активных: `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`
-Каналов: `{len(self.channels)}`
-Шаблонов: `{len(self.templates)}`"""
-            await event.respond(text)
+"
+                f"Активных: `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`
+"
+                f"Каналов: `{len(self.channels)}`
+"
+                f"Шаблонов: `{len(self.templates)}`"
+            )
             asyncio.create_task(self.pro_auto_comment())
         
         @self.bot_client.on(events.NewMessage(pattern='/stopmon'))
@@ -372,9 +399,8 @@ async def start_handler(event):
                 if data.get('active') and data.get('session'):
                     if await self.set_account_bio(data, bio_text):
                         updated += 1
-            text = f"BIO обновлен: `{bio_text}`
-{updated} аккаунтов"
-            await event.respond(text)
+            await event.respond(f"BIO обновлен: `{bio_text}`
+{updated} аккаунтов")
         
         @self.bot_client.on(events.NewMessage(pattern='/addadmin'))
         async def add_admin(event):
