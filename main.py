@@ -106,17 +106,25 @@ class UltimateCommentBot:
     
     def setup_handlers(self):
         @self.bot_client.on(events.NewMessage(pattern='/start'))
-        async def start_handler(event):
-            text = f"**@commentcom_bot ULTIMATE**
+async def start_handler(event):
+    await event.respond(
+        "**@commentcom_bot ULTIMATE**
 
-Владелец: `{BOT_OWNER_ID}`
-Админов: `{len(self.admins)}`
+"
+        f"Владелец: `{BOT_OWNER_ID}`
+"
+        f"Админов: `{len(self.admins)}`
 
-Аккаунтов: `{len(self.accounts_data)}`
-Каналов: `{len(self.channels)}`
-Шаблонов: `{len(self.templates)}`
+"
+        f"Аккаунтов: `{len(self.accounts_data)}`
+"
+        f"Каналов: `{len(self.channels)}`
+"
+        f"Шаблонов: `{len(self.templates)}`
 
-**/help** - все команды"
+"
+        "**/help** - все команды"
+    )
             await event.respond(text)
         
         @self.bot_client.on(events.NewMessage(pattern='/help'))
