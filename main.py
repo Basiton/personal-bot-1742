@@ -9,7 +9,6 @@ from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest
 from telethon.errors import SessionPasswordNeededError
 
-# 🔥 ВАШИ ДАННЫЕ (ТОЧНО ВАШИ!)
 API_ID = 36053254
 API_HASH = '4c63aee24cbc1be5e593329370712e7f'
 BOT_TOKEN = '8233716877:AAFNvAaiHhzEg4HZkcLzMIGa05nIuRuJ8wE'
@@ -27,9 +26,7 @@ class UltimateCommentBot:
         self.templates = [
             'Отличный пост! 👍', 'Интересно! Спасибо!', 'Супер контент! 🔥',
             'Класс! 👌', 'Огонь! 🔥🔥', 'Согласен! 💯', 'Спасибо за контент! 🙌',
-            'Супер! 👏', 'Круто! 💎', 'Лучший канал! 👑', 'Топ! 🚀',
-            'Согласен на 100%! 💪', 'Качество контента огонь! 🔥',
-            'Подписан и рекомендую! ✅', 'Всегда интересно читать! 📖'
+            'Супер! 👏', 'Круто! 💎', 'Лучший канал! 👑'
         ]
         self.bio_links = []
         self.admins = []
@@ -63,25 +60,21 @@ class UltimateCommentBot:
         return user_id == BOT_OWNER_ID or user_id in self.admins
     
     async def authorize_account(self, phone, proxy=None):
-        """Полная авторизация аккаунта"""
         try:
             client = TelegramClient(StringSession(''), API_ID, API_HASH, proxy=proxy)
             await client.connect()
-            
             if not await client.is_user_authorized():
                 await client.send_code_request(phone)
-                print(f"📱 Код отправлен на {phone}")
-                code = input("🔑 Введите код из Telegram: ")
+                print(f"Код отправлен на {phone}")
+                code = input("Введите код из Telegram: ")
                 try:
                     await client.sign_in(phone, code)
                 except SessionPasswordNeededError:
-                    password = input("🔐 Введите пароль 2FA: ")
+                    password = input("Введите пароль 2FA: ")
                     await client.sign_in(password=password)
-            
             me = await client.get_me()
             session = client.session.save()
             await client.disconnect()
-            
             return {
                 'session': session, 
                 'active': True, 
@@ -95,7 +88,6 @@ class UltimateCommentBot:
             return None
     
     async def set_account_bio(self, session_data, bio_text):
-        """Установить BIO аккаунту"""
         try:
             client = TelegramClient(StringSession(session_data['session']), API_ID, API_HASH)
             await client.connect()
@@ -107,114 +99,56 @@ class UltimateCommentBot:
             pass
         return False
     
-    async def set_account_avatar(self, session_data, photo_path):
-        """Установить аватарку аккаунту"""
-        try:
-            if not os.path.exists(photo_path):
-                return False
-            client = TelegramClient(StringSession(session_data['session']), API_ID, API_HASH)
-            await client.connect()
-            if await client.is_user_authorized():
-                await client(UploadProfilePhotoRequest(open(photo_path, 'rb')))
-                await client.disconnect()
-                return True
-        except:
-            pass
-        return False
-    
     async def start(self):
         await self.bot_client.start(bot_token=BOT_TOKEN)
         self.setup_handlers()
-        logger.info("🚀 @commentcom_bot ULTIMATE ЗАПУЩЕН!")
+        logger.info("@commentcom_bot ULTIMATE ЗАПУЩЕН!")
     
     def setup_handlers(self):
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            await event.respond(
-                "🎉 **@commentcom_bot ULTIMATE v2.0**
+            text = f"**@commentcom_bot ULTIMATE**
 
-"
-                f"👑 **Владелец:** `{BOT_OWNER_ID}`
-"
-                f"👥 **Админов:** `{len(self.admins)}`
+Владелец: `{BOT_OWNER_ID}`
+Админов: `{len(self.admins)}`
 
-"
-                f"📱 **Аккаунтов:** `{len(self.accounts_data)}`
-"
-                f"📢 **Каналов:** `{len(self.channels)}`
-"
-                f"💬 **Шаблонов:** `{len(self.templates)}`
+Аккаунтов: `{len(self.accounts_data)}`
+Каналов: `{len(self.channels)}`
+Шаблонов: `{len(self.templates)}`
 
-"
-                f"**/help** - 👉 все команды с инструкциями"
-            )
+**/help** - все команды"
+            await event.respond(text)
         
         @self.bot_client.on(events.NewMessage(pattern='/help'))
         async def help_handler(event):
-            help_text = (
-                "**📱 АККАУНТЫ (только админы):**
-"
-                "`/auth +79123456789 [ip:port:user:pass]` - 🚀 авторизовать аккаунт
-"
-                "`/listaccounts` - 📋 список аккаунтов
-"
-                "`/delaccount +79123456789` - 🗑️ удалить аккаунт
+            help_text = """**📱 АККАУНТЫ:**
+`/auth +79123456789 [proxy]` - авторизовать
+`/listaccounts` - список
+`/delaccount +79123456789` - удалить
 
-"
-                
-                "**📢 КАНАЛЫ (только админы):**
-"
-                "`/addchannel @username` - ➕ добавить канал
-"
-                "`/listchannels` - 📋 список каналов
-"
-                "`/delchannel @username` - 🗑️ удалить канал
+**📢 КАНАЛЫ:**
+`/addchannel @username` - добавить
+`/listchannels` - список
+`/delchannel @username` - удалить
 
-"
-                
-                "**💬 КОММЕНТАРИИ (только админы):**
-"
-                "`/listtemplates` - 📋 все шаблоны
-"
-                "`/addtemplate Текст!` - ➕ новый шаблон
-"
-                "`/edittemplate 1 Новый текст` - ✏️ изменить
-"
-                "`/del-template 2` - 🗑️ удалить №2
-"
-                "`/cleartemplates` - 🗑️ очистить все
+**💬 КОММЕНТАРИИ:**
+`/listtemplates` - шаблоны
+`/addtemplate Текст!` - новый
+`/edittemplate 1 Текст` - изменить
+`/del-template 2` - удалить
+`/cleartemplates` - очистить
 
-"
-                
-                "**🤖 АВТОКОММЕНТАРИИ (только админы):**
-"
-                "`/startmon` - ▶️ ★ ЗАПУСТИТЬ ★
-"
-                "`/stopmon` - ⏹️ остановить
+**🤖 АВТО:**
+`/startmon` - ЗАПУСТИТЬ
+`/stopmon` - остановить
 
-"
-                
-                "**🔗 BIO (только админы):**
-"
-                "`/addbio t.me/link` - ➕ ссылка в био
-"
-                "`/setbio` - 🎯 применить ко всем
+**🔗 BIO:**
+`/addbio t.me/link` - добавить
+`/setbio` - применить всем
 
-"
-                
-                "**📸 АВАТАРКИ (только админы):**
-"
-                "`/setavatar +79123456789` - 📸 сменить аватарку
-
-"
-                
-                "**👑 АДМИНЫ (только владелец):**
-"
-                "`/addadmin 123456789` - 👑 новый админ
-"
-                "`/listadmins` - 📋 список админов"
-            )
-            await event.respond(help_text, parse_mode='md')
+**👑 АДМИНЫ:**
+`/addadmin 123456789` - новый админ"""
+            await event.respond(help_text)
         
         @self.bot_client.on(events.NewMessage(pattern='/auth'))
         async def auth_account(event):
@@ -227,47 +161,36 @@ class UltimateCommentBot:
                     proxy_parts = parts[2].split(':')
                     if len(proxy_parts) == 4:
                         proxy = (proxy_parts[0], int(proxy_parts[1]), proxy_parts[2], proxy_parts[3])
-                
-                await event.respond(
-                    f"🔄 **Авторизуем:** `{phone}`
-"
-                    f"🌐 {'✅ с прокси' if proxy else '❌ без прокси'}
-
-"
-                    f"📱 **Проверьте терминал Codespaces!**"
-                )
-                
+                text = f"Авторизуем: `{phone}`
+Проверьте терминал!"
+                await event.respond(text)
                 result = await self.authorize_account(phone, proxy)
                 if result:
                     self.accounts_data[phone] = result
                     self.save_data()
-                    await event.respond(
-                        f"✅ **{result['name']}** авторизован!
-"
-                        f"👤 `@{result.get('username', 'нет')}`
-"
-                        f"📱 `{phone}` ✅ АКТИВЕН"
-                    )
+                    text = f"✅ **{result['name']}** авторизован!
+@{result.get('username', 'нет')}
+`{phone}` ✅ АКТИВЕН"
+                    await event.respond(text)
                 else:
-                    await event.respond("❌ **Ошибка авторизации! Проверьте телефон/код**")
+                    await event.respond("❌ Ошибка авторизации!")
             except Exception as e:
-                await event.respond(f"❌ **Ошибка:** `{str(e)[:50]}`")
+                await event.respond(f"❌ Ошибка: `{str(e)[:50]}`")
         
         @self.bot_client.on(events.NewMessage(pattern='/listaccounts'))
         async def list_accounts(event):
             if not await self.is_admin(event.sender_id): return
             if not self.accounts_data:
-                await event.respond("📭 **Нет авторизованных аккаунтов**")
+                await event.respond("Нет авторизованных аккаунтов")
                 return
-            text = f"📱 **АККАУНТЫ ({len(self.accounts_data)}):**
+            text = f"АККАУНТЫ ({len(self.accounts_data)}):
 
 "
             for i, (phone, data) in enumerate(list(self.accounts_data.items())[:10], 1):
                 status = "✅" if data.get('active', False) else "❌"
                 name = data.get('name', 'Не авторизован')
                 username = data.get('username', 'нет')
-                proxy = "🔒" if data.get('proxy') else ""
-                text += f"{i}. {status} `{name}` (@{username}) {proxy}
+                text += f"{i}. {status} `{name}` (@{username})
 `   {phone}`
 "
             await event.respond(text)
@@ -280,11 +203,11 @@ class UltimateCommentBot:
                 if phone in self.accounts_data:
                     del self.accounts_data[phone]
                     self.save_data()
-                    await event.respond(f"🗑️ **Удален:** `{phone}`")
+                    await event.respond(f"Удален: `{phone}`")
                 else:
-                    await event.respond("❌ **Аккаунт не найден**")
+                    await event.respond("Аккаунт не найден")
             except:
-                await event.respond("❌ **Формат:** `/delaccount +79123456789`")
+                await event.respond("Формат: `/delaccount +79123456789`")
         
         @self.bot_client.on(events.NewMessage(pattern='/addchannel'))
         async def add_channel(event):
@@ -294,19 +217,19 @@ class UltimateCommentBot:
                 if username not in [ch['username'] for ch in self.channels]:
                     self.channels.append({'username': username})
                     self.save_data()
-                    await event.respond(f"✅ **Канал:** `@{username}` **добавлен**")
+                    await event.respond(f"Канал `@{username}` добавлен")
                 else:
-                    await event.respond("ℹ️ **Уже добавлен**")
+                    await event.respond("Уже добавлен")
             except:
-                await event.respond("❌ **Формат:** `/addchannel @username`")
+                await event.respond("Формат: `/addchannel @username`")
         
         @self.bot_client.on(events.NewMessage(pattern='/listchannels'))
         async def list_channels(event):
             if not await self.is_admin(event.sender_id): return
             if not self.channels:
-                await event.respond("📢 **Нет каналов**")
+                await event.respond("Нет каналов")
                 return
-            text = f"📢 **КАНАЛЫ ({len(self.channels)}):**
+            text = f"КАНАЛЫ ({len(self.channels)}):
 
 "
             for i, ch in enumerate(self.channels[:15], 1):
@@ -321,25 +244,22 @@ class UltimateCommentBot:
                 username = event.text.split(maxsplit=1)[1].replace('@', '')
                 self.channels = [ch for ch in self.channels if ch['username'] != username]
                 self.save_data()
-                await event.respond(f"🗑️ **Удален:** `@{username}`")
+                await event.respond(f"Удален: `@{username}`")
             except:
-                await event.respond("❌ **Формат:** `/delchannel @username`")
+                await event.respond("Формат: `/delchannel @username`")
         
         @self.bot_client.on(events.NewMessage(pattern='/listtemplates'))
         async def list_templates(event):
             if not await self.is_admin(event.sender_id): return
-            if not self.templates:
-                await event.respond("💬 **Нет шаблонов**")
-                return
-            text = f"💬 **Шаблоны ({len(self.templates)}):**
+            text = f"Шаблоны ({len(self.templates)}):
 
 "
             for i, template in enumerate(self.templates, 1):
                 text += f"{i}. `{template}`
 "
-            text += f"
-**/addtemplate текст** - ➕
-**/edittemplate 1 текст** - ✏️"
+            text += "
+**/addtemplate текст**
+**/edittemplate 1 текст**"
             await event.respond(text)
         
         @self.bot_client.on(events.NewMessage(pattern='/addtemplate'))
@@ -350,11 +270,11 @@ class UltimateCommentBot:
                 if new_template and new_template not in self.templates:
                     self.templates.append(new_template)
                     self.save_data()
-                    await event.respond(f"✅ **Добавлен:** `{new_template}`")
+                    await event.respond(f"Добавлен: `{new_template}`")
                 else:
-                    await event.respond("❌ **Уже есть или пусто!**")
+                    await event.respond("Уже есть или пусто!")
             except:
-                await event.respond("❌ **Формат:** `/addtemplate Крутой пост! 🔥`")
+                await event.respond("Формат: `/addtemplate Крутой пост!`")
         
         @self.bot_client.on(events.NewMessage(pattern='/edittemplate'))
         async def edit_template(event):
@@ -367,12 +287,11 @@ class UltimateCommentBot:
                     old = self.templates[num]
                     self.templates[num] = new_text
                     self.save_data()
-                    await event.respond(f"✏️ **#{num+1}:**
-`{old}` → `{new_text}`")
+                    await event.respond(f"#{num+1}: `{old}` → `{new_text}`")
                 else:
-                    await event.respond("❌ **Неверный номер!**")
+                    await event.respond("Неверный номер!")
             except:
-                await event.respond("❌ **Формат:** `/edittemplate 1 Новый текст!`")
+                await event.respond("Формат: `/edittemplate 1 Новый текст!`")
         
         @self.bot_client.on(events.NewMessage(pattern='/del-template'))
         async def del_template(event):
@@ -382,46 +301,42 @@ class UltimateCommentBot:
                 if 0 <= num < len(self.templates):
                     deleted = self.templates.pop(num)
                     self.save_data()
-                    await event.respond(f"🗑️ **Удален:** `{deleted}`")
+                    await event.respond(f"Удален: `{deleted}`")
                 else:
-                    await event.respond("❌ **Неверный номер!**")
+                    await event.respond("Неверный номер!")
             except:
-                await event.respond("❌ **Формат:** `/del-template 1`")
+                await event.respond("Формат: `/del-template 1`")
         
         @self.bot_client.on(events.NewMessage(pattern='/cleartemplates'))
         async def clear_templates(event):
             if not await self.is_admin(event.sender_id): return
             self.templates.clear()
             self.save_data()
-            await event.respond("🗑️ **Все шаблоны очищены!**")
+            await event.respond("Все шаблоны очищены!")
         
         @self.bot_client.on(events.NewMessage(pattern='/startmon'))
         async def start_monitor(event):
             if not await self.is_admin(event.sender_id): return
             if self.monitoring:
-                await event.respond("⏳ **Уже запущен!**")
+                await event.respond("Уже запущен!")
                 return
-            if not self.accounts_data or not any(data.get('active', False) for data in self.accounts_data.values()):
-                await event.respond("❌ **Сначала авторизуйте аккаунты! /auth**")
+            if not self.accounts_data:
+                await event.respond("Сначала авторизуйте аккаунты! /auth")
                 return
             self.monitoring = True
-            await event.respond(
-                f"🚀 **АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ!**
+            text = f"""АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ!
 
-"
-                f"📱 **Активных:** `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`
-"
-                f"📢 **Каналов:** `{len(self.channels)}`
-"
-                f"💬 **Шаблонов:** `{len(self.templates)}`"
-            )
+Активных: `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`
+Каналов: `{len(self.channels)}`
+Шаблонов: `{len(self.templates)}`"""
+            await event.respond(text)
             asyncio.create_task(self.pro_auto_comment())
         
         @self.bot_client.on(events.NewMessage(pattern='/stopmon'))
         async def stop_monitor(event):
             if not await self.is_admin(event.sender_id): return
             self.monitoring = False
-            await event.respond("⏹️ **Автокомментарии остановлены**")
+            await event.respond("Автокомментарии остановлены")
         
         @self.bot_client.on(events.NewMessage(pattern='/addbio'))
         async def add_bio(event):
@@ -431,17 +346,17 @@ class UltimateCommentBot:
                 if 't.me' in link and link not in self.bio_links:
                     self.bio_links.append(link)
                     self.save_data()
-                    await event.respond(f"🔗 **BIO добавлен:** `{link}`")
+                    await event.respond(f"BIO добавлен: `{link}`")
                 else:
-                    await event.respond("❌ **Новая ссылка t.me!**")
+                    await event.respond("Новая ссылка t.me!")
             except:
-                await event.respond("❌ **Формат:** `/addbio https://t.me/channel`")
+                await event.respond("Формат: `/addbio https://t.me/channel`")
         
         @self.bot_client.on(events.NewMessage(pattern='/setbio'))
         async def set_bio(event):
             if not await self.is_admin(event.sender_id): return
             if not self.bio_links:
-                await event.respond("🔗 **Сначала `/addbio`!**")
+                await event.respond("Сначала `/addbio`!")
                 return
             bio_text = " | ".join(self.bio_links[:4])
             updated = 0
@@ -449,22 +364,9 @@ class UltimateCommentBot:
                 if data.get('active') and data.get('session'):
                     if await self.set_account_bio(data, bio_text):
                         updated += 1
-            await event.respond(f"✅ **BIO обновлен:** `{bio_text}`
-📊 **{updated} аккаунтов**")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/setavatar'))
-        async def set_avatar(event):
-            if not await self.is_admin(event.sender_id): return
-            try:
-                phone = event.text.split(maxsplit=1)[1]
-                await event.respond(
-                    f"📸 **Смена аватарки:** `{phone}`
-
-"
-                    f"📤 **Загрузите фото в чат прямо сейчас!**"
-                )
-            except:
-                await event.respond("❌ **Формат:** `/setavatar +79123456789`")
+            text = f"BIO обновлен: `{bio_text}`
+{updated} аккаунтов"
+            await event.respond(text)
         
         @self.bot_client.on(events.NewMessage(pattern='/addadmin'))
         async def add_admin(event):
@@ -474,55 +376,33 @@ class UltimateCommentBot:
                 if admin_id not in self.admins:
                     self.admins.append(admin_id)
                     self.save_data()
-                    await event.respond(f"👑 **Админ добавлен:** `{admin_id}`")
+                    await event.respond(f"Админ добавлен: `{admin_id}`")
                 else:
-                    await event.respond("ℹ️ **Уже админ**")
+                    await event.respond("Уже админ")
             except:
-                await event.respond("❌ **Формат:** `/addadmin 123456789`")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/listadmins'))
-        async def list_admins(event):
-            if not await self.is_admin(event.sender_id): return
-            if not self.admins:
-                await event.respond("👥 **Нет админов** (только владелец)")
-                return
-            text = "👥 **Админы:**
-
-"
-            for admin_id in self.admins:
-                text += f"`{admin_id}`
-"
-            await event.respond(text)
+                await event.respond("Формат: `/addadmin 123456789`")
     
     async def pro_auto_comment(self):
-        """ПРОФЕССИОНАЛЬНЫЙ автокомментарий"""
         while self.monitoring:
             active_accounts = {phone: data for phone, data in self.accounts_data.items() 
                              if data.get('active') and data.get('session')}
-            
             if not active_accounts or not self.channels:
                 await asyncio.sleep(60)
                 continue
-            
             phone_data = random.choice(list(active_accounts.items()))
             phone, data = phone_data
             channel = random.choice(self.channels)
             comment = random.choice(self.templates)
-            
             try:
                 client = TelegramClient(StringSession(data['session']), API_ID, API_HASH)
                 await client.connect()
                 if await client.is_user_authorized():
                     await client.send_message(channel['username'], comment)
-                    logger.info(f"✅ [{data.get('name', phone)}] → @{channel['username']}: {comment}")
+                    logger.info(f"[{data.get('name', phone)}] -> @{channel['username']}")
                 await client.disconnect()
             except Exception as e:
                 logger.error(f"Ошибка [{phone}]: {e}")
-                if phone in self.accounts_data:
-                    self.accounts_data[phone]['active'] = False
-                    self.save_data()
-            
-            await asyncio.sleep(random.randint(120, 300))  # 2-5 мин
+            await asyncio.sleep(random.randint(120, 300))
     
     async def run(self):
         await self.start()
