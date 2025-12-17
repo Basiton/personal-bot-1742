@@ -3,7 +3,9 @@ import random
 import json
 import logging
 import os
-from telethon import TelegramClient, events
+import sqlite3
+from datetime import datetime
+from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest
@@ -15,6 +17,7 @@ BOT_TOKEN = '8233716877:AAFNvAaiHhzEg4HZkcLzMIGa05nIuRuJ8wE'
 BOT_OWNER_ID = 6730216440
 
 DB_NAME = 'bot_data.json'
+SQLITE_DB = 'bot_advanced.db'
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,8 +39,51 @@ class UltimateCommentBot:
             'blocked_accounts': [],
             'daily_comments': 0
         }
+        self.conn = None
+        self.init_database()
         self.load_stats()
         self.load_data()
+    
+    def init_database(self):
+        """Initialize SQLite database with required tables"""
+        try:
+            self.conn = sqlite3.connect(SQLITE_DB)
+            cursor = self.conn.cursor()
+            
+            # Create blocked_accounts table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blocked_accounts (
+                    phone TEXT PRIMARY KEY,
+                    block_date TEXT,
+                    reason TEXT
+                )
+            ''')
+            
+            # Create comment_history table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS comment_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phone TEXT,
+                    channel TEXT,
+                    comment TEXT,
+                    date TEXT
+                )
+            ''')
+            
+            # Create parsed_channels table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS parsed_channels (
+                    username TEXT PRIMARY KEY,
+                    theme TEXT,
+                    source TEXT DEFAULT 'parsed',
+                    added_date TEXT
+                )
+            ''')
+            
+            self.conn.commit()
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Database init error: {e}")
     
     def load_data(self):
         try:
@@ -160,6 +206,7 @@ class UltimateCommentBot:
 `/addchannel @username` - добавить
 `/listchannels` - список
 `/delchannel @username` - удалить
+`/searchchannels тема` - поиск по теме
 
 **💬 КОММЕНТАРИИ:**
 `/listtemplates` - шаблоны
@@ -172,10 +219,13 @@ class UltimateCommentBot:
 `/startmon` - ЗАПУСТИТЬ
 `/stopmon` - остановить
 
-**� СТАТИСТИКА:**
-`/stats` - показать статистику
+**📊 СТАТИСТИКА:**
+`/stats` - подробная статистика
+`/listparsed` - спарсенные каналы
+`/listbans` - заблокированные аккаунты
+`/history` - история комментариев
 
-**�🔗 BIO:**
+**🔗 BIO:**
 `/addbio t.me/link` - добавить
 `/setbio` - применить всем
 
@@ -246,6 +296,51 @@ class UltimateCommentBot:
                     await event.respond("Уже добавлен")
             except:
                 await event.respond("Формат: `/addchannel @username`")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/searchchannels (.+)'))
+        async def search_channels(event):
+            if not await self.is_admin(event.sender_id): return
+            try:
+                query = event.pattern_match.group(1).strip()
+                await event.respond(f"🔍 Ищу каналы по '{query}'...")
+                
+                try:
+                    result = await self.bot_client(functions.contacts.SearchRequest(q=query, limit=50))
+                    channels = []
+                    for chat in result.chats:
+                        if hasattr(chat, 'username') and chat.username:
+                            channels.append(f"@{chat.username}")
+                    
+                    if channels:
+                        msg = f"✅ Найдено {len(channels)} каналов по '{query}':\n\n"
+                        for i, ch in enumerate(channels[:10], 1):
+                            msg += f"{i}. {ch}\n"
+                        
+                        if len(channels) > 10:
+                            msg += f"\n... и еще {len(channels)-10}"
+                        
+                        await event.respond(msg)
+                        
+                        # Auto-add TOP-5 to parsed_channels
+                        if self.conn:
+                            cursor = self.conn.cursor()
+                            for ch in channels[:5]:
+                                try:
+                                    cursor.execute(
+                                        "INSERT OR IGNORE INTO parsed_channels (username, theme, source, added_date) VALUES (?, ?, ?, ?)",
+                                        (ch.replace('@', ''), query, 'parsed', datetime.now().isoformat())
+                                    )
+                                except Exception as e:
+                                    logger.error(f"DB insert error: {e}")
+                            self.conn.commit()
+                            await event.respond(f"✅ Добавлено {min(5, len(channels))} каналов в БД")
+                    else:
+                        await event.respond("❌ Каналы не найдены")
+                except Exception as e:
+                    logger.error(f"Search error: {e}")
+                    await event.respond(f"❌ Ошибка поиска: {str(e)[:100]}")
+            except:
+                await event.respond("Формат: `/searchchannels новости`")
         
         @self.bot_client.on(events.NewMessage(pattern='/listchannels'))
         async def list_channels(event):
@@ -381,21 +476,121 @@ class UltimateCommentBot:
         @self.bot_client.on(events.NewMessage(pattern='/stats'))
         async def show_stats(event):
             if not await self.is_admin(event.sender_id): return
+            
             text = f"""📊 **СТАТИСТИКА БОТА:**
 
 ✅ Всего комментариев: `{self.stats['total_comments']}`
 📈 Сегодня комментариев: `{self.stats['daily_comments']}`
-❌ Заблокировано аккаунтов: `{len(self.stats['blocked_accounts'])}`
-
-**Заблокированные:**
 """
-            if self.stats['blocked_accounts']:
-                for phone in self.stats['blocked_accounts'][-10:]:
-                    text += f"  • `{phone}`\n"
-            else:
-                text += "  • Нет\n"
+            
+            # Get blocked accounts from DB
+            if self.conn:
+                try:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM blocked_accounts")
+                    blocked_count = cursor.fetchone()[0]
+                    text += f"🚫 Заблокировано аккаунтов: `{blocked_count}`\n\n"
+                    
+                    # Show recent blocks
+                    cursor.execute(
+                        "SELECT phone, block_date, reason FROM blocked_accounts ORDER BY block_date DESC LIMIT 5"
+                    )
+                    blocks = cursor.fetchall()
+                    if blocks:
+                        text += "**Последние блокировки:**\n"
+                        for phone, date, reason in blocks:
+                            text += f"  🚫 `{phone}` - {reason} ({date[:10]})\n"
+                    
+                    text += "\n**Последние комментарии:**\n"
+                    cursor.execute(
+                        "SELECT phone, channel, comment, date FROM comment_history ORDER BY id DESC LIMIT 5"
+                    )
+                    comments = cursor.fetchall()
+                    if comments:
+                        for phone, channel, comment, date in comments:
+                            short_comment = comment[:30] if len(comment) > 30 else comment
+                            text += f"  ✓ `@{channel}` | {short_comment}... ({date[:10]})\n"
+                    else:
+                        text += "  • Нет\n"
+                except Exception as e:
+                    logger.error(f"Stats DB error: {e}")
             
             await event.respond(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/listparsed'))
+        async def list_parsed(event):
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.conn:
+                await event.respond("❌ БД недоступна")
+                return
+            
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT username, theme FROM parsed_channels ORDER BY added_date DESC LIMIT 20")
+                parsed = cursor.fetchall()
+                
+                if parsed:
+                    text = f"📋 **СПАРСЕННЫЕ КАНАЛЫ** ({len(parsed)}):\n\n"
+                    for username, theme in parsed:
+                        text += f"  @{username} ({theme})\n"
+                    await event.respond(text)
+                else:
+                    await event.respond("❌ Нет спарсенных каналов. Используйте /searchchannels")
+            except Exception as e:
+                logger.error(f"Listparsed error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:50]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/listbans'))
+        async def list_bans(event):
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.conn:
+                await event.respond("❌ БД недоступна")
+                return
+            
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT phone, block_date, reason FROM blocked_accounts ORDER BY block_date DESC LIMIT 20")
+                bans = cursor.fetchall()
+                
+                if bans:
+                    text = f"🚫 **ЗАБЛОКИРОВАННЫЕ АККАУНТЫ** ({len(bans)}):\n\n"
+                    for phone, date, reason in bans:
+                        text += f"  `{phone}` | {reason}\n     {date[:19]}\n\n"
+                    await event.respond(text)
+                else:
+                    await event.respond("✅ Нет заблокированных аккаунтов")
+            except Exception as e:
+                logger.error(f"Listbans error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:50]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/history'))
+        async def show_history(event):
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.conn:
+                await event.respond("❌ БД недоступна")
+                return
+            
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT phone, channel, comment, date FROM comment_history ORDER BY id DESC LIMIT 20"
+                )
+                history = cursor.fetchall()
+                
+                if history:
+                    text = f"📝 **ИСТОРИЯ КОММЕНТАРИЕВ** ({len(history)}):\n\n"
+                    for phone, channel, comment, date in history:
+                        short_comment = comment[:40] if len(comment) > 40 else comment
+                        text += f"  `{phone[:12]}...` → @{channel}\n     \"{short_comment}\"\n     {date[:19]}\n\n"
+                    await event.respond(text)
+                else:
+                    await event.respond("❌ История пуста")
+            except Exception as e:
+                logger.error(f"History error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:50]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/addadmin'))
         async def add_admin(event):
@@ -429,10 +624,36 @@ class UltimateCommentBot:
                     await client.send_message(channel['username'], comment)
                     logger.info(f"[{data.get('name', phone)}] -> @{channel['username']}")
                     await self.add_comment_stat(phone, True)
+                    
+                    # Log successful comment to DB
+                    if self.conn:
+                        try:
+                            cursor = self.conn.cursor()
+                            cursor.execute(
+                                "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
+                                (phone, channel['username'], comment, datetime.now().isoformat())
+                            )
+                            self.conn.commit()
+                        except Exception as db_err:
+                            logger.error(f"DB log error: {db_err}")
             except Exception as e:
                 logger.error(f"Ошибка [{phone}]: {e}")
                 try:
                     await self.add_comment_stat(phone, False)
+                    
+                    # Log block to DB
+                    if self.conn and "FloodWait" in str(e) or "banned" in str(e).lower():
+                        try:
+                            cursor = self.conn.cursor()
+                            reason = "FloodWait" if "FloodWait" in str(e) else "Account Ban"
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
+                                (phone, datetime.now().isoformat(), reason)
+                            )
+                            self.conn.commit()
+                            logger.info(f"Blocked account logged: {phone}")
+                        except Exception as db_err:
+                            logger.error(f"DB block log error: {db_err}")
                 except Exception:
                     pass
             finally:
