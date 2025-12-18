@@ -816,18 +816,12 @@ class UltimateCommentBot:
     
     async def pro_auto_comment(self):
         while self.monitoring:
-            # Check if 4 hours have elapsed
-            if self.monitoring_start_time:
-                elapsed = (datetime.now() - self.monitoring_start_time).total_seconds()
-                if elapsed >= 14400:  # 4 hours = 14400 seconds
-                    self.monitoring = False
-                    logger.info("Monitoring stopped: 4 hours elapsed")
-                    break
+            # No time limit - bot runs indefinitely
             
             active_accounts = {phone: data for phone, data in self.accounts_data.items()
                              if data.get('active') and data.get('session')}
             if not active_accounts or not self.channels:
-                await asyncio.sleep(5)
+                await asyncio.sleep(30)
                 continue
             phone, data = random.choice(list(active_accounts.items()))
             channel = random.choice(self.channels)
