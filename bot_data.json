@@ -1,6 +1,108 @@
 {
-  "accounts": {},
-  "channels": [],
+  "accounts": {
+    "79939230850": {
+      "session": "1ApWapzMBu7v87qauRSQlaePK37NVeWE8QOcaIREaQiPc8TPECMquzkCKTkQ31ISkF3M4fkPc1I4x0EoFohjeMh6a_kH6XrtlYfOXjKS35oNrmMr3pOnyqG-0k18ydTWmWGXMjJWTYh2h_ukzDXkh3YW0jlqebHWLBTi8Wm3aZb-Z95aGgh1UwSo76nA1vIAdxzV-l53rNxvv7ve7T_PZA_Hg_tw-bC1U-bg-DCqIXeP9N3IJiaXMUkvYgtTXy-T6iPoTsEJzirh9nm_d64ypLvNcL3zQn2knW_t_z5ncyQXcWnY4zeWs--lYKQD9JQpCuRCqWw1_-cxS1sico7Up-SIbk-BoHFU=",
+      "active": true,
+      "name": "Vika",
+      "username": "TetechkaVika",
+      "phone": "79939230850",
+      "proxy": null
+    },
+    "+79384194325": {
+      "session": "1ApWapzMBuw9LbxEGL4qXCvx_E3reLJttaJBNxxfW4z-204T58TN_6hdv1_JgDffDqmDyen2obibe2WOSKWiaXuuA7pgyRju59yWr_F9HOHUN21SGWQQqKrqw_jmtTWBMsAepW0pmYze3jGlAH0VeB_CFCqQ8DIZt5IStBggTApkAIg6IYktgHD0Uou7pfY2JzzFhm_m6p9w5uNM3rSGpCzEQ3_SBRHx8g6waLbSEHgi6QtXtaC7Z5otXAoX6gMJJmOJ9X7Ytzm0UcPSH8NdklAePU18ZuffN7GKbBUAt8JBKKx6lJ6erfui0OhmnIcPoTqe_0n0eWTv2l9Mg7OY4d1kBHpFdWaY=",
+      "active": true,
+      "name": "Nadya",
+      "username": "nadyasaxarok",
+      "phone": "+79384194325",
+      "proxy": null
+    }
+  },
+  "channels": [
+    {
+      "username": "topor"
+    },
+    {
+      "username": "ru2ch"
+    },
+    {
+      "username": "toporlive"
+    },
+    {
+      "username": "moscowmap"
+    },
+    {
+      "username": "NFT_Giveaway_TG"
+    },
+    {
+      "username": "rt_russian"
+    },
+    {
+      "username": "rbc_news"
+    },
+    {
+      "username": "kommersant"
+    },
+    {
+      "username": "rian_ru"
+    },
+    {
+      "username": "tass_agency"
+    },
+    {
+      "username": "shot"
+    },
+    {
+      "username": "mash"
+    },
+    {
+      "username": "varlamov_news"
+    },
+    {
+      "username": "truekpru"
+    },
+    {
+      "username": "ru2chvg"
+    },
+    {
+      "username": "abuwtf"
+    },
+    {
+      "username": "shot_shot"
+    },
+    {
+      "username": "pravdadirty"
+    },
+    {
+      "username": "bomber_fighter"
+    },
+    {
+      "username": "Ateobreaking"
+    },
+    {
+      "username": "moscow"
+    },
+    {
+      "username": "nexta_live"
+    },
+    {
+      "username": "kosti"
+    },
+    {
+      "username": "petrovtel"
+    },
+    {
+      "username": "kazancity"
+    },
+    {
+      "username": "e1_news"
+    },
+    {
+      "username": "region116_kazan"
+    },
+    {
+      "username": "nmshhub"
+    }
+  ],
   "templates": [
     "Отличный пост! 👍",
     "Интересно! Спасибо!",
@@ -11,8 +113,29 @@
     "Спасибо за контент! 🙌",
     "Супер! 👏",
     "Круто! 💎",
-    "Лучший канал! 👑"
+    "Лучший канал! 👑",
+    "Супер👍",
+    "Класс",
+    "Продолжение следует?",
+    "Интересно, что дальше будет.",
+    "Интересно узнать мнение...",
+    "А что думаете об этом?",
+    "Как вам такое? 🧐",
+    "Отмечу себе ⭐",
+    "Полезная инфа! 📚",
+    "Интересная информация 📊",
+    "Всё логично ⚙️",
+    "Спасибо за детали 📝",
+    "Ясно и кратко ✂️",
+    "Нормальный вариант ⭕.",
+    "Без лишнего ➖.",
+    "Плюсы и минусы? ⚖️",
+    "Ничего лишнего ➖",
+    "Без сюрпризов 😌",
+    "Ожидаемо 📊"
   ],
   "bio_links": [],
-  "admins": []
+  "admins": [
+    5912533270
+  ]
 }

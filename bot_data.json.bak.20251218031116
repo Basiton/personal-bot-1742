@@ -1,0 +1,58 @@
+{
+  "accounts": {
+    "79939230850": {
+      "session": "1ApWapzMBu7v87qauRSQlaePK37NVeWE8QOcaIREaQiPc8TPECMquzkCKTkQ31ISkF3M4fkPc1I4x0EoFohjeMh6a_kH6XrtlYfOXjKS35oNrmMr3pOnyqG-0k18ydTWmWGXMjJWTYh2h_ukzDXkh3YW0jlqebHWLBTi8Wm3aZb-Z95aGgh1UwSo76nA1vIAdxzV-l53rNxvv7ve7T_PZA_Hg_tw-bC1U-bg-DCqIXeP9N3IJiaXMUkvYgtTXy-T6iPoTsEJzirh9nm_d64ypLvNcL3zQn2knW_t_z5ncyQXcWnY4zeWs--lYKQD9JQpCuRCqWw1_-cxS1sico7Up-SIbk-BoHFU=",
+      "active": true,
+      "name": "Vika",
+      "username": "TetechkaVika",
+      "phone": "79939230850",
+      "proxy": null
+    }
+  },
+  "channels": [
+    {
+      "username": "topor"
+    },
+    {
+      "username": "ru2ch"
+    },
+    {
+      "username": "https://t.me/toporlive"
+    },
+    {
+      "username": "https://t.me/novosti_efir"
+    },
+    {
+      "username": "novosti_efir"
+    },
+    {
+      "username": "moscowmap"
+    },
+    {
+      "username": "https://t.me/ru2ch"
+    },
+    {
+      "username": "https://t.me/NFT_Giveaway_TG"
+    },
+    {
+      "username": "NFT_Giveaway_TG"
+    }
+  ],
+  "templates": [
+    "Отличный пост! 👍",
+    "Интересно! Спасибо!",
+    "Супер контент! 🔥",
+    "Класс! 👌",
+    "Огонь! 🔥🔥",
+    "Согласен! 💯",
+    "Спасибо за контент! 🙌",
+    "Супер! 👏",
+    "Круто! 💎",
+    "Лучший канал! 👑",
+    "Супер👍"
+  ],
+  "bio_links": [],
+  "admins": [
+    5912533270
+  ]
+}
