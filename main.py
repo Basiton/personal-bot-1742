@@ -4,12 +4,15 @@ import json
 import logging
 import os
 import sqlite3
+import re
 from datetime import datetime
+import time
 from telethon import TelegramClient, events, functions
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest
 from telethon.errors import SessionPasswordNeededError
+from telethon.errors.rpcerrorlist import AuthKeyDuplicatedError
 
 API_ID = 36053254
 API_HASH = '4c63aee24cbc1be5e593329370712e7f'
@@ -91,6 +94,23 @@ class UltimateCommentBot:
                 data = json.load(f)
                 self.accounts_data = data.get('accounts', {})
                 self.channels = data.get('channels', [])
+                # sanitize channels: accept strings or dicts, remove t.me links and leading @
+                cleaned = []
+                for ch in self.channels:
+                    try:
+                        if isinstance(ch, dict):
+                            username = ch.get('username') or ch.get('name') or ''
+                        else:
+                            username = str(ch)
+                        username = username.strip()
+                        # remove full t.me URLs
+                        username = re.sub(r'^https?://(www\.)?t\.me/', '', username)
+                        username = username.lstrip('@')
+                        if username:
+                            cleaned.append({'username': username})
+                    except Exception:
+                        continue
+                self.channels = cleaned
                 self.templates = data.get('templates', self.templates)
                 self.bio_links = data.get('bio_links', [])
                 self.admins = data.get('admins', [])
@@ -175,7 +195,28 @@ class UltimateCommentBot:
         return False
     
     async def start(self):
-        await self.bot_client.start(bot_token=BOT_TOKEN)
+        try:
+            await self.bot_client.start(bot_token=BOT_TOKEN)
+        except AuthKeyDuplicatedError as e:
+            logger.warning(f"AuthKeyDuplicatedError: {e} — removing local session files and retrying")
+            # attempt to remove obvious local session files
+            for fname in ('bot_session.session', 'bot_session.session-journal'):
+                try:
+                    if os.path.exists(fname):
+                        os.remove(fname)
+                        logger.info(f"Removed session file: {fname}")
+                except Exception:
+                    pass
+            # create a new uniquely named session to avoid reusing an auth key
+            new_session_name = f"bot_session_{int(time.time())}"
+            try:
+                logger.info(f"Creating new session: {new_session_name}")
+                self.bot_client = TelegramClient(new_session_name, API_ID, API_HASH)
+                await self.bot_client.start(bot_token=BOT_TOKEN)
+            except Exception as e2:
+                logger.error(f"Failed to start bot after creating new session: {e2}")
+                raise
+
         self.setup_handlers()
         logger.info("@commentcom_bot ULTIMATE ЗАПУЩЕН!")
     
@@ -617,32 +658,95 @@ class UltimateCommentBot:
             phone, data = phone_data
             channel = random.choice(self.channels)
             comment = random.choice(self.templates)
-            client = TelegramClient(StringSession(data['session']), API_ID, API_HASH)
-            await client.connect()
+
+            # Normalize channel format (dict or string)
             try:
-                if await client.is_user_authorized():
-                    await client.send_message(channel['username'], comment)
-                    logger.info(f"[{data.get('name', phone)}] -> @{channel['username']}")
+                    if isinstance(channel, dict):
+                        username = channel.get('username') or channel.get('name')
+                    else:
+                        username = channel
+                    if not username:
+                        logger.error(f"Invalid channel entry: {channel}")
+                        await asyncio.sleep(5)
+                        continue
+                    username = str(username).strip()
+                    username = re.sub(r'^https?://(www\.)?t\.me/', '', username)
+                    username = username.lstrip('@')
+
+                    client = TelegramClient(StringSession(data['session']), API_ID, API_HASH)
+                    await client.connect()
+                    try:
+                        if not await client.is_user_authorized():
+                            logger.warning(f"Account not authorized: {phone}")
+                            await client.disconnect()
+                            await asyncio.sleep(5)
+                            continue
+
+                        # Resolve entity first (safer than passing a string URL)
+                        try:
+                            entity = await client.get_entity(username)
+                        except Exception:
+                            # try with @username
+                            try:
+                                entity = await client.get_entity('@' + username)
+                            except Exception as e_res:
+                                logger.error(f"Cannot resolve entity for {username}: {e_res}")
+                                raise
+
+                        # Fetch latest message id to reply to (comment) if possible
+                        try:
+                            msgs = await client.get_messages(entity, limit=1)
+                            reply_id = msgs[0].id if msgs and len(msgs) > 0 else None
+                        except Exception:
+                            reply_id = None
+
+                        try:
+                            if reply_id:
+                                await client.send_message(entity, comment, reply_to=reply_id)
+                            else:
+                                await client.send_message(entity, comment)
+                            logger.info(f"[{data.get('name', phone)}] -> @{username}: {comment}")
+                        except Exception as send_exc:
+                            err_text = str(send_exc)
+                            logger.error(f"Send error for @{username}: {err_text}")
+                            if "You can't write in this chat" in err_text:
+                                try:
+                                    # remove channel from in-memory list and save
+                                    self.channels = [ch for ch in self.channels if (ch.get('username') if isinstance(ch, dict) else str(ch).lstrip('@')) != username]
+                                    self.save_data()
+                                    logger.info(f"Removed unwritable channel: {username}")
+                                except Exception as rem_e:
+                                    logger.error(f"Failed removing unwritable channel {username}: {rem_e}")
+                            raise
+                    finally:
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
                     await self.add_comment_stat(phone, True)
-                    
+
                     # Log successful comment to DB
                     if self.conn:
                         try:
                             cursor = self.conn.cursor()
                             cursor.execute(
                                 "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
-                                (phone, channel['username'], comment, datetime.now().isoformat())
+                                (phone, username, comment, datetime.now().isoformat())
                             )
                             self.conn.commit()
                         except Exception as db_err:
                             logger.error(f"DB log error: {db_err}")
+                finally:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
             except Exception as e:
-                logger.error(f"Ошибка [{phone}]: {e}")
+                logger.error(f"Ошибка при комментировании [{phone}] -> {channel}: {e}")
                 try:
                     await self.add_comment_stat(phone, False)
-                    
-                    # Log block to DB
-                    if self.conn and "FloodWait" in str(e) or "banned" in str(e).lower():
+                    # Log block to DB (check phrases properly)
+                    if self.conn and ("FloodWait" in str(e) or "banned" in str(e).lower()):
                         try:
                             cursor = self.conn.cursor()
                             reason = "FloodWait" if "FloodWait" in str(e) else "Account Ban"
@@ -654,11 +758,6 @@ class UltimateCommentBot:
                             logger.info(f"Blocked account logged: {phone}")
                         except Exception as db_err:
                             logger.error(f"DB block log error: {db_err}")
-                except Exception:
-                    pass
-            finally:
-                try:
-                    await client.disconnect()
                 except Exception:
                     pass
             await asyncio.sleep(random.randint(120, 300))
