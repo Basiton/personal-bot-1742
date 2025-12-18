@@ -34,11 +34,15 @@ class UltimateCommentBot:
         self.bio_links = []
         self.admins = []
         self.monitoring = False
+        self.monitoring_start_time = None  # Track when monitoring started
         self.stats = {
             'total_comments': 0,
             'blocked_accounts': [],
-            'daily_comments': 0
+            'daily_comments': 0,
+            'blocked_channels': []
         }
+        # Track failed attempts: {channel_username: {phone1, phone2, ...}}
+        self.channel_failed_attempts = {}
         self.conn = None
         self.init_database()
         self.load_stats()
@@ -77,6 +81,15 @@ class UltimateCommentBot:
                     theme TEXT,
                     source TEXT DEFAULT 'parsed',
                     added_date TEXT
+                )
+            ''')
+            
+            # Create blocked_channels table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blocked_channels (
+                    username TEXT PRIMARY KEY,
+                    block_date TEXT,
+                    reason TEXT
                 )
             ''')
             
@@ -130,6 +143,59 @@ class UltimateCommentBot:
         if len(self.stats['blocked_accounts']) > 50:
             self.stats['blocked_accounts'] = self.stats['blocked_accounts'][-20:]
         self.save_stats()
+    
+    async def mark_channel_failed_for_account(self, username, phone, reason):
+        """Mark that this account failed to comment on this channel"""
+        try:
+            if username not in self.channel_failed_attempts:
+                self.channel_failed_attempts[username] = set()
+            
+            self.channel_failed_attempts[username].add(phone)
+            
+            # Count active accounts
+            active_accounts = [p for p, data in self.accounts_data.items() if data.get('active')]
+            failed_count = len(self.channel_failed_attempts[username])
+            
+            logger.info(f"Channel {username}: {failed_count}/{len(active_accounts)} accounts failed")
+            
+            # Block channel only if ALL active accounts failed
+            if failed_count >= len(active_accounts) and len(active_accounts) > 0:
+                await self.block_channel(username, reason)
+        except Exception as e:
+            logger.error(f"Error marking failed attempt for {username}: {e}")
+    
+    async def block_channel(self, username, reason):
+        """Block channel that doesn't allow comments from ALL accounts and remove from active list"""
+        try:
+            # Add to stats if not already there
+            if username not in self.stats.get('blocked_channels', []):
+                if 'blocked_channels' not in self.stats:
+                    self.stats['blocked_channels'] = []
+                self.stats['blocked_channels'].append(username)
+                self.save_stats()
+            
+            # Add to database
+            if self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "INSERT OR IGNORE INTO blocked_channels (username, block_date, reason) VALUES (?, ?, ?)",
+                    (username, datetime.now().isoformat(), reason)
+                )
+                self.conn.commit()
+            
+            # Remove from active channels list
+            self.channels = [
+                ch for ch in self.channels
+                if (ch.get('username') if isinstance(ch, dict) else str(ch).lstrip('@')) != username
+            ]
+            self.save_data()
+            logger.info(f"Blocked and removed channel: {username} - Reason: {reason} (all accounts failed)")
+            
+            # Clean up failed attempts tracking
+            if username in self.channel_failed_attempts:
+                del self.channel_failed_attempts[username]
+        except Exception as e:
+            logger.error(f"Error blocking channel {username}: {e}")
     
     async def is_admin(self, user_id):
         return user_id == BOT_OWNER_ID or user_id in self.admins
@@ -223,6 +289,7 @@ class UltimateCommentBot:
 `/stats` - подробная статистика
 `/listparsed` - спарсенные каналы
 `/listbans` - заблокированные аккаунты
+`/listblockedchannels` - каналы без комментариев
 `/history` - история комментариев
 
 **🔗 BIO:**
@@ -261,13 +328,26 @@ class UltimateCommentBot:
             if not self.accounts_data:
                 await event.respond("Нет авторизованных аккаунтов")
                 return
-            text = f"АККАУНТЫ ({len(self.accounts_data)})\n\n"
-            for i, (phone, data) in enumerate(list(self.accounts_data.items())[:10], 1):
-                status = "✅" if data.get('active', False) else "❌"
-                name = data.get('name', 'Не авторизован')
-                username = data.get('username', 'нет')
-                text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
-            await event.respond(text)
+            
+            # Show all accounts, split into multiple messages if needed
+            total = len(self.accounts_data)
+            accounts_per_msg = 20
+            accounts_list = list(self.accounts_data.items())
+            
+            for batch_num in range(0, total, accounts_per_msg):
+                batch_accounts = accounts_list[batch_num:batch_num + accounts_per_msg]
+                text = f"АККАУНТЫ ({total}) - Часть {batch_num//accounts_per_msg + 1}:\n\n"
+                
+                for i, (phone, data) in enumerate(batch_accounts, batch_num + 1):
+                    status = "✅" if data.get('active', False) else "❌"
+                    name = data.get('name', 'Не авторизован')
+                    username = data.get('username', 'нет')
+                    text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
+                
+                await event.respond(text)
+                # Small delay between messages to avoid flood
+                if batch_num + accounts_per_msg < total:
+                    await asyncio.sleep(0.5)
         
         @self.bot_client.on(events.NewMessage(pattern='/delaccount'))
         async def del_account(event):
@@ -348,10 +428,22 @@ class UltimateCommentBot:
             if not self.channels:
                 await event.respond("Нет каналов")
                 return
-            text = f"КАНАЛЫ ({len(self.channels)})\n\n"
-            for i, ch in enumerate(self.channels[:15], 1):
-                text += f"{i}. `@{ch['username']}`\n"
-            await event.respond(text)
+            
+            # Show all channels, split into multiple messages if needed
+            total = len(self.channels)
+            channels_per_msg = 50
+            
+            for batch_num in range(0, total, channels_per_msg):
+                batch_channels = self.channels[batch_num:batch_num + channels_per_msg]
+                text = f"КАНАЛЫ ({total}) - Часть {batch_num//channels_per_msg + 1}:\n\n"
+                
+                for i, ch in enumerate(batch_channels, batch_num + 1):
+                    text += f"{i}. `@{ch['username']}`\n"
+                
+                await event.respond(text)
+                # Small delay between messages to avoid flood
+                if batch_num + channels_per_msg < total:
+                    await asyncio.sleep(0.5)
         
         @self.bot_client.on(events.NewMessage(pattern='/delchannel'))
         async def del_channel(event):
@@ -435,9 +527,12 @@ class UltimateCommentBot:
                 await event.respond("Сначала авторизуйте аккаунты! /auth")
                 return
             self.monitoring = True
-            text = f"""АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ!\n\nАктивных: `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`\nКаналов: `{len(self.channels)}`\nШаблонов: `{len(self.templates)}`"""
+            self.monitoring_start_time = datetime.now()
+            text = f"""АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ НА 4 ЧАСА!\n\nАктивных: `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`\nКаналов: `{len(self.channels)}`\nШаблонов: `{len(self.templates)}`\n\n⏱ Остановка через: `4 часа`"""
             await event.respond(text)
             asyncio.create_task(self.pro_auto_comment())
+            # Schedule auto-stop after 4 hours
+            asyncio.create_task(self.auto_stop_after_4_hours(event.chat_id))
         
         @self.bot_client.on(events.NewMessage(pattern='/stopmon'))
         async def stop_monitor(event):
@@ -489,7 +584,11 @@ class UltimateCommentBot:
                     cursor = self.conn.cursor()
                     cursor.execute("SELECT COUNT(*) FROM blocked_accounts")
                     blocked_count = cursor.fetchone()[0]
-                    text += f"🚫 Заблокировано аккаунтов: `{blocked_count}`\n\n"
+                    text += f"🚫 Заблокировано аккаунтов: `{blocked_count}`\n"
+                    
+                    cursor.execute("SELECT COUNT(*) FROM blocked_channels")
+                    blocked_channels_count = cursor.fetchone()[0]
+                    text += f"🔇 Каналов без комментариев: `{blocked_channels_count}`\n\n"
                     
                     # Show recent blocks
                     cursor.execute(
@@ -527,16 +626,33 @@ class UltimateCommentBot:
             
             try:
                 cursor = self.conn.cursor()
-                cursor.execute("SELECT username, theme FROM parsed_channels ORDER BY added_date DESC LIMIT 20")
+                
+                # Get total count
+                cursor.execute("SELECT COUNT(*) FROM parsed_channels")
+                total = cursor.fetchone()[0]
+                
+                if total == 0:
+                    await event.respond("❌ Нет спарсенных каналов. Используйте /searchchannels")
+                    return
+                
+                # Get all parsed channels
+                cursor.execute("SELECT username, theme FROM parsed_channels ORDER BY added_date DESC")
                 parsed = cursor.fetchall()
                 
-                if parsed:
-                    text = f"📋 **СПАРСЕННЫЕ КАНАЛЫ** ({len(parsed)}):\n\n"
-                    for username, theme in parsed:
-                        text += f"  @{username} ({theme})\n"
+                # Show all channels, split into multiple messages if needed
+                channels_per_msg = 50
+                
+                for batch_num in range(0, total, channels_per_msg):
+                    batch_channels = parsed[batch_num:batch_num + channels_per_msg]
+                    text = f"📋 **СПАРСЕННЫЕ КАНАЛЫ** ({total}) - Часть {batch_num//channels_per_msg + 1}:\n\n"
+                    
+                    for i, (username, theme) in enumerate(batch_channels, batch_num + 1):
+                        text += f"{i}. @{username} ({theme})\n"
+                    
                     await event.respond(text)
-                else:
-                    await event.respond("❌ Нет спарсенных каналов. Используйте /searchchannels")
+                    # Small delay between messages to avoid flood
+                    if batch_num + channels_per_msg < total:
+                        await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Listparsed error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
@@ -551,16 +667,33 @@ class UltimateCommentBot:
             
             try:
                 cursor = self.conn.cursor()
-                cursor.execute("SELECT phone, block_date, reason FROM blocked_accounts ORDER BY block_date DESC LIMIT 20")
+                
+                # Get total count
+                cursor.execute("SELECT COUNT(*) FROM blocked_accounts")
+                total = cursor.fetchone()[0]
+                
+                if total == 0:
+                    await event.respond("✅ Нет заблокированных аккаунтов")
+                    return
+                
+                # Get all blocked accounts
+                cursor.execute("SELECT phone, block_date, reason FROM blocked_accounts ORDER BY block_date DESC")
                 bans = cursor.fetchall()
                 
-                if bans:
-                    text = f"🚫 **ЗАБЛОКИРОВАННЫЕ АККАУНТЫ** ({len(bans)}):\n\n"
-                    for phone, date, reason in bans:
-                        text += f"  `{phone}` | {reason}\n     {date[:19]}\n\n"
+                # Show all bans, split into multiple messages if needed
+                bans_per_msg = 30
+                
+                for batch_num in range(0, total, bans_per_msg):
+                    batch_bans = bans[batch_num:batch_num + bans_per_msg]
+                    text = f"🚫 **ЗАБЛОКИРОВАННЫЕ АККАУНТЫ** ({total}) - Часть {batch_num//bans_per_msg + 1}:\n\n"
+                    
+                    for i, (phone, date, reason) in enumerate(batch_bans, batch_num + 1):
+                        text += f"{i}. `{phone}` | {reason}\n     {date[:19]}\n\n"
+                    
                     await event.respond(text)
-                else:
-                    await event.respond("✅ Нет заблокированных аккаунтов")
+                    # Small delay between messages to avoid flood
+                    if batch_num + bans_per_msg < total:
+                        await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Listbans error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
@@ -575,21 +708,79 @@ class UltimateCommentBot:
             
             try:
                 cursor = self.conn.cursor()
+                
+                # Get total count
+                cursor.execute("SELECT COUNT(*) FROM comment_history")
+                total = cursor.fetchone()[0]
+                
+                if total == 0:
+                    await event.respond("❌ История пуста")
+                    return
+                
+                # Get all history
                 cursor.execute(
-                    "SELECT phone, channel, comment, date FROM comment_history ORDER BY id DESC LIMIT 20"
+                    "SELECT phone, channel, comment, date FROM comment_history ORDER BY id DESC"
                 )
                 history = cursor.fetchall()
                 
-                if history:
-                    text = f"📝 **ИСТОРИЯ КОММЕНТАРИЕВ** ({len(history)}):\n\n"
-                    for phone, channel, comment, date in history:
+                # Show all history, split into multiple messages if needed
+                history_per_msg = 30
+                
+                for batch_num in range(0, total, history_per_msg):
+                    batch_history = history[batch_num:batch_num + history_per_msg]
+                    text = f"📝 **ИСТОРИЯ КОММЕНТАРИЕВ** ({total}) - Часть {batch_num//history_per_msg + 1}:\n\n"
+                    
+                    for i, (phone, channel, comment, date) in enumerate(batch_history, batch_num + 1):
                         short_comment = comment[:40] if len(comment) > 40 else comment
-                        text += f"  `{phone[:12]}...` → @{channel}\n     \"{short_comment}\"\n     {date[:19]}\n\n"
+                        text += f"{i}. `{phone[:12]}...` → @{channel}\n     \"{short_comment}\"\n     {date[:19]}\n\n"
+                    
                     await event.respond(text)
-                else:
-                    await event.respond("❌ История пуста")
+                    # Small delay between messages to avoid flood
+                    if batch_num + history_per_msg < total:
+                        await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"History error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:50]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/listblockedchannels'))
+        async def list_blocked_channels(event):
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.conn:
+                await event.respond("❌ БД недоступна")
+                return
+            
+            try:
+                cursor = self.conn.cursor()
+                
+                # Get total count
+                cursor.execute("SELECT COUNT(*) FROM blocked_channels")
+                total = cursor.fetchone()[0]
+                
+                if total == 0:
+                    await event.respond("✅ Нет заблокированных каналов")
+                    return
+                
+                # Get all blocked channels
+                cursor.execute("SELECT username, block_date, reason FROM blocked_channels ORDER BY block_date DESC")
+                blocked = cursor.fetchall()
+                
+                # Show all blocked channels, split into multiple messages if needed
+                channels_per_msg = 40
+                
+                for batch_num in range(0, total, channels_per_msg):
+                    batch_blocked = blocked[batch_num:batch_num + channels_per_msg]
+                    text = f"🔇 **КАНАЛЫ БЕЗ КОММЕНТАРИЕВ** ({total}) - Часть {batch_num//channels_per_msg + 1}:\n\n"
+                    
+                    for i, (username, date, reason) in enumerate(batch_blocked, batch_num + 1):
+                        text += f"{i}. @{username}\n     {reason}\n     {date[:19]}\n\n"
+                    
+                    await event.respond(text)
+                    # Small delay between messages to avoid flood
+                    if batch_num + channels_per_msg < total:
+                        await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"List blocked channels error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/addadmin'))
@@ -606,12 +797,37 @@ class UltimateCommentBot:
             except:
                 await event.respond("Формат: `/addadmin 123456789`")
     
+    async def auto_stop_after_4_hours(self, chat_id):
+        """Automatically stop monitoring after 4 hours"""
+        try:
+            # Disabled for maximum runtime - bot runs indefinitely
+            return  # Skip auto-stop
+            
+            if self.monitoring:  # Check if still running
+                self.monitoring = False
+                elapsed_time = datetime.now() - self.monitoring_start_time if self.monitoring_start_time else None
+                
+                msg = f"""⏱ АВТОКОММЕНТАРИИ ОСТАНОВЛЕНЫ\n\n✅ Работа завершена автоматически после 4 часов\n\n📊 Статистика сессии:\n• Комментариев сегодня: `{self.stats.get('daily_comments', 0)}`\n• Всего комментариев: `{self.stats.get('total_comments', 0)}`"""
+                
+                await self.bot_client.send_message(chat_id, msg)
+                logger.info("Monitoring auto-stopped after 4 hours")
+        except Exception as e:
+            logger.error(f"Auto-stop error: {e}")
+    
     async def pro_auto_comment(self):
         while self.monitoring:
-            active_accounts = {phone: data for phone, data in self.accounts_data.items() 
+            # Check if 4 hours have elapsed
+            if self.monitoring_start_time:
+                elapsed = (datetime.now() - self.monitoring_start_time).total_seconds()
+                if elapsed >= 14400:  # 4 hours = 14400 seconds
+                    self.monitoring = False
+                    logger.info("Monitoring stopped: 4 hours elapsed")
+                    break
+            
+            active_accounts = {phone: data for phone, data in self.accounts_data.items()
                              if data.get('active') and data.get('session')}
             if not active_accounts or not self.channels:
-                await asyncio.sleep(60)
+                await asyncio.sleep(5)
                 continue
             phone, data = random.choice(list(active_accounts.items()))
             channel = random.choice(self.channels)
@@ -656,7 +872,8 @@ class UltimateCommentBot:
                     linked_chat_id = None
 
                 if not linked_chat_id:
-                    logger.error(f"No linked discussion for {username}, skipping")
+                    logger.error(f"No linked discussion for {username}")
+                    await self.mark_channel_failed_for_account(username, phone, "No linked discussion")
                     await asyncio.sleep(1)
                     continue
 
@@ -699,17 +916,12 @@ class UltimateCommentBot:
                 except Exception as send_exc:
                     err_text = str(send_exc)
                     logger.error(f"Send error for @{username}: {err_text}")
-                    if "You can't write in this chat" in err_text:
-                        try:
-                            self.channels = [
-                                ch
-                                for ch in self.channels
-                                if (ch.get('username') if isinstance(ch, dict) else str(ch).lstrip('@')) != username
-                            ]
-                            self.save_data()
-                            logger.info(f"Removed unwritable channel: {username}")
-                        except Exception as rem_e:
-                            logger.error(f"Failed removing unwritable channel {username}: {rem_e}")
+                    if "You can't write in this chat" in err_text or "CHAT_WRITE_FORBIDDEN" in err_text:
+                        await self.mark_channel_failed_for_account(username, phone, "No discussion/comments disabled")
+                    elif "CHAT_GUEST_SEND_FORBIDDEN" in err_text:
+                        await self.mark_channel_failed_for_account(username, phone, "Guest send forbidden")
+                    elif "CHAT_RESTRICTED" in err_text:
+                        await self.mark_channel_failed_for_account(username, phone, "Chat restricted")
                     raise
             except Exception as e:
                 logger.error(f"Ошибка при комментировании [{phone}] -> {channel}: {e}")
