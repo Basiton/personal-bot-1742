@@ -43,6 +43,11 @@ class UltimateCommentBot:
         }
         # Track failed attempts: {channel_username: {phone1, phone2, ...}}
         self.channel_failed_attempts = {}
+        # Track commented posts: {channel_username: {post_id1, post_id2, ...}}
+        self.commented_posts = {}
+        # Channel queue for round-robin distribution
+        self.channel_queue = []
+        self.channel_queue_index = 0
         self.conn = None
         self.init_database()
         self.load_stats()
@@ -528,9 +533,15 @@ class UltimateCommentBot:
                 return
             self.monitoring = True
             self.monitoring_start_time = datetime.now()
-            text = f"""АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ НА 4 ЧАСА!\n\nАктивных: `{sum(1 for data in self.accounts_data.values() if data.get('active', False))}`\nКаналов: `{len(self.channels)}`\nШаблонов: `{len(self.templates)}`\n\n⏱ Остановка через: `4 часа`"""
+            
+            active_count = sum(1 for data in self.accounts_data.values() if data.get('active', False))
+            text = f"""🚀 АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ (OPTIMIZED)!\n\n✅ Активных аккаунтов: `{active_count}` (параллельно)\n📢 Каналов: `{len(self.channels)}`\n💬 Шаблонов: `{len(self.templates)}`\n⚡ Задержка: 30-60 сек (было 120-300)\n\n📈 Ожидаемая скорость: ~60-120 комм/час"""
             await event.respond(text)
-            asyncio.create_task(self.pro_auto_comment())
+            
+            # Start multiple parallel workers (one per account for max speed)
+            for _ in range(min(3, active_count)):  # Max 3 parallel workers to avoid rate limits
+                asyncio.create_task(self.pro_auto_comment())
+            
             # Schedule auto-stop after 4 hours
             asyncio.create_task(self.auto_stop_after_4_hours(event.chat_id))
         
@@ -814,134 +825,212 @@ class UltimateCommentBot:
         except Exception as e:
             logger.error(f"Auto-stop error: {e}")
     
-    async def pro_auto_comment(self):
+    async def account_worker(self, phone, account_data, channel_subset):
+        """Worker function for each account to process its assigned channels"""
+        logger.info(f"[{account_data.get('name', phone)}] Starting worker for {len(channel_subset)} channels")
+        
         while self.monitoring:
-            # No time limit - bot runs indefinitely
-            
-            active_accounts = {phone: data for phone, data in self.accounts_data.items()
-                             if data.get('active') and data.get('session')}
-            if not active_accounts or not self.channels:
-                await asyncio.sleep(30)
-                continue
-            phone, data = random.choice(list(active_accounts.items()))
-            channel = random.choice(self.channels)
-            # normalize channel entry
-            if isinstance(channel, dict):
-                username = channel.get('username') or channel.get('name')
-            else:
-                username = str(channel).lstrip('@')
-            username = str(username).strip()
-            comment = random.choice(self.templates)
+            # Process each channel in the subset
+            for channel in channel_subset:
+                if not self.monitoring:
+                    break
+                
+                # normalize channel entry
+                if isinstance(channel, dict):
+                    username = channel.get('username') or channel.get('name')
+                else:
+                    username = str(channel).lstrip('@')
+                username = str(username).strip()
+                
+                # Initialize tracking for this channel
+                if username not in self.commented_posts:
+                    self.commented_posts[username] = set()
+                
+                comment = random.choice(self.templates)
 
-            client = TelegramClient(StringSession(data['session']), API_ID, API_HASH)
-            await client.connect()
-            try:
-                if not await client.is_user_authorized():
-                    logger.warning(f"Account not authorized: {phone}")
-                    await asyncio.sleep(5)
-                    continue
-
-                # resolve channel entity
+                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH)
+                await client.connect()
                 try:
-                    channel_entity = await client.get_entity(username)
-                except Exception:
+                    if not await client.is_user_authorized():
+                        logger.warning(f"Account not authorized: {phone}")
+                        await asyncio.sleep(5)
+                        continue
+
+                    # resolve channel entity
                     try:
-                        channel_entity = await client.get_entity('@' + username)
-                    except Exception as e_res:
-                        logger.error(f"Cannot resolve entity for {username}: {e_res}")
-                        raise
+                        channel_entity = await client.get_entity(username)
+                    except Exception:
+                        try:
+                            channel_entity = await client.get_entity('@' + username)
+                        except Exception as e_res:
+                            logger.error(f"Cannot resolve entity for {username}: {e_res}")
+                            raise
 
-                # find linked discussion chat id
-                linked_chat_id = None
-                try:
-                    full = await client(functions.channels.GetFullChannelRequest(channel=channel_entity))
-                    if getattr(full, 'full_chat', None) and getattr(full.full_chat, 'linked_chat_id', None):
-                        linked_chat_id = full.full_chat.linked_chat_id
-                    elif getattr(full, 'chats', None):
-                        for ch in full.chats:
-                            if getattr(ch, 'linked_chat_id', None):
-                                linked_chat_id = ch.linked_chat_id
-                                break
-                except Exception:
+                    # find linked discussion chat id
                     linked_chat_id = None
-
-                if not linked_chat_id:
-                    logger.error(f"No linked discussion for {username}")
-                    await self.mark_channel_failed_for_account(username, phone, "No linked discussion")
-                    await asyncio.sleep(1)
-                    continue
-
-                # resolve linked chat entity
-                try:
-                    discussion_entity = await client.get_entity(linked_chat_id)
-                except Exception:
                     try:
-                        discussion_entity = await client.get_entity(str(linked_chat_id))
-                    except Exception as e_ent:
-                        logger.error(f"Cannot resolve linked chat {linked_chat_id} for {username}: {e_ent}")
+                        full = await client(functions.channels.GetFullChannelRequest(channel=channel_entity))
+                        if getattr(full, 'full_chat', None) and getattr(full.full_chat, 'linked_chat_id', None):
+                            linked_chat_id = full.full_chat.linked_chat_id
+                        elif getattr(full, 'chats', None):
+                            for ch in full.chats:
+                                if getattr(ch, 'linked_chat_id', None):
+                                    linked_chat_id = ch.linked_chat_id
+                                    break
+                    except Exception:
+                        linked_chat_id = None
+
+                    if not linked_chat_id:
+                        logger.error(f"No linked discussion for {username}")
+                        await self.mark_channel_failed_for_account(username, phone, "No linked discussion")
+                        await asyncio.sleep(1)
+                        continue
+
+                    # resolve linked chat entity
+                    try:
+                        discussion_entity = await client.get_entity(linked_chat_id)
+                    except Exception:
+                        try:
+                            discussion_entity = await client.get_entity(str(linked_chat_id))
+                        except Exception as e_ent:
+                            logger.error(f"Cannot resolve linked chat {linked_chat_id} for {username}: {e_ent}")
+                            raise
+
+                    # Get recent messages to find new posts (check last 10 messages for better coverage)
+                    try:
+                        msgs = await client.get_messages(discussion_entity, limit=10)
+                        
+                        # Find first message that hasn't been commented on yet
+                        reply_id = None
+                        for msg in msgs:
+                            if msg.id not in self.commented_posts[username]:
+                                reply_id = msg.id
+                                break
+                        
+                        # If all recent posts are commented, comment on the latest one
+                        if not reply_id and msgs:
+                            reply_id = msgs[0].id
+                            # Clean old tracking to prevent memory issues
+                            if len(self.commented_posts[username]) > 30:
+                                oldest_ids = sorted(list(self.commented_posts[username]))[:15]
+                                for old_id in oldest_ids:
+                                    self.commented_posts[username].discard(old_id)
+                    except Exception:
+                        reply_id = None
+
+                    # send comment into discussion
+                    try:
+                        if reply_id:
+                            await client.send_message(discussion_entity, comment, reply_to=reply_id)
+                            # Mark this post as commented
+                            self.commented_posts[username].add(reply_id)
+                        else:
+                            await client.send_message(discussion_entity, comment)
+                        
+                        logger.info(f"[{account_data.get('name', phone)}] -> @{username} (post {reply_id}): {comment}")
+                        await self.add_comment_stat(phone, True)
+
+                        if self.conn:
+                            try:
+                                cursor = self.conn.cursor()
+                                cursor.execute(
+                                    "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
+                                    (phone, username, comment, datetime.now().isoformat()),
+                                )
+                                self.conn.commit()
+                            except Exception as db_err:
+                                logger.error(f"DB log error: {db_err}")
+                    except Exception as send_exc:
+                        err_text = str(send_exc)
+                        logger.error(f"Send error for @{username}: {err_text}")
+                        if "You can't write in this chat" in err_text or "CHAT_WRITE_FORBIDDEN" in err_text:
+                            await self.mark_channel_failed_for_account(username, phone, "No discussion/comments disabled")
+                        elif "CHAT_GUEST_SEND_FORBIDDEN" in err_text:
+                            await self.mark_channel_failed_for_account(username, phone, "Guest send forbidden")
+                        elif "CHAT_RESTRICTED" in err_text:
+                            await self.mark_channel_failed_for_account(username, phone, "Chat restricted")
                         raise
+                except Exception as e:
+                    logger.error(f"Ошибка при комментировании [{phone}] -> {channel}: {e}")
+                    try:
+                        await self.add_comment_stat(phone, False)
 
-                # get last message in discussion to reply to
-                try:
-                    msgs = await client.get_messages(discussion_entity, limit=1)
-                    reply_id = msgs[0].id if msgs else None
-                except Exception:
-                    reply_id = None
-
-                # send comment into discussion
-                try:
-                    if reply_id:
-                        await client.send_message(discussion_entity, comment, reply_to=reply_id)
-                    else:
-                        await client.send_message(discussion_entity, comment)
-                    logger.info(f"[{data.get('name', phone)}] -> @{username} (discussion): {comment}")
-                    await self.add_comment_stat(phone, True)
-
-                    if self.conn:
-                        try:
-                            cursor = self.conn.cursor()
-                            cursor.execute(
-                                "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
-                                (phone, username, comment, datetime.now().isoformat()),
-                            )
-                            self.conn.commit()
-                        except Exception as db_err:
-                            logger.error(f"DB log error: {db_err}")
-                except Exception as send_exc:
-                    err_text = str(send_exc)
-                    logger.error(f"Send error for @{username}: {err_text}")
-                    if "You can't write in this chat" in err_text or "CHAT_WRITE_FORBIDDEN" in err_text:
-                        await self.mark_channel_failed_for_account(username, phone, "No discussion/comments disabled")
-                    elif "CHAT_GUEST_SEND_FORBIDDEN" in err_text:
-                        await self.mark_channel_failed_for_account(username, phone, "Guest send forbidden")
-                    elif "CHAT_RESTRICTED" in err_text:
-                        await self.mark_channel_failed_for_account(username, phone, "Chat restricted")
-                    raise
-            except Exception as e:
-                logger.error(f"Ошибка при комментировании [{phone}] -> {channel}: {e}")
-                try:
-                    await self.add_comment_stat(phone, False)
-
-                    if self.conn and ("FloodWait" in str(e) or "banned" in str(e).lower()):
-                        try:
-                            cursor = self.conn.cursor()
-                            reason = "FloodWait" if "FloodWait" in str(e) else "Account Ban"
-                            cursor.execute(
-                                "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
-                                (phone, datetime.now().isoformat(), reason),
-                            )
-                            self.conn.commit()
-                            logger.info(f"Blocked account logged: {phone}")
-                        except Exception as db_err:
-                            logger.error(f"DB block log error: {db_err}")
-                except Exception:
-                    pass
-            finally:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-            await asyncio.sleep(random.randint(120, 300))
+                        if self.conn and ("FloodWait" in str(e) or "banned" in str(e).lower()):
+                            try:
+                                cursor = self.conn.cursor()
+                                reason = "FloodWait" if "FloodWait" in str(e) else "Account Ban"
+                                cursor.execute(
+                                    "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
+                                    (phone, datetime.now().isoformat(), reason),
+                                )
+                                self.conn.commit()
+                                logger.info(f"Blocked account logged: {phone}")
+                            except Exception as db_err:
+                                logger.error(f"DB block log error: {db_err}")
+                    except Exception:
+                        pass
+                finally:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                
+                # Delay between comments from same account (20-40 sec for safety)
+                await asyncio.sleep(random.randint(20, 40))
+            
+            # After completing all channels, shuffle and start over
+            random.shuffle(channel_subset)
+            logger.info(f"[{account_data.get('name', phone)}] Completed cycle, restarting...")
+            await asyncio.sleep(random.randint(10, 20))
+    
+    async def pro_auto_comment(self):
+        """Main commenting loop - now runs all accounts in parallel!"""
+        active_accounts = {phone: data for phone, data in self.accounts_data.items()
+                         if data.get('active') and data.get('session')}
+        
+        if not active_accounts:
+            logger.error("No active accounts found!")
+            return
+        
+        if not self.channels:
+            logger.error("No channels found!")
+            return
+        
+        # Divide channels among accounts for parallel processing
+        accounts_list = list(active_accounts.items())
+        num_accounts = len(accounts_list)
+        channels_copy = self.channels.copy()
+        random.shuffle(channels_copy)
+        
+        # Calculate channels per account
+        channels_per_account = len(channels_copy) // num_accounts
+        remainder = len(channels_copy) % num_accounts
+        
+        logger.info(f"🚀 PARALLEL MODE: {num_accounts} accounts × {len(channels_copy)} channels")
+        logger.info(f"📊 Each account handles ~{channels_per_account} channels")
+        
+        # Create worker tasks for each account
+        tasks = []
+        start_idx = 0
+        
+        for i, (phone, data) in enumerate(accounts_list):
+            # Give extra channels to first accounts if there's a remainder
+            end_idx = start_idx + channels_per_account + (1 if i < remainder else 0)
+            channel_subset = channels_copy[start_idx:end_idx]
+            
+            logger.info(f"[{data.get('name', phone)}] Assigned channels {start_idx+1}-{end_idx}")
+            
+            # Create worker task for this account
+            task = asyncio.create_task(self.account_worker(phone, data, channel_subset))
+            tasks.append(task)
+            
+            start_idx = end_idx
+        
+        # Wait for all workers (they run until self.monitoring becomes False)
+        try:
+            await asyncio.gather(*tasks)
+        except Exception as e:
+            logger.error(f"Error in parallel workers: {e}")
     
     async def run(self):
         await self.start()
