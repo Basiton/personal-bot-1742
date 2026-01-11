@@ -390,7 +390,7 @@ class UltimateCommentBot:
     
     async def set_account_bio(self, session_data, bio_text):
         try:
-            client = TelegramClient(StringSession(session_data['session']), API_ID, API_HASH)
+            client = TelegramClient(StringSession(session_data['session']), API_ID, API_HASH, proxy=session_data.get('proxy'))
             await client.connect()
             if await client.is_user_authorized():
                 await client(UpdateProfileRequest(about=bio_text))
@@ -717,7 +717,7 @@ class UltimateCommentBot:
                     return
                 
                 phone, account_data = user_account
-                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH)
+                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH, proxy=account_data.get('proxy'))
                 
                 try:
                     await client.connect()
@@ -900,7 +900,7 @@ class UltimateCommentBot:
                 )
                 
                 # Create client
-                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH)
+                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH, proxy=account_data.get('proxy'))
                 
                 try:
                     await client.connect()
@@ -1597,7 +1597,7 @@ class UltimateCommentBot:
                 if username not in self.commented_posts:
                     self.commented_posts[username] = set()
 
-                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH)
+                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH, proxy=account_data.get('proxy'))
                 await client.connect()
                 try:
                     if not await client.is_user_authorized():
