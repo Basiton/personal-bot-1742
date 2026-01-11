@@ -104,7 +104,7 @@ python main.py
 
 ### Файл `.env`:
 ```env
-YANDEX_API_KEY=AQVN3lmXBTGu59GwNZXbvQNC5B75nSGAXfpWU_tG
+YANDEX_API_KEY=[YOUR_API_KEY_HERE]
 YANDEX_FOLDER_ID=b1g4or5i5s66hklqfg06
 ```
 
