@@ -6,10 +6,11 @@ import os
 import sqlite3
 import requests
 from datetime import datetime
-from telethon import TelegramClient, events, functions
+from pathlib import Path
+from telethon import TelegramClient, events, functions, Button
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
-from telethon.tl.functions.photos import UploadProfilePhotoRequest
+from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
 from telethon.errors import SessionPasswordNeededError
 
 # Try to load .env file if python-dotenv is available
@@ -134,6 +135,9 @@ class UltimateCommentBot:
         self.channel_queue = []
         self.channel_queue_index = 0
         self.conn = None
+        # State management for account profiles management
+        self.user_states = {}  # {user_id: {'state': 'waiting_avatar', 'account_num': 1, 'data': {}}}
+        self.account_cache = {}  # Cache for account info from env
         self.init_database()
         self.load_stats()
         self.load_data()
@@ -400,6 +404,277 @@ class UltimateCommentBot:
             pass
         return False
     
+    # ============= PROFILE MANAGEMENT FUNCTIONS =============
+    
+    def get_all_accounts_from_env(self):
+        """
+        Динамически получает все аккаунты из переменных окружения.
+        Ищет ACCOUNT_N_PHONE, ACCOUNT_N_SESSION, ACCOUNT_N_PROXY (где N = 1, 2, 3...)
+        Возвращает список кортежей: [(номер, телефон, сессия, прокси), ...]
+        """
+        if self.account_cache:
+            return self.account_cache.get('accounts', [])
+        
+        accounts = []
+        n = 1
+        while True:
+            phone_key = f'ACCOUNT_{n}_PHONE'
+            phone = os.getenv(phone_key)
+            
+            if not phone:
+                break  # Нет больше аккаунтов
+            
+            session = os.getenv(f'ACCOUNT_{n}_SESSION', '')
+            proxy_str = os.getenv(f'ACCOUNT_{n}_PROXY', '')
+            
+            # Parse proxy if exists (format: socks5:host:port:user:pass)
+            proxy = None
+            if proxy_str:
+                try:
+                    parts = proxy_str.split(':')
+                    if len(parts) >= 5:
+                        proxy = (parts[0], parts[1], int(parts[2]), parts[3], parts[4])
+                except:
+                    logger.warning(f"Failed to parse proxy for ACCOUNT_{n}")
+            
+            accounts.append((n, phone, session, proxy))
+            n += 1
+        
+        # Cache results
+        self.account_cache['accounts'] = accounts
+        logger.info(f"Found {len(accounts)} accounts in environment variables")
+        return accounts
+    
+    def create_accounts_keyboard(self, page=0, per_page=5):
+        """
+        Создаёт inline клавиатуру со списком аккаунтов с пагинацией.
+        """
+        accounts = self.get_all_accounts_from_env()
+        
+        if not accounts:
+            return [[Button.inline("❌ Аккаунты не найдены", b"no_accounts")]]
+        
+        total_accounts = len(accounts)
+        total_pages = (total_accounts + per_page - 1) // per_page
+        page = max(0, min(page, total_pages - 1))  # Validate page
+        
+        start_idx = page * per_page
+        end_idx = min(start_idx + per_page, total_accounts)
+        
+        buttons = []
+        
+        # Account buttons
+        for i in range(start_idx, end_idx):
+            num, phone, session, proxy = accounts[i]
+            status = "✅" if session else "❌"
+            button_text = f"{status} Аккаунт {num} - {phone}"
+            buttons.append([Button.inline(button_text, f"acc_{num}".encode())])
+        
+        # Pagination buttons
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(Button.inline("◀️ Назад", f"acc_page_{page-1}".encode()))
+        
+        if total_pages > 1:
+            nav_buttons.append(Button.inline(f"📄 {page+1}/{total_pages}", b"page_info"))
+        
+        if page < total_pages - 1:
+            nav_buttons.append(Button.inline("Вперёд ▶️", f"acc_page_{page+1}".encode()))
+        
+        if nav_buttons:
+            buttons.append(nav_buttons)
+        
+        # Main menu button
+        buttons.append([Button.inline("🏠 Главное меню", b"main_menu")])
+        
+        return buttons
+    
+    def create_account_menu_keyboard(self, account_num):
+        """
+        Создаёт меню для конкретного аккаунта с кнопками:
+        - Аватарка
+        - Имя и Фамилия
+        - О себе (Био)
+        - Назад
+        """
+        buttons = [
+            [Button.inline("📷 Аватарка", f"acc_{account_num}_avatar".encode())],
+            [Button.inline("👤 Имя и Фамилия", f"acc_{account_num}_name".encode())],
+            [Button.inline("📝 О себе (Био)", f"acc_{account_num}_bio".encode())],
+            [Button.inline("◀️ Назад к списку", b"back_to_accounts")],
+            [Button.inline("🏠 Главное меню", b"main_menu")]
+        ]
+        return buttons
+    
+    async def get_account_info(self, account_num):
+        """
+        Получает информацию об аккаунте из переменных окружения
+        и пытается получить текущие данные профиля из Telegram.
+        """
+        accounts = self.get_all_accounts_from_env()
+        account_data = None
+        
+        for num, phone, session, proxy in accounts:
+            if num == account_num:
+                account_data = {
+                    'num': num,
+                    'phone': phone,
+                    'session': session,
+                    'proxy': proxy
+                }
+                break
+        
+        if not account_data:
+            return None
+        
+        # Try to get current profile info
+        if account_data['session']:
+            try:
+                client = TelegramClient(
+                    StringSession(account_data['session']), 
+                    API_ID, 
+                    API_HASH,
+                    proxy=account_data.get('proxy')
+                )
+                await client.connect()
+                
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    account_data['first_name'] = me.first_name or ''
+                    account_data['last_name'] = me.last_name or ''
+                    account_data['bio'] = me.about or ''
+                    account_data['username'] = me.username or ''
+                    account_data['authorized'] = True
+                else:
+                    account_data['authorized'] = False
+                
+                await client.disconnect()
+            except Exception as e:
+                logger.error(f"Error getting account info for {account_num}: {e}")
+                account_data['authorized'] = False
+        else:
+            account_data['authorized'] = False
+        
+        return account_data
+    
+    async def apply_account_changes(self, account_num, avatar_file=None, first_name=None, last_name=None, bio=None):
+        """
+        Применяет изменения к профилю аккаунта:
+        - avatar_file: путь к файлу изображения
+        - first_name: новое имя
+        - last_name: новая фамилия
+        - bio: новая информация о себе
+        
+        Возвращает (success: bool, message: str)
+        """
+        try:
+            account_info = await self.get_account_info(account_num)
+            
+            if not account_info:
+                return False, f"❌ Аккаунт {account_num} не найден"
+            
+            if not account_info.get('authorized'):
+                return False, f"❌ Аккаунт {account_num} не авторизован"
+            
+            # Create client
+            client = TelegramClient(
+                StringSession(account_info['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_info.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {account_num} потерял авторизацию"
+            
+            results = []
+            
+            # Update avatar
+            if avatar_file and os.path.exists(avatar_file):
+                try:
+                    await client(UploadProfilePhotoRequest(
+                        file=await client.upload_file(avatar_file)
+                    ))
+                    results.append("✅ Аватарка обновлена")
+                    logger.info(f"Avatar updated for account {account_num}")
+                except Exception as e:
+                    results.append(f"❌ Ошибка загрузки аватарки: {str(e)[:50]}")
+                    logger.error(f"Avatar upload error for account {account_num}: {e}")
+            
+            # Update name and/or bio
+            if first_name is not None or last_name is not None or bio is not None:
+                try:
+                    # Get current values if not provided
+                    if first_name is None:
+                        first_name = account_info.get('first_name', '')
+                    if last_name is None:
+                        last_name = account_info.get('last_name', '')
+                    if bio is None:
+                        bio = account_info.get('bio', '')
+                    
+                    await client(UpdateProfileRequest(
+                        first_name=first_name or '',
+                        last_name=last_name or '',
+                        about=bio or ''
+                    ))
+                    
+                    if first_name is not None or last_name is not None:
+                        results.append(f"✅ Имя обновлено: {first_name} {last_name}")
+                    if bio is not None:
+                        results.append(f"✅ Био обновлено")
+                    
+                    logger.info(f"Profile updated for account {account_num}")
+                except Exception as e:
+                    results.append(f"❌ Ошибка обновления профиля: {str(e)[:50]}")
+                    logger.error(f"Profile update error for account {account_num}: {e}")
+            
+            await client.disconnect()
+            
+            if results:
+                return True, "\n".join(results)
+            else:
+                return False, "❌ Нечего обновлять"
+                
+        except Exception as e:
+            logger.error(f"Error applying changes to account {account_num}: {e}")
+            return False, f"❌ Ошибка: {str(e)[:100]}"
+    
+    async def clear_user_state(self, user_id):
+        """Очищает состояние пользователя"""
+        if user_id in self.user_states:
+            # Clean up temp files if any
+            state = self.user_states[user_id]
+            if 'temp_avatar' in state.get('data', {}):
+                temp_file = state['data']['temp_avatar']
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+            
+            del self.user_states[user_id]
+    
+    async def save_temp_avatar(self, user_id, file_path):
+        """Сохраняет временный файл аватарки"""
+        # Create temp directory if not exists
+        temp_dir = Path("/tmp/bot_avatars")
+        temp_dir.mkdir(exist_ok=True)
+        
+        # Generate unique filename
+        filename = f"avatar_{user_id}_{datetime.now().timestamp()}.jpg"
+        temp_path = temp_dir / filename
+        
+        # Copy file
+        import shutil
+        shutil.copy(file_path, temp_path)
+        
+        return str(temp_path)
+    
+    # ============= END PROFILE MANAGEMENT FUNCTIONS =============
+    
     async def start(self):
         await self.bot_client.start(bot_token=BOT_TOKEN)
         self.setup_handlers()
@@ -431,6 +706,7 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             text = """**📱 АККАУНТЫ:**
 `/auth +79123456789 [proxy]` - авторизовать
+`/accounts` - управление профилями (аватар, имя, био) 🆕
 `/listaccounts` - все аккаунты
 `/activeaccounts` - только активные ✅
 `/reserveaccounts` - только резервные 🔄
@@ -1417,6 +1693,496 @@ class UltimateCommentBot:
 • Скорость: `36-72 комм/час`
 • Риск бана: `НИЗКИЙ` 🟢"""
             await event.respond(text)
+        
+        # ============= ACCOUNTS PROFILE MANAGEMENT HANDLERS =============
+        
+        @self.bot_client.on(events.NewMessage(pattern='/accounts'))
+        async def accounts_command(event):
+            """Показывает список всех аккаунтов из переменных окружения"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            try:
+                accounts = self.get_all_accounts_from_env()
+                
+                if not accounts:
+                    await event.respond(
+                        "❌ **Аккаунты не найдены**\n\n"
+                        "Убедитесь, что в переменных окружения есть:\n"
+                        "`ACCOUNT_1_PHONE`\n"
+                        "`ACCOUNT_1_SESSION`\n"
+                        "`ACCOUNT_1_PROXY` (опционально)"
+                    )
+                    return
+                
+                text = f"🔐 **УПРАВЛЕНИЕ ПРОФИЛЯМИ АККАУНТОВ**\n\n"
+                text += f"Найдено аккаунтов: **{len(accounts)}**\n\n"
+                text += "Выберите аккаунт для управления профилем:"
+                
+                keyboard = self.create_accounts_keyboard(page=0)
+                await event.respond(text, buttons=keyboard)
+                
+            except Exception as e:
+                logger.error(f"Error in accounts command: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.CallbackQuery)
+        async def handle_callback(event):
+            """Обработчик всех callback кнопок для управления профилями"""
+            if not await self.is_admin(event.sender_id):
+                await event.answer("❌ Нет доступа")
+                return
+            
+            data = event.data.decode('utf-8', errors='ignore')
+            user_id = event.sender_id
+            
+            try:
+                # Main menu
+                if data == "main_menu":
+                    await self.clear_user_state(user_id)
+                    await event.edit(
+                        "🏠 **Главное меню**\n\n"
+                        "Используйте команды:\n"
+                        "`/accounts` - управление профилями\n"
+                        "`/help` - все команды",
+                        buttons=None
+                    )
+                    return
+                
+                # Back to accounts list
+                if data == "back_to_accounts":
+                    await self.clear_user_state(user_id)
+                    accounts = self.get_all_accounts_from_env()
+                    text = f"🔐 **УПРАВЛЕНИЕ ПРОФИЛЯМИ АККАУНТОВ**\n\n"
+                    text += f"Найдено аккаунтов: **{len(accounts)}**\n\n"
+                    text += "Выберите аккаунт для управления профилем:"
+                    keyboard = self.create_accounts_keyboard(page=0)
+                    await event.edit(text, buttons=keyboard)
+                    return
+                
+                # Page navigation
+                if data.startswith("acc_page_"):
+                    page = int(data.split("_")[-1])
+                    accounts = self.get_all_accounts_from_env()
+                    text = f"🔐 **УПРАВЛЕНИЕ ПРОФИЛЯМИ АККАУНТОВ**\n\n"
+                    text += f"Найдено аккаунтов: **{len(accounts)}**\n\n"
+                    text += "Выберите аккаунт для управления профилем:"
+                    keyboard = self.create_accounts_keyboard(page=page)
+                    await event.edit(text, buttons=keyboard)
+                    return
+                
+                # Page info (do nothing)
+                if data == "page_info":
+                    await event.answer("ℹ️ Информация о странице")
+                    return
+                
+                # No accounts found
+                if data == "no_accounts":
+                    await event.answer("❌ Аккаунты не настроены")
+                    return
+                
+                # Account selected
+                if data.startswith("acc_") and not "_" in data[4:]:
+                    account_num = int(data[4:])
+                    
+                    # Get account info
+                    account_info = await self.get_account_info(account_num)
+                    
+                    if not account_info:
+                        await event.answer("❌ Аккаунт не найден")
+                        return
+                    
+                    # Build info text
+                    text = f"🔐 **АККАУНТ #{account_num}**\n\n"
+                    text += f"📱 Телефон: `{account_info['phone']}`\n"
+                    
+                    if account_info.get('authorized'):
+                        text += f"✅ Статус: **Авторизован**\n\n"
+                        text += f"👤 Имя: {account_info.get('first_name', 'Не указано')}\n"
+                        text += f"👤 Фамилия: {account_info.get('last_name', 'Не указано')}\n"
+                        if account_info.get('username'):
+                            text += f"🔗 Username: @{account_info['username']}\n"
+                        text += f"📝 Био: {account_info.get('bio', 'Не указано')[:100]}\n"
+                    else:
+                        text += f"❌ Статус: **Не авторизован**\n\n"
+                        text += "⚠️ Этот аккаунт не может быть изменён.\n"
+                    
+                    text += f"\nВыберите действие:"
+                    
+                    keyboard = self.create_account_menu_keyboard(account_num)
+                    await event.edit(text, buttons=keyboard)
+                    return
+                
+                # Avatar button
+                if data.endswith("_avatar"):
+                    account_num = int(data.split("_")[1])
+                    account_info = await self.get_account_info(account_num)
+                    
+                    if not account_info or not account_info.get('authorized'):
+                        await event.answer("❌ Аккаунт не авторизован")
+                        return
+                    
+                    # Set state
+                    self.user_states[user_id] = {
+                        'state': 'waiting_avatar',
+                        'account_num': account_num,
+                        'data': {}
+                    }
+                    
+                    await event.edit(
+                        f"📷 **ЗАГРУЗКА АВАТАРКИ**\n\n"
+                        f"Аккаунт: `{account_info['phone']}`\n\n"
+                        f"Отправьте фото для аватарки (jpg, png)\n"
+                        f"Или нажмите Отмена",
+                        buttons=[
+                            [Button.inline("❌ Отмена", f"cancel_acc_{account_num}".encode())]
+                        ]
+                    )
+                    return
+                
+                # Name button
+                if data.endswith("_name"):
+                    account_num = int(data.split("_")[1])
+                    account_info = await self.get_account_info(account_num)
+                    
+                    if not account_info or not account_info.get('authorized'):
+                        await event.answer("❌ Аккаунт не авторизован")
+                        return
+                    
+                    # Set state
+                    self.user_states[user_id] = {
+                        'state': 'waiting_name',
+                        'account_num': account_num,
+                        'data': {}
+                    }
+                    
+                    current_name = f"{account_info.get('first_name', '')} {account_info.get('last_name', '')}".strip()
+                    
+                    await event.edit(
+                        f"👤 **ИЗМЕНЕНИЕ ИМЕНИ**\n\n"
+                        f"Аккаунт: `{account_info['phone']}`\n"
+                        f"Текущее: {current_name or 'Не указано'}\n\n"
+                        f"Введите имя и фамилию через пробел:\n"
+                        f"Пример: `Иван Петров`\n\n"
+                        f"Или нажмите Отмена",
+                        buttons=[
+                            [Button.inline("❌ Отмена", f"cancel_acc_{account_num}".encode())]
+                        ]
+                    )
+                    return
+                
+                # Bio button
+                if data.endswith("_bio"):
+                    account_num = int(data.split("_")[1])
+                    account_info = await self.get_account_info(account_num)
+                    
+                    if not account_info or not account_info.get('authorized'):
+                        await event.answer("❌ Аккаунт не авторизован")
+                        return
+                    
+                    # Set state
+                    self.user_states[user_id] = {
+                        'state': 'waiting_bio',
+                        'account_num': account_num,
+                        'data': {}
+                    }
+                    
+                    current_bio = account_info.get('bio', 'Не указано')
+                    
+                    await event.edit(
+                        f"📝 **ИЗМЕНЕНИЕ ИНФОРМАЦИИ О СЕБЕ**\n\n"
+                        f"Аккаунт: `{account_info['phone']}`\n"
+                        f"Текущее: {current_bio[:100]}\n\n"
+                        f"Введите новую информацию о себе (до 500 символов):\n"
+                        f"Можете добавить ссылку\n\n"
+                        f"Пример: `Digital Marketing 🌐 https://example.com`\n\n"
+                        f"Или нажмите Отмена",
+                        buttons=[
+                            [Button.inline("❌ Отмена", f"cancel_acc_{account_num}".encode())]
+                        ]
+                    )
+                    return
+                
+                # Cancel button
+                if data.startswith("cancel_acc_"):
+                    account_num = int(data.split("_")[-1])
+                    await self.clear_user_state(user_id)
+                    
+                    # Return to account menu
+                    account_info = await self.get_account_info(account_num)
+                    if account_info:
+                        text = f"🔐 **АККАУНТ #{account_num}**\n\n"
+                        text += f"📱 Телефон: `{account_info['phone']}`\n"
+                        text += f"✅ Операция отменена\n\n"
+                        text += "Выберите действие:"
+                        
+                        keyboard = self.create_account_menu_keyboard(account_num)
+                        await event.edit(text, buttons=keyboard)
+                    return
+                
+                # Apply changes (avatar)
+                if data.startswith("apply_avatar_"):
+                    account_num = int(data.split("_")[-1])
+                    
+                    if user_id not in self.user_states:
+                        await event.answer("❌ Сессия истекла")
+                        return
+                    
+                    state = self.user_states[user_id]
+                    avatar_file = state.get('data', {}).get('temp_avatar')
+                    
+                    if not avatar_file or not os.path.exists(avatar_file):
+                        await event.answer("❌ Файл не найден")
+                        return
+                    
+                    await event.edit("⏳ Загрузка аватарки...")
+                    
+                    # Apply changes
+                    success, message = await self.apply_account_changes(
+                        account_num, 
+                        avatar_file=avatar_file
+                    )
+                    
+                    await self.clear_user_state(user_id)
+                    
+                    # Show result and return to account menu
+                    account_info = await self.get_account_info(account_num)
+                    text = f"🔐 **АККАУНТ #{account_num}**\n\n"
+                    text += f"{message}\n\n"
+                    text += "Выберите следующее действие:"
+                    
+                    keyboard = self.create_account_menu_keyboard(account_num)
+                    await event.edit(text, buttons=keyboard)
+                    return
+                
+                # Apply changes (name)
+                if data.startswith("apply_name_"):
+                    account_num = int(data.split("_")[-1])
+                    
+                    if user_id not in self.user_states:
+                        await event.answer("❌ Сессия истекла")
+                        return
+                    
+                    state = self.user_states[user_id]
+                    first_name = state.get('data', {}).get('first_name', '')
+                    last_name = state.get('data', {}).get('last_name', '')
+                    
+                    await event.edit("⏳ Обновление имени...")
+                    
+                    # Apply changes
+                    success, message = await self.apply_account_changes(
+                        account_num,
+                        first_name=first_name,
+                        last_name=last_name
+                    )
+                    
+                    await self.clear_user_state(user_id)
+                    
+                    # Show result and return to account menu
+                    account_info = await self.get_account_info(account_num)
+                    text = f"🔐 **АККАУНТ #{account_num}**\n\n"
+                    text += f"{message}\n\n"
+                    text += "Выберите следующее действие:"
+                    
+                    keyboard = self.create_account_menu_keyboard(account_num)
+                    await event.edit(text, buttons=keyboard)
+                    return
+                
+                # Apply changes (bio)
+                if data.startswith("apply_bio_"):
+                    account_num = int(data.split("_")[-1])
+                    
+                    if user_id not in self.user_states:
+                        await event.answer("❌ Сессия истекла")
+                        return
+                    
+                    state = self.user_states[user_id]
+                    bio = state.get('data', {}).get('bio', '')
+                    
+                    await event.edit("⏳ Обновление био...")
+                    
+                    # Apply changes
+                    success, message = await self.apply_account_changes(
+                        account_num,
+                        bio=bio
+                    )
+                    
+                    await self.clear_user_state(user_id)
+                    
+                    # Show result and return to account menu
+                    account_info = await self.get_account_info(account_num)
+                    text = f"🔐 **АККАУНТ #{account_num}**\n\n"
+                    text += f"{message}\n\n"
+                    text += "Выберите следующее действие:"
+                    
+                    keyboard = self.create_account_menu_keyboard(account_num)
+                    await event.edit(text, buttons=keyboard)
+                    return
+                
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+                await event.answer(f"❌ Ошибка: {str(e)[:50]}")
+        
+        # Handler for photo uploads (avatar)
+        @self.bot_client.on(events.NewMessage(func=lambda e: e.photo))
+        async def handle_photo(event):
+            """Обработчик загрузки фотографий для аватарок"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            user_id = event.sender_id
+            
+            # Check if user is in avatar upload state
+            if user_id not in self.user_states:
+                return
+            
+            state = self.user_states[user_id]
+            if state.get('state') != 'waiting_avatar':
+                return
+            
+            account_num = state['account_num']
+            
+            try:
+                await event.respond("⏳ Загрузка изображения...")
+                
+                # Download photo
+                photo = await event.download_media()
+                
+                if not photo:
+                    await event.respond("❌ Ошибка загрузки фото")
+                    return
+                
+                # Save to temp
+                temp_file = await self.save_temp_avatar(user_id, photo)
+                
+                # Update state
+                self.user_states[user_id]['data']['temp_avatar'] = temp_file
+                
+                # Clean up original download
+                if os.path.exists(photo):
+                    try:
+                        os.remove(photo)
+                    except:
+                        pass
+                
+                # Show confirmation
+                await event.respond(
+                    f"✅ **Фото выбрано!**\n\n"
+                    f"Аккаунт: `{(await self.get_account_info(account_num))['phone']}`\n\n"
+                    f"Применить это фото как аватарку?",
+                    buttons=[
+                        [
+                            Button.inline("✅ Применить", f"apply_avatar_{account_num}".encode()),
+                            Button.inline("❌ Отменить", f"cancel_acc_{account_num}".encode())
+                        ]
+                    ]
+                )
+                
+            except Exception as e:
+                logger.error(f"Photo upload error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        # Handler for text messages (name and bio)
+        @self.bot_client.on(events.NewMessage(func=lambda e: e.text and not e.text.startswith('/')))
+        async def handle_text(event):
+            """Обработчик текстовых сообщений для имени и био"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            user_id = event.sender_id
+            
+            # Check if user is in text input state
+            if user_id not in self.user_states:
+                return
+            
+            state = self.user_states[user_id]
+            account_num = state['account_num']
+            
+            try:
+                # Handle name input
+                if state.get('state') == 'waiting_name':
+                    text = event.text.strip()
+                    
+                    # Split by first space
+                    parts = text.split(' ', 1)
+                    first_name = parts[0] if parts else ''
+                    last_name = parts[1] if len(parts) > 1 else ''
+                    
+                    # Validate
+                    if not first_name:
+                        await event.respond("❌ Имя не может быть пустым. Попробуйте ещё раз:")
+                        return
+                    
+                    if len(first_name) > 64 or len(last_name) > 64:
+                        await event.respond("❌ Имя слишком длинное (макс 64 символа). Попробуйте ещё раз:")
+                        return
+                    
+                    # Save to state
+                    self.user_states[user_id]['data']['first_name'] = first_name
+                    self.user_states[user_id]['data']['last_name'] = last_name
+                    
+                    # Show preview
+                    account_info = await self.get_account_info(account_num)
+                    preview_text = (
+                        f"📋 **ПРЕВЬЮ ИЗМЕНЕНИЙ**\n\n"
+                        f"Аккаунт: `{account_info['phone']}`\n\n"
+                        f"👤 Имя: {first_name}\n"
+                        f"👤 Фамилия: {last_name or '(не указано)'}\n\n"
+                        f"Применить эти изменения?"
+                    )
+                    
+                    await event.respond(
+                        preview_text,
+                        buttons=[
+                            [
+                                Button.inline("✅ Применить", f"apply_name_{account_num}".encode()),
+                                Button.inline("❌ Отменить", f"cancel_acc_{account_num}".encode())
+                            ]
+                        ]
+                    )
+                    return
+                
+                # Handle bio input
+                if state.get('state') == 'waiting_bio':
+                    text = event.text.strip()
+                    
+                    # Validate length
+                    if len(text) > 500:
+                        await event.respond(
+                            f"❌ Текст слишком длинный ({len(text)}/500 символов)\n"
+                            f"Сократите текст и попробуйте ещё раз:"
+                        )
+                        return
+                    
+                    # Save to state
+                    self.user_states[user_id]['data']['bio'] = text
+                    
+                    # Show preview
+                    account_info = await self.get_account_info(account_num)
+                    preview_text = (
+                        f"📋 **ПРЕВЬЮ ИЗМЕНЕНИЙ**\n\n"
+                        f"Аккаунт: `{account_info['phone']}`\n\n"
+                        f"📝 Новое био:\n{text}\n\n"
+                        f"Применить эти изменения?"
+                    )
+                    
+                    await event.respond(
+                        preview_text,
+                        buttons=[
+                            [
+                                Button.inline("✅ Применить", f"apply_bio_{account_num}".encode()),
+                                Button.inline("❌ Отменить", f"cancel_acc_{account_num}".encode())
+                            ]
+                        ]
+                    )
+                    return
+                
+            except Exception as e:
+                logger.error(f"Text handler error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        # ============= END ACCOUNTS PROFILE MANAGEMENT HANDLERS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/addadmin'))
         async def add_admin(event):
