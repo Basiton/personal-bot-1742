@@ -763,8 +763,8 @@ class UltimateCommentBot:
                 proxy = None
                 if len(parts) > 2:
                     proxy_parts = parts[2].split(':')
-                    if len(proxy_parts) == 4:
-                        proxy = (proxy_parts[0], int(proxy_parts[1]), proxy_parts[2], proxy_parts[3])
+                    if len(proxy_parts) == 5:
+                        proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), proxy_parts[3], proxy_parts[4])
                 await event.respond(f"Авторизуем: `{phone}`\nПроверьте терминал!")
                 result = await self.authorize_account(phone, proxy)
                 if result:
