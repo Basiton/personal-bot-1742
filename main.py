@@ -364,19 +364,43 @@ class UltimateCommentBot:
     async def is_admin(self, user_id):
         return user_id == BOT_OWNER_ID or user_id in self.admins
     
-    async def authorize_account(self, phone, proxy=None):
+    async def authorize_account(self, phone, proxy=None, event=None):
         try:
             client = TelegramClient(StringSession(''), API_ID, API_HASH, proxy=proxy)
             await client.connect()
             if not await client.is_user_authorized():
                 await client.send_code_request(phone)
-                print(f"Код отправлен на {phone}")
-                code = input("Введите код из Telegram: ")
-                try:
-                    await client.sign_in(phone, code)
-                except SessionPasswordNeededError:
-                    password = input("Введите пароль 2FA: ")
-                    await client.sign_in(password=password)
+                logger.info(f"Код отправлен на {phone}")
+                
+                if event:
+                    # Получаем код через Telegram
+                    await event.respond(f"📱 Код отправлен на `{phone}`\n\nОтветьте на это сообщение с кодом авторизации (5 цифр)")
+                    
+                    async with self.bot_client.conversation(event.chat_id, timeout=300) as conv:
+                        # Ждём ответа с кодом
+                        code_msg = await conv.get_response()
+                        code = code_msg.text.strip()
+                        
+                        try:
+                            await client.sign_in(phone, code)
+                            logger.info(f"Аккаунт {phone} успешно авторизован")
+                        except SessionPasswordNeededError:
+                            # Нужен пароль 2FA
+                            await event.respond(f"🔐 Требуется пароль 2FA\n\nОтветьте на это сообщение с паролем двухфакторной аутентификации")
+                            password_msg = await conv.get_response()
+                            password = password_msg.text.strip()
+                            await client.sign_in(password=password)
+                            logger.info(f"Аккаунт {phone} успешно авторизован (с 2FA)")
+                else:
+                    # Fallback на консоль (если нет event)
+                    print(f"Код отправлен на {phone}")
+                    code = input("Введите код из Telegram: ")
+                    try:
+                        await client.sign_in(phone, code)
+                    except SessionPasswordNeededError:
+                        password = input("Введите пароль 2FA: ")
+                        await client.sign_in(password=password)
+                        
             me = await client.get_me()
             session = client.session.save()
             await client.disconnect()
@@ -390,6 +414,8 @@ class UltimateCommentBot:
             }
         except Exception as e:
             logger.error(f"Ошибка авторизации {phone}: {e}")
+            if event:
+                await event.respond(f"❌ Ошибка: {str(e)}")
             return None
     
     async def set_account_bio(self, session_data, bio_text):
@@ -778,8 +804,8 @@ class UltimateCommentBot:
                         # Short format: socks5:host:port:user:pass (rdns=True by default)
                         proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), 
                                 True, proxy_parts[3], proxy_parts[4])
-                await event.respond(f"Авторизуем: `{phone}`\nПроверьте терминал!")
-                result = await self.authorize_account(phone, proxy)
+                await event.respond(f"🔄 Начинаем авторизацию: `{phone}`")
+                result = await self.authorize_account(phone, proxy, event)
                 if result:
                     self.accounts_data[phone] = result
                     self.save_data()
