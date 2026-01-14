@@ -138,6 +138,8 @@ class UltimateCommentBot:
         # State management for account profiles management
         self.user_states = {}  # {user_id: {'state': 'waiting_avatar', 'account_num': 1, 'data': {}}}
         self.account_cache = {}  # Cache for account info from env
+        # Authorization state management
+        self.pending_auth = {}  # {chat_id: {'phone': '+123', 'proxy': ..., 'client': ..., 'message_id': 123, 'state': 'waiting_code'/'waiting_2fa', 'event': ...}}
         self.init_database()
         self.load_stats()
         self.load_data()
@@ -365,32 +367,32 @@ class UltimateCommentBot:
         return user_id == BOT_OWNER_ID or user_id in self.admins
     
     async def authorize_account(self, phone, proxy=None, event=None):
+        """Начинает процесс авторизации и сохраняет состояние в pending_auth"""
         try:
             client = TelegramClient(StringSession(''), API_ID, API_HASH, proxy=proxy)
             await client.connect()
+            
             if not await client.is_user_authorized():
                 await client.send_code_request(phone)
                 logger.info(f"Код отправлен на {phone}")
                 
                 if event:
-                    # Получаем код через Telegram
-                    await event.respond(f"📱 Код отправлен на `{phone}`\n\nОтветьте на это сообщение с кодом авторизации (5 цифр)")
+                    # Отправляем сообщение и сохраняем состояние
+                    msg = await event.respond(f"📱 Код отправлен на `{phone}`\n\nОтветьте на это сообщение с кодом авторизации (5 цифр)")
                     
-                    async with self.bot_client.conversation(event.chat_id, timeout=300) as conv:
-                        # Ждём ответа с кодом
-                        code_msg = await conv.get_response()
-                        code = code_msg.text.strip()
-                        
-                        try:
-                            await client.sign_in(phone, code)
-                            logger.info(f"Аккаунт {phone} успешно авторизован")
-                        except SessionPasswordNeededError:
-                            # Нужен пароль 2FA
-                            await event.respond(f"🔐 Требуется пароль 2FA\n\nОтветьте на это сообщение с паролем двухфакторной аутентификации")
-                            password_msg = await conv.get_response()
-                            password = password_msg.text.strip()
-                            await client.sign_in(password=password)
-                            logger.info(f"Аккаунт {phone} успешно авторизован (с 2FA)")
+                    # Сохраняем состояние ожидания кода
+                    self.pending_auth[event.chat_id] = {
+                        'phone': phone,
+                        'proxy': proxy,
+                        'client': client,
+                        'message_id': msg.id,
+                        'state': 'waiting_code',
+                        'event': event
+                    }
+                    logger.info(f"Сохранено состояние авторизации для chat_id={event.chat_id}, phone={phone}, msg_id={msg.id}")
+                    
+                    # Возвращаем None, чтобы показать, что процесс не завершен
+                    return 'pending'
                 else:
                     # Fallback на консоль (если нет event)
                     print(f"Код отправлен на {phone}")
@@ -400,22 +402,43 @@ class UltimateCommentBot:
                     except SessionPasswordNeededError:
                         password = input("Введите пароль 2FA: ")
                         await client.sign_in(password=password)
-                        
-            me = await client.get_me()
-            session = client.session.save()
-            await client.disconnect()
-            return {
-                'session': session, 
-                'active': True, 
-                'name': me.first_name or 'Без имени',
-                'username': getattr(me, 'username', None),
-                'phone': phone,
-                'proxy': proxy
-            }
+                    
+                    me = await client.get_me()
+                    session = client.session.save()
+                    await client.disconnect()
+                    return {
+                        'session': session,
+                        'active': True,
+                        'name': me.first_name or 'Без имени',
+                        'username': getattr(me, 'username', None),
+                        'phone': phone,
+                        'proxy': proxy
+                    }
+            else:
+                # Уже авторизован
+                me = await client.get_me()
+                session = client.session.save()
+                await client.disconnect()
+                return {
+                    'session': session,
+                    'active': True,
+                    'name': me.first_name or 'Без имени',
+                    'username': getattr(me, 'username', None),
+                    'phone': phone,
+                    'proxy': proxy
+                }
+                
         except Exception as e:
             logger.error(f"Ошибка авторизации {phone}: {e}")
             if event:
                 await event.respond(f"❌ Ошибка: {str(e)}")
+            # Очистка состояния при ошибке
+            if event and event.chat_id in self.pending_auth:
+                try:
+                    await self.pending_auth[event.chat_id]['client'].disconnect()
+                except:
+                    pass
+                del self.pending_auth[event.chat_id]
             return None
     
     async def set_account_bio(self, session_data, bio_text):
@@ -806,14 +829,137 @@ class UltimateCommentBot:
                                 True, proxy_parts[3], proxy_parts[4])
                 await event.respond(f"🔄 Начинаем авторизацию: `{phone}`")
                 result = await self.authorize_account(phone, proxy, event)
-                if result:
+                
+                # Если результат 'pending', значит ждём ввода кода через обработчик сообщений
+                if result == 'pending':
+                    logger.info(f"Авторизация {phone} в режиме ожидания кода")
+                    # Не отвечаем здесь - ответим после получения кода
+                elif result:
+                    # Успешная авторизация (уже был авторизован)
                     self.accounts_data[phone] = result
                     self.save_data()
                     await event.respond(f"✅ **{result['name']}** авторизован!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
                 else:
                     await event.respond("❌ Ошибка авторизации!")
             except Exception as e:
+                logger.error(f"Ошибка в /auth: {e}")
                 await event.respond(f"❌ Ошибка: `{str(e)[:50]}`")
+        
+        # Обработчик для входящих сообщений (для перехвата кодов авторизации и паролей 2FA)
+        @self.bot_client.on(events.NewMessage(func=lambda e: not e.text.startswith('/')))
+        async def handle_auth_code(event):
+            """Обрабатывает входящие сообщения для авторизации"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            chat_id = event.chat_id
+            
+            # Проверяем, есть ли ожидание авторизации для этого чата
+            if chat_id not in self.pending_auth:
+                # Нет ожидания - игнорируем
+                return
+            
+            auth_data = self.pending_auth[chat_id]
+            logger.info(f"Получено сообщение в чате с pending_auth: chat_id={chat_id}, user_id={event.sender_id}")
+            logger.info(f"pending_auth[{chat_id}] = {{'phone': '{auth_data['phone']}', 'state': '{auth_data['state']}', 'message_id': {auth_data['message_id']}}}")
+            
+            # Проверяем, что это ответ на наше сообщение
+            if not event.reply_to_msg_id:
+                logger.warning(f"Сообщение не является ответом (reply_to_msg_id=None), игнорируем")
+                return
+            
+            if event.reply_to_msg_id != auth_data['message_id']:
+                logger.warning(f"Ответ на другое сообщение: reply_to={event.reply_to_msg_id}, ожидаем={auth_data['message_id']}")
+                return
+            
+            # Получаем данные
+            phone = auth_data['phone']
+            proxy = auth_data['proxy']
+            client = auth_data['client']
+            state = auth_data['state']
+            code_or_password = event.text.strip()
+            
+            try:
+                if state == 'waiting_code':
+                    logger.info(f"Получен код авторизации для {phone}: {code_or_password}")
+                    
+                    try:
+                        await client.sign_in(phone, code_or_password)
+                        logger.info(f"Аккаунт {phone} успешно авторизован")
+                        
+                        # Успешная авторизация!
+                        me = await client.get_me()
+                        session = client.session.save()
+                        await client.disconnect()
+                        
+                        result = {
+                            'session': session,
+                            'active': True,
+                            'name': me.first_name or 'Без имени',
+                            'username': getattr(me, 'username', None),
+                            'phone': phone,
+                            'proxy': proxy
+                        }
+                        
+                        # Сохраняем в базу
+                        self.accounts_data[phone] = result
+                        self.save_data()
+                        
+                        # Очищаем состояние
+                        del self.pending_auth[chat_id]
+                        
+                        await event.respond(f"✅ **{result['name']}** авторизован!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
+                        
+                    except SessionPasswordNeededError:
+                        # Нужен пароль 2FA
+                        logger.info(f"Для {phone} требуется пароль 2FA")
+                        msg = await event.respond(f"🔐 Требуется пароль 2FA\n\nОтветьте на это сообщение с паролем двухфакторной аутентификации")
+                        
+                        # Обновляем состояние
+                        auth_data['state'] = 'waiting_2fa'
+                        auth_data['message_id'] = msg.id
+                        logger.info(f"Обновлено состояние на waiting_2fa, новый message_id={msg.id}")
+                        
+                elif state == 'waiting_2fa':
+                    logger.info(f"Получен пароль 2FA для {phone}")
+                    
+                    await client.sign_in(password=code_or_password)
+                    logger.info(f"Аккаунт {phone} успешно авторизован (с 2FA)")
+                    
+                    # Успешная авторизация!
+                    me = await client.get_me()
+                    session = client.session.save()
+                    await client.disconnect()
+                    
+                    result = {
+                        'session': session,
+                        'active': True,
+                        'name': me.first_name or 'Без имени',
+                        'username': getattr(me, 'username', None),
+                        'phone': phone,
+                        'proxy': proxy
+                    }
+                    
+                    # Сохраняем в базу
+                    self.accounts_data[phone] = result
+                    self.save_data()
+                    
+                    # Очищаем состояние
+                    del self.pending_auth[chat_id]
+                    
+                    await event.respond(f"✅ **{result['name']}** авторизован (с 2FA)!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при обработке кода/пароля для {phone}: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)}\n\nПопробуйте заново: /auth {phone}")
+                
+                # Очистка при ошибке
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                if chat_id in self.pending_auth:
+                    del self.pending_auth[chat_id]
         
         @self.bot_client.on(events.NewMessage(pattern='/listaccounts'))
         async def list_accounts(event):
