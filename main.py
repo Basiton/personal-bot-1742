@@ -427,15 +427,21 @@ class UltimateCommentBot:
             session = os.getenv(f'ACCOUNT_{n}_SESSION', '')
             proxy_str = os.getenv(f'ACCOUNT_{n}_PROXY', '')
             
-            # Parse proxy if exists (format: socks5:host:port:user:pass)
+            # Parse proxy if exists (format: socks5:host:port:rdns:user:pass OR socks5:host:port:user:pass)
             proxy = None
             if proxy_str:
                 try:
                     parts = proxy_str.split(':')
-                    if len(parts) >= 5:
-                        proxy = (parts[0], parts[1], int(parts[2]), parts[3], parts[4])
-                except:
-                    logger.warning(f"Failed to parse proxy for ACCOUNT_{n}")
+                    # Telethon expects: (type, host, port, rdns, username, password)
+                    if len(parts) == 6:
+                        # Full format: socks5:host:port:rdns:user:pass
+                        proxy = (parts[0], parts[1], int(parts[2]), 
+                                parts[3].lower() == 'true', parts[4], parts[5])
+                    elif len(parts) >= 5:
+                        # Short format: socks5:host:port:user:pass (rdns=True by default)
+                        proxy = (parts[0], parts[1], int(parts[2]), True, parts[3], parts[4])
+                except Exception as e:
+                    logger.warning(f"Failed to parse proxy for ACCOUNT_{n}: {e}")
             
             accounts.append((n, phone, session, proxy))
             n += 1
@@ -705,7 +711,7 @@ class UltimateCommentBot:
         async def help_handler(event):
             if not await self.is_admin(event.sender_id): return
             text = """**📱 АККАУНТЫ:**
-`/auth +79123456789 [proxy]` - авторизовать
+`/auth +79123456789 [socks5:host:port:user:pass]` - авторизовать
 `/accounts` - управление профилями (аватар, имя, био) 🆕
 `/listaccounts` - все аккаунты
 `/activeaccounts` - только активные ✅
@@ -763,8 +769,15 @@ class UltimateCommentBot:
                 proxy = None
                 if len(parts) > 2:
                     proxy_parts = parts[2].split(':')
-                    if len(proxy_parts) == 5:
-                        proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), proxy_parts[3], proxy_parts[4])
+                    # Telethon expects: (type, host, port, rdns, username, password)
+                    if len(proxy_parts) == 6:
+                        # Full format: socks5:host:port:rdns:user:pass
+                        proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), 
+                                proxy_parts[3].lower() == 'true', proxy_parts[4], proxy_parts[5])
+                    elif len(proxy_parts) == 5:
+                        # Short format: socks5:host:port:user:pass (rdns=True by default)
+                        proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), 
+                                True, proxy_parts[3], proxy_parts[4])
                 await event.respond(f"Авторизуем: `{phone}`\nПроверьте терминал!")
                 result = await self.authorize_account(phone, proxy)
                 if result:
