@@ -189,6 +189,19 @@ class UltimateCommentBot:
                 )
             ''')
             
+            # Create profile_changes table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS profile_changes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phone TEXT,
+                    change_type TEXT,
+                    old_value TEXT,
+                    new_value TEXT,
+                    change_date TEXT,
+                    success INTEGER DEFAULT 1
+                )
+            ''')
+            
             self.conn.commit()
             logger.info("Database initialized successfully")
         except Exception as e:
@@ -728,6 +741,21 @@ class UltimateCommentBot:
         
         return str(temp_path)
     
+    async def log_profile_change(self, phone, change_type, old_value, new_value, success=True):
+        """Логирует изменение профиля в БД"""
+        try:
+            if self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                    INSERT INTO profile_changes (phone, change_type, old_value, new_value, change_date, success)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (phone, change_type, old_value or '', new_value or '', 
+                      datetime.now().isoformat(), 1 if success else 0))
+                self.conn.commit()
+                logger.info(f"Profile change logged: {phone} - {change_type}")
+        except Exception as e:
+            logger.error(f"Error logging profile change: {e}")
+    
     # ============= END PROFILE MANAGEMENT FUNCTIONS =============
     
     async def start(self):
@@ -768,6 +796,12 @@ class UltimateCommentBot:
 `/blockedaccounts` - заблокированные 🚫
 `/delaccount +79123456789` - удалить
 `/toggleaccount +79123456789` - переключить активный/резерв
+
+**👤 УПРАВЛЕНИЕ ПРОФИЛЕМ:**
+`/setname` - изменить имя (выбор аккаунта → ввод имени)
+`/setbio` - изменить био (выбор аккаунта → ввод био)
+`/setavatar` - загрузить аватар (выбор аккаунта → отправка фото)
+`/profile` - показать профили всех активных аккаунтов
 
 **⚙️ НАСТРОЙКИ:**
 `/setparallel 2` - кол-во параллельных аккаунтов
@@ -2483,6 +2517,448 @@ class UltimateCommentBot:
             except Exception as e:
                 logger.error(f"Clear blocked error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        # ============= PROFILE MANAGEMENT COMMANDS =============
+        
+        @self.bot_client.on(events.NewMessage(pattern='/setname'))
+        async def setname_command(event):
+            """Шаг 1: Показывает список аккаунтов для выбора"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            try:
+                # Get all active accounts
+                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                 if data.get('active') and data.get('session')]
+                
+                if not active_accounts:
+                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                    return
+                
+                # Build accounts list
+                text = "👤 **ИЗМЕНЕНИЕ ИМЕНИ**\n\n"
+                text += "Выберите номер аккаунта:\n\n"
+                
+                for idx, (phone, data) in enumerate(active_accounts, 1):
+                    emoji_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx-1] if idx <= 10 else f"{idx}️⃣"
+                    text += f"{emoji_num} `{phone}`\n"
+                
+                text += "\n📝 Ответьте (reply) на это сообщение с номером аккаунта"
+                
+                # Send message and save state
+                msg = await event.respond(text)
+                self.user_states[event.sender_id] = {
+                    'state': 'waiting_account_selection_for_name',
+                    'message_id': msg.id,
+                    'accounts': active_accounts
+                }
+                
+            except Exception as e:
+                logger.error(f"Setname command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/setbio'))
+        async def setbio_command(event):
+            """Шаг 1: Показывает список аккаунтов для выбора"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            try:
+                # Get all active accounts
+                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                 if data.get('active') and data.get('session')]
+                
+                if not active_accounts:
+                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                    return
+                
+                # Build accounts list
+                text = "📝 **ИЗМЕНЕНИЕ БИО**\n\n"
+                text += "Выберите номер аккаунта:\n\n"
+                
+                for idx, (phone, data) in enumerate(active_accounts, 1):
+                    emoji_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx-1] if idx <= 10 else f"{idx}️⃣"
+                    text += f"{emoji_num} `{phone}`\n"
+                
+                text += "\n📝 Ответьте (reply) на это сообщение с номером аккаунта"
+                
+                # Send message and save state
+                msg = await event.respond(text)
+                self.user_states[event.sender_id] = {
+                    'state': 'waiting_account_selection_for_bio',
+                    'message_id': msg.id,
+                    'accounts': active_accounts
+                }
+                
+            except Exception as e:
+                logger.error(f"Setbio command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/setavatar'))
+        async def setavatar_command(event):
+            """Шаг 1: Показывает список аккаунтов для выбора"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            try:
+                # Get all active accounts
+                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                 if data.get('active') and data.get('session')]
+                
+                if not active_accounts:
+                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                    return
+                
+                # Build accounts list
+                text = "📷 **ЗАГРУЗКА АВАТАРКИ**\n\n"
+                text += "Выберите номер аккаунта:\n\n"
+                
+                for idx, (phone, data) in enumerate(active_accounts, 1):
+                    emoji_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx-1] if idx <= 10 else f"{idx}️⃣"
+                    text += f"{emoji_num} `{phone}`\n"
+                
+                text += "\n📝 Ответьте (reply) на это сообщение с номером аккаунта"
+                
+                # Send message and save state
+                msg = await event.respond(text)
+                self.user_states[event.sender_id] = {
+                    'state': 'waiting_account_selection_for_avatar',
+                    'message_id': msg.id,
+                    'accounts': active_accounts
+                }
+                
+            except Exception as e:
+                logger.error(f"Setavatar command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/profile'))
+        async def profile_command(event):
+            """Показывает текущую информацию о профилях всех активных аккаунтов"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            try:
+                # Get all active accounts
+                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                 if data.get('active') and data.get('session')]
+                
+                if not active_accounts:
+                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                    return
+                
+                text = f"👥 **ПРОФИЛИ АКТИВНЫХ АККАУНТОВ**\n\n"
+                text += f"Всего аккаунтов: {len(active_accounts)}\n\n"
+                
+                profiles = []
+                for phone, data in active_accounts[:10]:  # Limit to 10 for message size
+                    try:
+                        client = TelegramClient(
+                            StringSession(data['session']), 
+                            API_ID, 
+                            API_HASH,
+                            proxy=data.get('proxy')
+                        )
+                        await client.connect()
+                        
+                        if await client.is_user_authorized():
+                            me = await client.get_me()
+                            
+                            profile_text = f"📱 `{phone[-4:]}`\n"
+                            profile_text += f"👤 {me.first_name or ''} {me.last_name or ''}\n"
+                            
+                            if me.username:
+                                profile_text += f"🔗 @{me.username}\n"
+                            
+                            bio = me.about or "Не указано"
+                            profile_text += f"📝 {bio[:50]}{'...' if len(bio) > 50 else ''}\n"
+                            profile_text += f"✅ Статус: Активен\n"
+                            
+                            profiles.append(profile_text)
+                        else:
+                            profiles.append(f"📱 `{phone[-4:]}`\n❌ Не авторизован\n")
+                        
+                        await client.disconnect()
+                        
+                    except Exception as e:
+                        profiles.append(f"📱 `{phone[-4:]}`\n❌ Ошибка: {str(e)[:30]}\n")
+                        logger.error(f"Error getting profile for {phone}: {e}")
+                
+                text += "\n".join(profiles)
+                
+                if len(active_accounts) > 10:
+                    text += f"\n\n... и еще {len(active_accounts) - 10} аккаунтов"
+                
+                text += f"\n\n💡 Используйте:\n"
+                text += f"`/setname` - изменить имя\n"
+                text += f"`/setbio` - изменить описание\n"
+                text += f"`/setavatar` - загрузить аватар"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                logger.error(f"Profile command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        # Handle text messages for account selection and data input
+        @self.bot_client.on(events.NewMessage(func=lambda e: e.text and not e.text.startswith('/') and e.reply_to_msg_id))
+        async def handle_profile_input(event):
+            """Обрабатывает ввод номера аккаунта и данных профиля"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            if event.sender_id not in self.user_states:
+                return
+            
+            state_data = self.user_states[event.sender_id]
+            state = state_data.get('state')
+            
+            try:
+                # Step 2: Handle account selection (user replied with number)
+                if state in ['waiting_account_selection_for_name', 'waiting_account_selection_for_bio', 'waiting_account_selection_for_avatar']:
+                    # Check if reply is to our message
+                    if event.reply_to_msg_id != state_data.get('message_id'):
+                        return
+                    
+                    # Parse account number
+                    try:
+                        account_num = int(event.text.strip())
+                    except ValueError:
+                        await event.respond("❌ Введите число (номер аккаунта)")
+                        return
+                    
+                    accounts = state_data.get('accounts', [])
+                    if account_num < 1 or account_num > len(accounts):
+                        await event.respond(f"❌ Неверный номер. Выберите от 1 до {len(accounts)}")
+                        return
+                    
+                    # Get selected account
+                    selected_phone, selected_data = accounts[account_num - 1]
+                    
+                    # Update state based on command type
+                    if state == 'waiting_account_selection_for_name':
+                        self.user_states[event.sender_id] = {
+                            'state': 'waiting_name_input',
+                            'phone': selected_phone,
+                            'data': selected_data
+                        }
+                        await event.respond(
+                            f"👤 **Аккаунт {account_num}: `{selected_phone}`**\n\n"
+                            f"Отправьте новое имя (и фамилию):\n"
+                            f"Например: `Иван Петров`"
+                        )
+                    elif state == 'waiting_account_selection_for_bio':
+                        self.user_states[event.sender_id] = {
+                            'state': 'waiting_bio_input',
+                            'phone': selected_phone,
+                            'data': selected_data
+                        }
+                        await event.respond(
+                            f"📝 **Аккаунт {account_num}: `{selected_phone}`**\n\n"
+                            f"Отправьте новое описание (био):\n"
+                            f"Например: `Инвестор | Трейдер | Крипто 🚀`"
+                        )
+                    elif state == 'waiting_account_selection_for_avatar':
+                        self.user_states[event.sender_id] = {
+                            'state': 'waiting_avatar_photo',
+                            'phone': selected_phone,
+                            'data': selected_data
+                        }
+                        await event.respond(
+                            f"📷 **Аккаунт {account_num}: `{selected_phone}`**\n\n"
+                            f"Отправьте фото для аватарки (jpg, png)"
+                        )
+                
+                # Step 3: Handle data input for selected account
+                elif state == 'waiting_name_input':
+                    new_name = event.text.strip()
+                    phone = state_data.get('phone')
+                    data = state_data.get('data')
+                    
+                    if not new_name:
+                        await event.respond("❌ Имя не может быть пустым")
+                        return
+                    
+                    # Parse name
+                    name_parts = new_name.split(maxsplit=1)
+                    first_name = name_parts[0]
+                    last_name = name_parts[1] if len(name_parts) > 1 else ""
+                    
+                    await event.respond("⏳ Обновляю имя...")
+                    
+                    # Update profile
+                    try:
+                        client = TelegramClient(
+                            StringSession(data['session']), 
+                            API_ID, 
+                            API_HASH,
+                            proxy=data.get('proxy')
+                        )
+                        await client.connect()
+                        
+                        if await client.is_user_authorized():
+                            # Get current name
+                            me = await client.get_me()
+                            old_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
+                            
+                            # Update
+                            await client(UpdateProfileRequest(
+                                first_name=first_name,
+                                last_name=last_name
+                            ))
+                            
+                            # Log
+                            await self.log_profile_change(phone, 'name', old_name, new_name, True)
+                            
+                            await event.respond(
+                                f"✅ **Имя обновлено для `{phone}`**\n\n"
+                                f"Новое имя: {first_name} {last_name}"
+                            )
+                            logger.info(f"Name updated for {phone}: {new_name}")
+                        else:
+                            await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                        
+                        await client.disconnect()
+                    except Exception as e:
+                        await self.log_profile_change(phone, 'name', '', new_name, False)
+                        await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                        logger.error(f"Error updating name for {phone}: {e}")
+                    
+                    # Clear state
+                    await self.clear_user_state(event.sender_id)
+                
+                elif state == 'waiting_bio_input':
+                    new_bio = event.text.strip()
+                    phone = state_data.get('phone')
+                    data = state_data.get('data')
+                    
+                    if not new_bio:
+                        await event.respond("❌ Описание не может быть пустым")
+                        return
+                    
+                    await event.respond("⏳ Обновляю био...")
+                    
+                    # Update profile
+                    try:
+                        client = TelegramClient(
+                            StringSession(data['session']), 
+                            API_ID, 
+                            API_HASH,
+                            proxy=data.get('proxy')
+                        )
+                        await client.connect()
+                        
+                        if await client.is_user_authorized():
+                            # Get current bio
+                            me = await client.get_me()
+                            old_bio = me.about or ""
+                            
+                            # Update
+                            await client(UpdateProfileRequest(about=new_bio))
+                            
+                            # Log
+                            await self.log_profile_change(phone, 'bio', old_bio, new_bio, True)
+                            
+                            await event.respond(
+                                f"✅ **Био обновлено для `{phone}`**\n\n"
+                                f"Новое био: {new_bio[:100]}"
+                            )
+                            logger.info(f"Bio updated for {phone}")
+                        else:
+                            await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                        
+                        await client.disconnect()
+                    except Exception as e:
+                        await self.log_profile_change(phone, 'bio', '', new_bio, False)
+                        await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                        logger.error(f"Error updating bio for {phone}: {e}")
+                    
+                    # Clear state
+                    await self.clear_user_state(event.sender_id)
+                    
+            except Exception as e:
+                logger.error(f"Handle profile input error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                await self.clear_user_state(event.sender_id)
+        
+        # Handle photo upload for avatar
+        @self.bot_client.on(events.NewMessage(func=lambda e: e.photo))
+        async def handle_avatar_photo(event):
+            """Обрабатывает загрузку фото для аватарки выбранного аккаунта"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            if event.sender_id not in self.user_states:
+                return
+            
+            state_data = self.user_states[event.sender_id]
+            state = state_data.get('state')
+            
+            if state != 'waiting_avatar_photo':
+                return
+            
+            try:
+                phone = state_data.get('phone')
+                data = state_data.get('data')
+                
+                # Download photo
+                photo_path = await event.download_media(file=f"/tmp/avatar_{event.sender_id}.jpg")
+                
+                if not photo_path or not os.path.exists(photo_path):
+                    await event.respond("❌ Ошибка загрузки фото")
+                    await self.clear_user_state(event.sender_id)
+                    return
+                
+                await event.respond("⏳ Загружаю аватарку...")
+                
+                # Upload to selected account
+                try:
+                    client = TelegramClient(
+                        StringSession(data['session']), 
+                        API_ID, 
+                        API_HASH,
+                        proxy=data.get('proxy')
+                    )
+                    await client.connect()
+                    
+                    if await client.is_user_authorized():
+                        # Upload profile photo
+                        await client(UploadProfilePhotoRequest(
+                            file=await client.upload_file(photo_path)
+                        ))
+                        
+                        # Log
+                        await self.log_profile_change(phone, 'avatar', '', 'uploaded', True)
+                        
+                        await event.respond(f"✅ **Аватарка загружена для `{phone}`**")
+                        logger.info(f"Avatar uploaded for {phone}")
+                    else:
+                        await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                    
+                    await client.disconnect()
+                except Exception as e:
+                    await self.log_profile_change(phone, 'avatar', '', '', False)
+                    await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                    logger.error(f"Error uploading avatar for {phone}: {e}")
+                
+                # Clean up temp file
+                try:
+                    os.remove(photo_path)
+                except:
+                    pass
+                
+                # Clear state
+                await self.clear_user_state(event.sender_id)
+                
+            except Exception as e:
+                logger.error(f"Handle avatar photo error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                await self.clear_user_state(event.sender_id)
+        
+        # ============= END PROFILE MANAGEMENT COMMANDS =============
     
     async def auto_stop_after_4_hours(self, chat_id):
         """Automatically stop monitoring after 4 hours"""
