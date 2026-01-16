@@ -5,7 +5,7 @@ import logging
 import os
 import sqlite3
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from telethon import TelegramClient, events, functions, Button
 from telethon.sessions import StringSession
@@ -245,6 +245,33 @@ class UltimateCommentBot:
                 )
             ''')
             
+            # Create account_stats table for detailed statistics
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS account_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    phone TEXT,
+                    channel TEXT,
+                    event_type TEXT,
+                    timestamp TEXT,
+                    success INTEGER DEFAULT 1,
+                    error_message TEXT
+                )
+            ''')
+            
+            # Create index for faster queries
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_account_stats_phone 
+                ON account_stats(phone)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_account_stats_timestamp 
+                ON account_stats(timestamp)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_account_stats_channel 
+                ON account_stats(channel)
+            ''')
+            
             self.conn.commit()
             logger.info("Database initialized successfully")
         except Exception as e:
@@ -439,7 +466,7 @@ class UltimateCommentBot:
         
         return True, 0
     
-    async def add_comment_stat(self, phone, success=True):
+    async def add_comment_stat(self, phone, success=True, channel=None, error_message=None):
         self.stats['total_comments'] += 1
         if success:
             self.stats['daily_comments'] += 1
@@ -447,6 +474,20 @@ class UltimateCommentBot:
             self.stats['blocked_accounts'].append(phone)
         if len(self.stats['blocked_accounts']) > 50:
             self.stats['blocked_accounts'] = self.stats['blocked_accounts'][-20:]
+        
+        # Save detailed stat to DB
+        if self.conn and phone:
+            try:
+                cursor = self.conn.cursor()
+                event_type = 'comment_sent' if success else 'comment_failed'
+                cursor.execute(
+                    "INSERT INTO account_stats (phone, channel, event_type, timestamp, success, error_message) VALUES (?, ?, ?, ?, ?, ?)",
+                    (phone, channel or '', event_type, datetime.now().isoformat(), 1 if success else 0, error_message or '')
+                )
+                self.conn.commit()
+            except Exception as e:
+                logger.error(f"Error saving account stat: {e}")
+        
         self.save_stats()
     
     async def mark_channel_failed_for_account(self, username, phone, reason):
@@ -461,6 +502,18 @@ class UltimateCommentBot:
             
             self.channel_failed_attempts[username][phone]['count'] += 1
             self.channel_failed_attempts[username][phone]['reasons'].append(reason)
+            
+            # Record error in DB for stats
+            if self.conn:
+                try:
+                    cursor = self.conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO account_stats (phone, channel, event_type, timestamp, success, error_message) VALUES (?, ?, ?, ?, ?, ?)",
+                        (phone, username, 'comment_failed', datetime.now().isoformat(), 0, reason)
+                    )
+                    self.conn.commit()
+                except Exception as e:
+                    logger.error(f"Error saving failure stat: {e}")
             
             # Count active accounts (NEW: use status instead of 'active' field)
             active_accounts = [p for p, data in self.accounts_data.items() 
@@ -1143,9 +1196,15 @@ class UltimateCommentBot:
 `/resetfails` - сбросить счетчики неудач
 `/showfails` - показать текущие неудачи
 
+**🧪 ТЕСТОВЫЙ РЕЖИМ:**
+`/testmode` - статус тестового режима
+`/testmode on @channel1 @channel2` - включить с каналами
+`/testmode off` - выключить
+`/testmode speed 10` - установить скорость (комм/час)
+
 **🔗 BIO:**
 `/addbio t.me/link` - добавить
-`/setbio` - применить всем
+`/setbioall` - применить всем активным
 
 **👑 АДМИНЫ:**
 `/addadmin 123456789` - новый админ"""
@@ -2192,8 +2251,8 @@ class UltimateCommentBot:
             except:
                 await event.respond("Формат: `/addbio https://t.me/channel`")
         
-        @self.bot_client.on(events.NewMessage(pattern='/setbio'))
-        async def set_bio(event):
+        @self.bot_client.on(events.NewMessage(pattern='/setbioall'))
+        async def set_bio_all(event):
             if not await self.is_admin(event.sender_id): return
             if not self.bio_links:
                 await event.respond("Сначала `/addbio`!")
@@ -2210,47 +2269,199 @@ class UltimateCommentBot:
         async def show_stats(event):
             if not await self.is_admin(event.sender_id): return
             
-            text = f"""📊 **СТАТИСТИКА БОТА:**
-
-✅ Всего комментариев: `{self.stats['total_comments']}`
-📈 Сегодня комментариев: `{self.stats['daily_comments']}`
-"""
+            text = "📊 **УПРАВЛЕНЧЕСКИЙ ОТЧЁТ**\n\n"
             
-            # Get blocked accounts from DB
+            # 1. Общая сводка + скорость
+            total_comments = self.stats.get('total_comments', 0)
+            daily_comments = self.stats.get('daily_comments', 0)
+            
+            # Calculate hourly rate
+            current_time = datetime.now().timestamp()
+            hour_ago = current_time - 3600
+            comments_last_hour = 0
+            
+            for phone, activity in self.account_activity.items():
+                messages = activity.get('messages', [])
+                comments_last_hour += sum(1 for ts, _ in messages if ts >= hour_ago)
+            
+            active_accounts_count = sum(1 for d in self.accounts_data.values() 
+                                       if d.get('status') == ACCOUNT_STATUS_ACTIVE)
+            
+            text += f"⚡ **Скорость:** `{comments_last_hour}` комм/час\n"
+            text += f"👥 **Активных аккаунтов:** `{active_accounts_count}`\n"
+            text += f"📋 **Лимит:** `{self.messages_per_hour}` комм/час на аккаунт\n"
+            text += f"✅ **Всего комментариев:** `{total_comments}`\n"
+            text += f"📈 **Сегодня комментариев:** `{daily_comments}`\n\n"
+            
+            # 2. Статистика по аккаунтам
             if self.conn:
                 try:
                     cursor = self.conn.cursor()
-                    cursor.execute("SELECT COUNT(*) FROM blocked_accounts")
-                    blocked_count = cursor.fetchone()[0]
-                    text += f"🚫 Заблокировано аккаунтов: `{blocked_count}`\n"
+                    
+                    text += "👤 **АККАУНТЫ:**\n"
+                    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                    
+                    for phone, data in self.accounts_data.items():
+                        status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                        if status_val == ACCOUNT_STATUS_ACTIVE:
+                            status_emoji = "✅"
+                        elif status_val == ACCOUNT_STATUS_BROKEN:
+                            status_emoji = "🔴"
+                        else:
+                            status_emoji = "🔵"
+                        
+                        # Count today's comments
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE phone = ? AND timestamp >= ? AND event_type = 'comment_sent'",
+                            (phone, today_start)
+                        )
+                        today_count = cursor.fetchone()[0]
+                        
+                        # Count total comments
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE phone = ? AND event_type = 'comment_sent'",
+                            (phone,)
+                        )
+                        total_count = cursor.fetchone()[0]
+                        
+                        # Count errors
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE phone = ? AND success = 0",
+                            (phone,)
+                        )
+                        error_count = cursor.fetchone()[0]
+                        
+                        short_phone = phone[-10:] if len(phone) > 10 else phone
+                        text += f"{status_emoji} `{short_phone}` • сегодня: {today_count} • всего: {total_count} • ошибки: {error_count}\n"
+                    
+                    text += "\n"
+                    
+                    # 3. Топ аккаунтов
+                    cursor.execute(
+                        """SELECT phone, COUNT(*) as count FROM account_stats 
+                        WHERE timestamp >= ? AND event_type = 'comment_sent' 
+                        GROUP BY phone ORDER BY count DESC LIMIT 3""",
+                        (today_start,)
+                    )
+                    top_accounts = cursor.fetchall()
+                    
+                    if top_accounts:
+                        text += "🏆 **ТОП АККАУНТОВ СЕГОДНЯ:**\n"
+                        for idx, (phone, count) in enumerate(top_accounts, 1):
+                            short_phone = phone[-10:] if len(phone) > 10 else phone
+                            text += f"{idx}. `{short_phone}` — {count} комм\n"
+                        text += "\n"
+                    
+                    # 4. Статистика по каналам
+                    cursor.execute("SELECT COUNT(*) FROM parsed_channels")
+                    total_channels = cursor.fetchone()[0]
+                    
+                    cursor.execute(
+                        """SELECT COUNT(DISTINCT channel) FROM account_stats 
+                        WHERE timestamp >= ? AND event_type = 'comment_sent'""",
+                        (today_start,)
+                    )
+                    active_channels_today = cursor.fetchone()[0]
                     
                     cursor.execute("SELECT COUNT(*) FROM blocked_channels")
                     blocked_channels_count = cursor.fetchone()[0]
-                    text += f"🔇 Каналов без комментариев: `{blocked_channels_count}`\n\n"
                     
-                    # Show recent blocks
+                    text += "📺 **КАНАЛЫ:**\n"
+                    text += f"• Всего в работе: `{total_channels}`\n"
+                    text += f"• Активных сегодня: `{active_channels_today}`\n"
+                    text += f"• Без комментариев: `{blocked_channels_count}`\n\n"
+                    
+                    # Top channels
+                    cursor.execute(
+                        """SELECT channel, COUNT(*) as count FROM account_stats 
+                        WHERE timestamp >= ? AND event_type = 'comment_sent' AND channel != '' 
+                        GROUP BY channel ORDER BY count DESC LIMIT 3""",
+                        (today_start,)
+                    )
+                    top_channels = cursor.fetchall()
+                    
+                    if top_channels:
+                        text += "📊 **ТОП КАНАЛОВ СЕГОДНЯ:**\n"
+                        for idx, (channel, count) in enumerate(top_channels, 1):
+                            text += f"{idx}. `@{channel}` — {count} комм\n"
+                        text += "\n"
+                    
+                    # 5. Последние блокировки
                     cursor.execute(
                         "SELECT phone, block_date, reason FROM blocked_accounts ORDER BY block_date DESC LIMIT 5"
                     )
                     blocks = cursor.fetchall()
-                    if blocks:
-                        text += "**Последние блокировки:**\n"
-                        for phone, date, reason in blocks:
-                            text += f"  🚫 `{phone}` - {reason} ({date[:10]})\n"
                     
-                    text += "\n**Последние комментарии:**\n"
+                    if blocks:
+                        text += "🚫 **ПОСЛЕДНИЕ БЛОКИРОВКИ:**\n"
+                        for phone, date, reason in blocks:
+                            short_phone = phone[-10:] if len(phone) > 10 else phone
+                            date_str = date[:10] if date else 'N/A'
+                            text += f"• `{short_phone}` — {reason} ({date_str})\n"
+                        text += "\n"
+                    
+                    # 6. Последние комментарии
                     cursor.execute(
                         "SELECT phone, channel, comment, date FROM comment_history ORDER BY id DESC LIMIT 5"
                     )
                     comments = cursor.fetchall()
+                    
                     if comments:
+                        text += "💬 **ПОСЛЕДНИЕ КОММЕНТАРИИ:**\n"
                         for phone, channel, comment, date in comments:
-                            short_comment = comment[:30] if len(comment) > 30 else comment
-                            text += f"  ✓ `@{channel}` | {short_comment}... ({date[:10]})\n"
-                    else:
-                        text += "  • Нет\n"
+                            short_phone = phone[-10:] if len(phone) > 10 else phone
+                            short_comment = comment[:25] if len(comment) > 25 else comment
+                            date_str = date[:10] if date else 'N/A'
+                            text += f"• `@{channel}` | {short_comment}... ({date_str})\n"
+                        text += "\n"
+                    
+                    # 7. Предупреждения/риски
+                    warnings = []
+                    
+                    # Check blocks in last 24h
+                    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM blocked_accounts WHERE block_date >= ?",
+                        (yesterday,)
+                    )
+                    blocks_24h = cursor.fetchone()[0]
+                    
+                    if blocks_24h >= 2:
+                        warnings.append(
+                            "⚠️ **ВНИМАНИЕ:** Повышенное число блокировок за последние 24 часа. "
+                            f"Рекомендуется снизить скорость и проверить прокси."
+                        )
+                    
+                    # Check % of blocked accounts
+                    cursor.execute("SELECT COUNT(*) FROM blocked_accounts")
+                    total_blocked = cursor.fetchone()[0]
+                    total_accounts = len(self.accounts_data)
+                    
+                    if total_accounts > 0:
+                        blocked_percent = (total_blocked / total_accounts) * 100
+                        if blocked_percent > 30:
+                            warnings.append(
+                                f"⚠️ **ВЫСОКИЙ РИСК:** {blocked_percent:.1f}% аккаунтов заблокировано. "
+                                "Необходима ротация аккаунтов."
+                            )
+                    
+                    # Check if hourly rate is too high
+                    if active_accounts_count > 0:
+                        avg_rate_per_account = comments_last_hour / active_accounts_count
+                        if avg_rate_per_account > self.messages_per_hour * 0.9:
+                            warnings.append(
+                                f"⚡ **ПРЕДУПРЕЖДЕНИЕ:** Приближение к лимиту скорости "
+                                f"({avg_rate_per_account:.1f}/{self.messages_per_hour} комм/час)."
+                            )
+                    
+                    if warnings:
+                        text += "🔔 **РИСКИ И ПРЕДУПРЕЖДЕНИЯ:**\n"
+                        for warning in warnings:
+                            text += f"{warning}\n\n"
+                    
                 except Exception as e:
                     logger.error(f"Stats DB error: {e}")
+                    text += f"\n⚠️ Ошибка получения статистики: {str(e)[:100]}\n"
             
             await event.respond(text)
         
@@ -3075,21 +3286,29 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts (NEW: use status)
-                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
+                # Get ALL accounts (not just active)
+                all_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                if data.get('session')]
                 
-                if not active_accounts:
-                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                if not all_accounts:
+                    await event.respond("❌ Нет авторизованных аккаунтов")
                     return
                 
-                # Build accounts list
+                # Build accounts list with status indicators
                 text = "👤 **ИЗМЕНЕНИЕ ИМЕНИ**\n\n"
                 text += "Выберите номер аккаунта:\n\n"
                 
-                for idx, (phone, data) in enumerate(active_accounts, 1):
-                    emoji_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx-1] if idx <= 10 else f"{idx}️⃣"
-                    text += f"{emoji_num} `{phone}`\n"
+                for idx, (phone, data) in enumerate(all_accounts, 1):
+                    # Get status indicator like in /listaccounts
+                    status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                    if status_val == ACCOUNT_STATUS_ACTIVE:
+                        status = "✅"
+                    elif status_val == ACCOUNT_STATUS_BROKEN:
+                        status = "🔴"
+                    else:
+                        status = "🔵"
+                    
+                    text += f"{idx}. {status} `{phone}`\n"
                 
                 text += "\n📝 Ответьте (reply) на это сообщение с номером аккаунта"
                 
@@ -3098,7 +3317,7 @@ class UltimateCommentBot:
                 self.user_states[event.sender_id] = {
                     'state': 'waiting_account_selection_for_name',
                     'message_id': msg.id,
-                    'accounts': active_accounts
+                    'accounts': all_accounts
                 }
                 
             except Exception as e:
@@ -3113,21 +3332,29 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts (NEW: use status)
-                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
+                # Get ALL accounts (not just active)
+                all_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                if data.get('session')]
                 
-                if not active_accounts:
-                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                if not all_accounts:
+                    await event.respond("❌ Нет авторизованных аккаунтов")
                     return
                 
-                # Build accounts list
+                # Build accounts list with status indicators
                 text = "📝 **ИЗМЕНЕНИЕ БИО**\n\n"
                 text += "Выберите номер аккаунта:\n\n"
                 
-                for idx, (phone, data) in enumerate(active_accounts, 1):
-                    emoji_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx-1] if idx <= 10 else f"{idx}️⃣"
-                    text += f"{emoji_num} `{phone}`\n"
+                for idx, (phone, data) in enumerate(all_accounts, 1):
+                    # Get status indicator like in /listaccounts
+                    status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                    if status_val == ACCOUNT_STATUS_ACTIVE:
+                        status = "✅"
+                    elif status_val == ACCOUNT_STATUS_BROKEN:
+                        status = "🔴"
+                    else:
+                        status = "🔵"
+                    
+                    text += f"{idx}. {status} `{phone}`\n"
                 
                 text += "\n📝 Ответьте (reply) на это сообщение с номером аккаунта"
                 
@@ -3136,7 +3363,7 @@ class UltimateCommentBot:
                 self.user_states[event.sender_id] = {
                     'state': 'waiting_account_selection_for_bio',
                     'message_id': msg.id,
-                    'accounts': active_accounts
+                    'accounts': all_accounts
                 }
                 
             except Exception as e:
@@ -3151,21 +3378,29 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts (NEW: use status)
-                active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
+                # Get ALL accounts (not just active)
+                all_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                if data.get('session')]
                 
-                if not active_accounts:
-                    await event.respond("❌ Нет активных авторизованных аккаунтов")
+                if not all_accounts:
+                    await event.respond("❌ Нет авторизованных аккаунтов")
                     return
                 
-                # Build accounts list
+                # Build accounts list with status indicators
                 text = "📷 **ЗАГРУЗКА АВАТАРКИ**\n\n"
                 text += "Выберите номер аккаунта:\n\n"
                 
-                for idx, (phone, data) in enumerate(active_accounts, 1):
-                    emoji_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"][idx-1] if idx <= 10 else f"{idx}️⃣"
-                    text += f"{emoji_num} `{phone}`\n"
+                for idx, (phone, data) in enumerate(all_accounts, 1):
+                    # Get status indicator like in /listaccounts
+                    status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                    if status_val == ACCOUNT_STATUS_ACTIVE:
+                        status = "✅"
+                    elif status_val == ACCOUNT_STATUS_BROKEN:
+                        status = "🔴"
+                    else:
+                        status = "🔵"
+                    
+                    text += f"{idx}. {status} `{phone}`\n"
                 
                 text += "\n📝 Ответьте (reply) на это сообщение с номером аккаунта"
                 
@@ -3174,7 +3409,7 @@ class UltimateCommentBot:
                 self.user_states[event.sender_id] = {
                     'state': 'waiting_account_selection_for_avatar',
                     'message_id': msg.id,
-                    'accounts': active_accounts
+                    'accounts': all_accounts
                 }
                 
             except Exception as e:
@@ -3765,6 +4000,30 @@ class UltimateCommentBot:
                             channel_theme=channel_theme_str
                         )
                         
+                        # ============= TEST MODE: Check for duplicate comments =============
+                        if self.test_mode:
+                            if not hasattr(self, '_last_test_comments'):
+                                self._last_test_comments = []
+                            
+                            # Check if this comment was used recently
+                            if comment in self._last_test_comments:
+                                logger.warning(f"🧪 TEST MODE: Duplicate comment detected! Regenerating...")
+                                # Try to regenerate
+                                comment = generate_neuro_comment(
+                                    post_text=post_text,
+                                    channel_theme=channel_theme_str
+                                )
+                                # If still duplicate, use variation
+                                if comment in self._last_test_comments:
+                                    base_comment = random.choice(self.templates)
+                                    comment = self.generate_comment_variation(base_comment)
+                            
+                            # Keep last 10 comments to check for duplicates
+                            self._last_test_comments.append(comment)
+                            if len(self._last_test_comments) > 10:
+                                self._last_test_comments.pop(0)
+                        # ============= END TEST MODE =============
+                        
                     except Exception as e_msgs:
                         logger.error(f"Error getting messages: {e_msgs}")
                         reply_id = None
@@ -3797,8 +4056,19 @@ class UltimateCommentBot:
                         self.register_message_sent(phone, username)
                         # ============= END NEW =============
                         
+                        # ============= TEST MODE: Detailed logging =============
+                        if self.test_mode:
+                            short_comment = comment[:50] if len(comment) > 50 else comment
+                            logger.info(f"🧪 TEST MODE SUCCESS:")
+                            logger.info(f"   Channel: @{username}")
+                            logger.info(f"   Account: {account_data.get('name', phone)} ({phone})")
+                            logger.info(f"   Comment: {short_comment}...")
+                            logger.info(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
+                            logger.info(f"   Post ID: {reply_id}")
+                        # ============= END TEST MODE =============
+                        
                         logger.info(f"[{account_data.get('name', phone)}] ✅ @{username} (post {reply_id}): {comment}")
-                        await self.add_comment_stat(phone, True)
+                        await self.add_comment_stat(phone, True, channel=username)
 
                         if self.conn:
                             try:
@@ -3813,6 +4083,16 @@ class UltimateCommentBot:
                                 
                     except Exception as send_exc:
                         err_text = str(send_exc)
+                        
+                        # ============= TEST MODE: Detailed error logging =============
+                        if self.test_mode:
+                            logger.error(f"🧪 TEST MODE ERROR:")
+                            logger.error(f"   Channel: @{username}")
+                            logger.error(f"   Account: {account_data.get('name', phone)} ({phone})")
+                            logger.error(f"   Error: {err_text[:100]}")
+                            logger.error(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
+                        # ============= END TEST MODE =============
+                        
                         logger.error(f"[{account_data.get('name', phone)}] ❌ Send error for @{username}: {err_text}")
                         
                         # Categorize errors for better handling
@@ -3857,7 +4137,7 @@ class UltimateCommentBot:
                                 # ============= END NEW =============
                                 
                                 logger.info(f"[{account_data.get('name', phone)}] ✅ Joined & commented {username}")
-                                await self.add_comment_stat(phone, True)
+                                await self.add_comment_stat(phone, True, channel=username)
                                 
                                 if self.conn:
                                     try:
@@ -3975,6 +4255,30 @@ class UltimateCommentBot:
             logger.error("No channels found!")
             return
         
+        # ============= TEST MODE: Filter channels =============
+        channels_to_use = self.channels
+        if self.test_mode and self.test_channels:
+            # В тестовом режиме используем только тестовые каналы
+            channels_to_use = []
+            for ch in self.channels:
+                ch_username = ch.get('username') if isinstance(ch, dict) else ch
+                # Normalize username
+                if not ch_username.startswith('@'):
+                    ch_username = '@' + ch_username
+                
+                if ch_username in self.test_channels:
+                    channels_to_use.append(ch)
+            
+            if not channels_to_use:
+                logger.error(f"🧪 TEST MODE: None of test channels {self.test_channels} found in channels list!")
+                logger.error(f"Available channels: {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:5]]}...")
+                return
+            
+            logger.info(f"🧪 TEST MODE ACTIVE: Using {len(channels_to_use)} test channels: {self.test_channels}")
+            logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour per account")
+            logger.warning("🧪 ⚠️ ALL OTHER CHANNELS WILL BE IGNORED!")
+        # ============= END TEST MODE =============
+        
         # Use configured max parallel accounts
         MAX_PARALLEL_ACCOUNTS = self.max_parallel_accounts
         
@@ -3993,14 +4297,28 @@ class UltimateCommentBot:
         
         accounts_list = accounts_list[:MAX_PARALLEL_ACCOUNTS]  # Use first N accounts
         
-        channels_copy = self.channels.copy()
+        # ============= TEST MODE: Use filtered channels =============
+        if self.test_mode and self.test_channels:
+            channels_copy = channels_to_use.copy()
+        else:
+            channels_copy = self.channels.copy()
+        # ============= END TEST MODE =============
+        
         random.shuffle(channels_copy)
         
         # Calculate channels per account
         channels_per_account = len(channels_copy) // num_accounts if num_accounts > 0 else 0
         remainder = len(channels_copy) % num_accounts if num_accounts > 0 else 0
         
-        logger.info(f"🚀 SMART MODE: {num_accounts} active accounts (max {MAX_PARALLEL_ACCOUNTS}) × {len(channels_copy)} channels")
+        # ============= TEST MODE: Log info =============
+        if self.test_mode:
+            logger.info(f"🧪 TEST MODE: {num_accounts} accounts × {len(channels_copy)} TEST channels")
+            logger.info(f"🧪 Test channels: {self.test_channels}")
+            logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour per account")
+        else:
+            logger.info(f"🚀 SMART MODE: {num_accounts} active accounts (max {MAX_PARALLEL_ACCOUNTS}) × {len(channels_copy)} channels")
+        # ============= END TEST MODE =============
+        
         logger.info(f"📊 Each account handles ~{channels_per_account} channels")
         logger.info(f"⚡ Rate limit: {self.messages_per_hour} msg/hour per account")
         logger.info(f"🔄 Rotation interval: {self.rotation_interval // 3600}h ({self.rotation_interval}s)")
