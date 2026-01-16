@@ -11,6 +11,7 @@ from telethon import TelegramClient, events, functions, Button
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
+from telethon.tl.functions.users import GetFullUserRequest
 from telethon.errors import SessionPasswordNeededError
 
 # Try to load .env file if python-dotenv is available
@@ -29,6 +30,28 @@ DB_NAME = 'bot_data.json'
 SQLITE_DB = 'bot_advanced.db'
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ============= RATE LIMITING & ROTATION SETTINGS =============
+# Лимиты скорости отправки сообщений
+MIN_MESSAGES_PER_HOUR = 20  # Минимум сообщений в час на аккаунт
+MAX_MESSAGES_PER_HOUR = 40  # Максимум сообщений в час на аккаунт
+DEFAULT_MESSAGES_PER_HOUR = 20  # По умолчанию используем консервативное значение
+
+# Максимальное количество одновременно активных аккаунтов
+DEFAULT_MAX_ACTIVE_ACCOUNTS = 2
+
+# Интервал ротации аккаунтов (в секундах)
+# По умолчанию: 4 часа (14400 секунд)
+DEFAULT_ROTATION_INTERVAL = 14400
+
+# Минимальный интервал между комментариями от разных аккаунтов в одном чате (в секундах)
+MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS = 300  # 5 минут
+
+# Статусы аккаунтов
+ACCOUNT_STATUS_ACTIVE = 'active'
+ACCOUNT_STATUS_RESERVE = 'reserve'
+ACCOUNT_STATUS_BROKEN = 'broken'
+# ============= END RATE LIMITING & ROTATION SETTINGS =============
 
 # YandexGPT configuration from environment variables
 YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID', 'b1g4or5i5s66hklqfg06')
@@ -111,7 +134,7 @@ class UltimateCommentBot:
         self.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
         self.accounts_data = {}
         self.channels = []
-        self.max_parallel_accounts = 2  # Default: 2 accounts work in parallel
+        self.max_parallel_accounts = DEFAULT_MAX_ACTIVE_ACCOUNTS  # Количество одновременно активных аккаунтов
         self.templates = [
             'Отличный пост! 👍', 'Интересно! Спасибо!', 'Супер контент! 🔥',
             'Класс! 👌', 'Огонь! 🔥🔥', 'Согласен! 💯', 'Спасибо за контент! 🙌',
@@ -140,9 +163,29 @@ class UltimateCommentBot:
         self.account_cache = {}  # Cache for account info from env
         # Authorization state management
         self.pending_auth = {}  # {chat_id: {'phone': '+123', 'proxy': ..., 'client': ..., 'message_id': 123, 'state': 'waiting_code'/'waiting_2fa', 'event': ...}}
+        
+        # ============= NEW: RATE LIMITING & ROTATION =============
+        # Настройки лимитов скорости
+        self.messages_per_hour = DEFAULT_MESSAGES_PER_HOUR  # Лимит сообщений в час на аккаунт
+        self.rotation_interval = DEFAULT_ROTATION_INTERVAL  # Интервал ротации в секундах
+        
+        # Отслеживание активности аккаунтов: {phone: {'messages': [(timestamp1, channel1), ...], 'status': 'active/reserve/broken'}}
+        self.account_activity = {}
+        
+        # Отслеживание последних комментариев в чатах: {channel_username: {'phone': phone, 'timestamp': timestamp}}
+        self.last_comment_per_channel = {}
+        
+        # Время последней ротации
+        self.last_rotation_time = None
+        
+        # Индекс для циклической ротации
+        self.rotation_index = 0
+        # ============= END NEW =============
+        
         self.init_database()
         self.load_stats()
         self.load_data()
+        self.init_account_statuses()  # Инициализация статусов аккаунтов
     
     def init_database(self):
         """Initialize SQLite database with required tables"""
@@ -243,6 +286,159 @@ class UltimateCommentBot:
         with open('stats.json', 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
+    def init_account_statuses(self):
+        """Инициализация статусов аккаунтов при запуске"""
+        # Проверяем и устанавливаем статусы для всех аккаунтов
+        active_count = 0
+        for phone, data in self.accounts_data.items():
+            # Если у аккаунта нет статуса, присваиваем его
+            if 'status' not in data:
+                # Если у аккаунта есть старое поле 'active', используем его
+                if data.get('active', False) and active_count < self.max_parallel_accounts:
+                    data['status'] = ACCOUNT_STATUS_ACTIVE
+                    active_count += 1
+                else:
+                    data['status'] = ACCOUNT_STATUS_RESERVE
+                # Удаляем старое поле 'active' если оно есть
+                if 'active' in data:
+                    del data['active']
+            elif data['status'] == ACCOUNT_STATUS_ACTIVE:
+                active_count += 1
+            
+            # Инициализируем структуру отслеживания активности
+            if phone not in self.account_activity:
+                self.account_activity[phone] = {
+                    'messages': [],  # [(timestamp, channel), ...]
+                    'status': data.get('status', ACCOUNT_STATUS_RESERVE)
+                }
+        
+        # Если активных аккаунтов больше чем max_parallel_accounts, переводим лишние в резерв
+        if active_count > self.max_parallel_accounts:
+            logger.warning(f"⚠️ Found {active_count} active accounts, but max is {self.max_parallel_accounts}. Moving extras to reserve.")
+            count = 0
+            for phone, data in self.accounts_data.items():
+                if data.get('status') == ACCOUNT_STATUS_ACTIVE:
+                    count += 1
+                    if count > self.max_parallel_accounts:
+                        data['status'] = ACCOUNT_STATUS_RESERVE
+                        self.account_activity[phone]['status'] = ACCOUNT_STATUS_RESERVE
+                        logger.info(f"🔄 Account {data.get('name', phone)} moved to reserve (over limit)")
+        
+        # Если активных меньше чем max_parallel_accounts, активируем резервные
+        elif active_count < self.max_parallel_accounts:
+            needed = self.max_parallel_accounts - active_count
+            logger.info(f"📊 Only {active_count} active accounts, activating {needed} more from reserve")
+            for phone, data in self.accounts_data.items():
+                if needed <= 0:
+                    break
+                if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session'):
+                    data['status'] = ACCOUNT_STATUS_ACTIVE
+                    self.account_activity[phone]['status'] = ACCOUNT_STATUS_ACTIVE
+                    logger.info(f"✅ Account {data.get('name', phone)} activated from reserve")
+                    needed -= 1
+        
+        self.save_data()
+        logger.info(f"✅ Account statuses initialized: {self.get_status_counts()}")
+    
+    def get_status_counts(self):
+        """Получить количество аккаунтов по статусам"""
+        counts = {
+            ACCOUNT_STATUS_ACTIVE: 0,
+            ACCOUNT_STATUS_RESERVE: 0,
+            ACCOUNT_STATUS_BROKEN: 0
+        }
+        for data in self.accounts_data.values():
+            status = data.get('status', ACCOUNT_STATUS_RESERVE)
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+    
+    def get_account_status(self, phone):
+        """Получить статус аккаунта"""
+        if phone in self.accounts_data:
+            return self.accounts_data[phone].get('status', ACCOUNT_STATUS_RESERVE)
+        return None
+    
+    def set_account_status(self, phone, status, reason=""):
+        """Установить статус аккаунта с логированием"""
+        if phone not in self.accounts_data:
+            logger.error(f"❌ Cannot set status for unknown account: {phone}")
+            return False
+        
+        old_status = self.accounts_data[phone].get('status', ACCOUNT_STATUS_RESERVE)
+        if old_status == status:
+            return True  # Статус не изменился
+        
+        self.accounts_data[phone]['status'] = status
+        if phone in self.account_activity:
+            self.account_activity[phone]['status'] = status
+        
+        account_name = self.accounts_data[phone].get('name', phone)
+        reason_str = f" ({reason})" if reason else ""
+        logger.info(f"🔄 Account {account_name}: {old_status} → {status}{reason_str}")
+        
+        self.save_data()
+        return True
+    
+    def can_account_send_message(self, phone):
+        """Проверить, может ли аккаунт отправить сообщение с учетом лимитов скорости"""
+        if phone not in self.account_activity:
+            return True, 0
+        
+        current_time = datetime.now().timestamp()
+        activity = self.account_activity[phone]
+        
+        # Проверяем статус аккаунта
+        if activity['status'] != ACCOUNT_STATUS_ACTIVE:
+            return False, 0
+        
+        # Очищаем старые записи (старше 1 часа)
+        hour_ago = current_time - 3600
+        activity['messages'] = [(ts, ch) for ts, ch in activity['messages'] if ts > hour_ago]
+        
+        # Проверяем лимит
+        messages_last_hour = len(activity['messages'])
+        if messages_last_hour >= self.messages_per_hour:
+            # Вычисляем время до следующего возможного отправления
+            oldest_msg_time = min(ts for ts, _ in activity['messages']) if activity['messages'] else current_time
+            wait_time = int((oldest_msg_time + 3600) - current_time)
+            return False, max(wait_time, 0)
+        
+        return True, 0
+    
+    def register_message_sent(self, phone, channel):
+        """Зарегистрировать отправленное сообщение для отслеживания лимитов"""
+        if phone not in self.account_activity:
+            self.account_activity[phone] = {'messages': [], 'status': ACCOUNT_STATUS_ACTIVE}
+        
+        current_time = datetime.now().timestamp()
+        self.account_activity[phone]['messages'].append((current_time, channel))
+        
+        # Обновляем последний комментарий в канале
+        self.last_comment_per_channel[channel] = {
+            'phone': phone,
+            'timestamp': current_time
+        }
+    
+    def can_account_comment_in_channel(self, phone, channel):
+        """Проверить, может ли аккаунт комментировать в канале (защита от спама своими аккаунтами)"""
+        if channel not in self.last_comment_per_channel:
+            return True, 0
+        
+        last_comment = self.last_comment_per_channel[channel]
+        last_phone = last_comment['phone']
+        last_timestamp = last_comment['timestamp']
+        
+        # Если последний комментарий был от другого нашего аккаунта
+        if last_phone != phone and last_phone in self.accounts_data:
+            current_time = datetime.now().timestamp()
+            time_since_last = current_time - last_timestamp
+            
+            if time_since_last < MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS:
+                wait_time = int(MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS - time_since_last)
+                return False, wait_time
+        
+        return True, 0
+    
     async def add_comment_stat(self, phone, success=True):
         self.stats['total_comments'] += 1
         if success:
@@ -266,8 +462,9 @@ class UltimateCommentBot:
             self.channel_failed_attempts[username][phone]['count'] += 1
             self.channel_failed_attempts[username][phone]['reasons'].append(reason)
             
-            # Count active accounts
-            active_accounts = [p for p, data in self.accounts_data.items() if data.get('active')]
+            # Count active accounts (NEW: use status instead of 'active' field)
+            active_accounts = [p for p, data in self.accounts_data.items() 
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE]
             failed_phones = len(self.channel_failed_attempts[username])
             
             # Count how many accounts have failed multiple times (3+ times means persistent issue)
@@ -297,51 +494,8 @@ class UltimateCommentBot:
     
     async def handle_account_ban(self, phone, reason):
         """Handle account ban by deactivating it and activating a reserve account"""
-        try:
-            # Deactivate the banned account
-            if phone in self.accounts_data:
-                self.accounts_data[phone]['active'] = False
-                account_name = self.accounts_data[phone].get('name', phone)
-                logger.warning(f"🚫 Account {account_name} ({phone}) deactivated due to: {reason}")
-                
-                # Find and activate a reserve account (excluding the just-banned account)
-                reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
-                                  if not data.get('active', False) and data.get('session') and p != phone]
-                
-                if reserve_accounts:
-                    # Activate the first available reserve account
-                    reserve_phone, reserve_data = reserve_accounts[0]
-                    self.accounts_data[reserve_phone]['active'] = True
-                    reserve_name = reserve_data.get('name', reserve_phone)
-                    logger.info(f"✅ Reserve account {reserve_name} ({reserve_phone}) automatically activated!")
-                    
-                    # Notify bot owner about the switch
-                    try:
-                        await self.bot_client.send_message(
-                            BOT_OWNER_ID,
-                            f"⚠️ **Автоматическая замена аккаунта**\n\n"
-                            f"🚫 Заблокирован: `{account_name}` ({phone})\n"
-                            f"Причина: {reason}\n\n"
-                            f"✅ Активирован резервный: `{reserve_name}` ({reserve_phone})"
-                        )
-                    except Exception as notify_err:
-                        logger.error(f"Failed to notify owner: {notify_err}")
-                else:
-                    logger.error(f"❌ No reserve accounts available to replace {account_name}!")
-                    try:
-                        await self.bot_client.send_message(
-                            BOT_OWNER_ID,
-                            f"🚨 **ВНИМАНИЕ: Нет резервных аккаунтов!**\n\n"
-                            f"Заблокирован: `{account_name}` ({phone})\n"
-                            f"Причина: {reason}\n\n"
-                            f"❌ Все резервные аккаунты уже активны или отсутствуют."
-                        )
-                    except Exception as notify_err:
-                        logger.error(f"Failed to notify owner: {notify_err}")
-                
-                self.save_data()
-        except Exception as e:
-            logger.error(f"Error handling account ban: {e}")
+        logger.warning(f"🚫 Account ban detected: {phone} - {reason}")
+        await self.replace_broken_account(phone, reason)
     
     async def block_channel(self, username, reason):
         """Block channel that doesn't allow comments from ALL accounts and remove from active list"""
@@ -375,6 +529,147 @@ class UltimateCommentBot:
                 del self.channel_failed_attempts[username]
         except Exception as e:
             logger.error(f"Error blocking channel {username}: {e}")
+    
+    async def rotate_accounts(self):
+        """Ротация аккаунтов: выводит часть активных в резерв и активирует следующие из резерва"""
+        try:
+            # Получаем списки аккаунтов по статусам
+            active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
+            reserve_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                              if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session')]
+            
+            if not reserve_accounts:
+                logger.info("⚠️ No reserve accounts available for rotation")
+                return
+            
+            if not active_accounts:
+                logger.warning("⚠️ No active accounts to rotate")
+                return
+            
+            # Определяем, сколько аккаунтов ротировать (минимум 1, максимум половину активных)
+            num_to_rotate = max(1, min(len(active_accounts) // 2, len(reserve_accounts)))
+            
+            logger.info(f"🔄 Starting account rotation: {num_to_rotate} accounts")
+            
+            # Создаем упорядоченный список всех аккаунтов для цикличной ротации
+            all_accounts_list = list(self.accounts_data.keys())
+            
+            # Находим текущие активные в общем списке и берем следующие по циклу
+            accounts_to_deactivate = []
+            accounts_to_activate = []
+            
+            # Берем первые N активных для деактивации
+            for i in range(num_to_rotate):
+                if i < len(active_accounts):
+                    accounts_to_deactivate.append(active_accounts[i])
+            
+            # Берем следующие по порядку из резерва для активации
+            for i in range(num_to_rotate):
+                if i < len(reserve_accounts):
+                    accounts_to_activate.append(reserve_accounts[i])
+            
+            # Выполняем ротацию
+            for phone, data in accounts_to_deactivate:
+                old_status = data.get('status')
+                self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Scheduled rotation")
+                account_name = data.get('name', phone)
+                logger.info(f"  🔵 {account_name} → RESERVE")
+            
+            for phone, data in accounts_to_activate:
+                old_status = data.get('status')
+                self.set_account_status(phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
+                account_name = data.get('name', phone)
+                logger.info(f"  🟢 {account_name} → ACTIVE")
+            
+            # Обновляем время последней ротации
+            self.last_rotation_time = datetime.now().timestamp()
+            
+            # Уведомляем владельца
+            try:
+                deactivated_names = ", ".join([data.get('name', phone) for phone, data in accounts_to_deactivate])
+                activated_names = ", ".join([data.get('name', phone) for phone, data in accounts_to_activate])
+                
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"🔄 **Ротация аккаунтов выполнена**\n\n"
+                    f"📤 В резерв: {deactivated_names}\n"
+                    f"📥 Активированы: {activated_names}\n\n"
+                    f"📊 Текущее состояние: {self.get_status_counts()}"
+                )
+            except Exception as notify_err:
+                logger.error(f"Failed to notify owner about rotation: {notify_err}")
+            
+            logger.info(f"✅ Rotation completed. Current status: {self.get_status_counts()}")
+            
+        except Exception as e:
+            logger.error(f"Error during account rotation: {e}")
+    
+    async def check_and_rotate_if_needed(self):
+        """Проверить, нужна ли ротация, и выполнить её"""
+        if self.last_rotation_time is None:
+            self.last_rotation_time = datetime.now().timestamp()
+            return
+        
+        current_time = datetime.now().timestamp()
+        time_since_rotation = current_time - self.last_rotation_time
+        
+        if time_since_rotation >= self.rotation_interval:
+            logger.info(f"⏰ Rotation interval reached ({time_since_rotation:.0f}s >= {self.rotation_interval}s)")
+            await self.rotate_accounts()
+    
+    async def replace_broken_account(self, phone, reason):
+        """Заменить сломанный аккаунт на резервный"""
+        try:
+            # Помечаем аккаунт как broken
+            self.set_account_status(phone, ACCOUNT_STATUS_BROKEN, reason)
+            account_name = self.accounts_data[phone].get('name', phone)
+            
+            # Ищем резервный аккаунт для замены
+            reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
+                              if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session')]
+            
+            if reserve_accounts:
+                # Активируем первый доступный резервный аккаунт
+                reserve_phone, reserve_data = reserve_accounts[0]
+                self.set_account_status(reserve_phone, ACCOUNT_STATUS_ACTIVE, f"Replacing {account_name}")
+                reserve_name = reserve_data.get('name', reserve_phone)
+                
+                logger.info(f"✅ Replaced broken account: {account_name} → {reserve_name}")
+                
+                # Уведомляем владельца
+                try:
+                    await self.bot_client.send_message(
+                        BOT_OWNER_ID,
+                        f"⚠️ **Автоматическая замена аккаунта**\n\n"
+                        f"🔴 Сломан: `{account_name}` ({phone})\n"
+                        f"Причина: {reason}\n\n"
+                        f"✅ Активирован резервный: `{reserve_name}` ({reserve_phone})\n\n"
+                        f"📊 Состояние: {self.get_status_counts()}"
+                    )
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify owner: {notify_err}")
+                
+                return True
+            else:
+                logger.error(f"❌ No reserve accounts available to replace {account_name}!")
+                try:
+                    await self.bot_client.send_message(
+                        BOT_OWNER_ID,
+                        f"🚨 **ВНИМАНИЕ: Нет резервных аккаунтов!**\n\n"
+                        f"🔴 Сломан: `{account_name}` ({phone})\n"
+                        f"Причина: {reason}\n\n"
+                        f"❌ Все резервные аккаунты уже активны или отсутствуют.\n\n"
+                        f"📊 Состояние: {self.get_status_counts()}"
+                    )
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify owner: {notify_err}")
+                
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error replacing broken account: {e}")
+            return False
     
     async def is_admin(self, user_id):
         return user_id == BOT_OWNER_ID or user_id in self.admins
@@ -610,8 +905,15 @@ class UltimateCommentBot:
                     me = await client.get_me()
                     account_data['first_name'] = me.first_name or ''
                     account_data['last_name'] = me.last_name or ''
-                    account_data['bio'] = me.about or ''
                     account_data['username'] = me.username or ''
+                    
+                    # Get full user info to retrieve bio
+                    try:
+                        full_user = await client(GetFullUserRequest(me))
+                        account_data['bio'] = full_user.full_user.about or ''
+                    except Exception:
+                        account_data['bio'] = ''
+                    
                     account_data['authorized'] = True
                 else:
                     account_data['authorized'] = False
@@ -790,12 +1092,12 @@ class UltimateCommentBot:
             text = """**📱 АККАУНТЫ:**
 `/auth +79123456789 [socks5:host:port:user:pass]` - авторизовать
 `/accounts` - управление профилями (аватар, имя, био) 🆕
-`/listaccounts` - все аккаунты
+`/listaccounts` - все аккаунты (🟢 active / 🔵 reserve / 🔴 broken)
 `/activeaccounts` - только активные ✅
 `/reserveaccounts` - только резервные 🔄
-`/blockedaccounts` - заблокированные 🚫
+`/blockedaccounts` - сломанные/заблокированные 🚫
 `/delaccount +79123456789` - удалить
-`/toggleaccount +79123456789` - переключить активный/резерв
+`/toggleaccount +79123456789` - переключить active ⇄ reserve
 
 **👤 УПРАВЛЕНИЕ ПРОФИЛЕМ:**
 `/setname` - изменить имя (выбор аккаунта → ввод имени)
@@ -804,8 +1106,14 @@ class UltimateCommentBot:
 `/profile` - показать профили всех активных аккаунтов
 
 **⚙️ НАСТРОЙКИ:**
-`/setparallel 2` - кол-во параллельных аккаунтов
+`/setparallel 2` - кол-во одновременно активных аккаунтов
 `/getparallel` - текущие настройки
+`/setratelimit 20` - лимит сообщений/час на аккаунт (20-40) 🆕
+`/getratelimit` - текущий лимит скорости 🆕
+`/setrotation 14400` - интервал ротации в секундах (по умолчанию 4ч) 🆕
+`/getrotation` - текущий интервал ротации 🆕
+`/rotatenow` - выполнить ротацию немедленно 🆕
+`/accountstats` - статистика активности аккаунтов 🆕
 
 **📢 КАНАЛЫ:**
 `/addchannel @username` - добавить
@@ -822,7 +1130,7 @@ class UltimateCommentBot:
 `/cleartemplates` - очистить
 
 **🤖 АВТО:**
-`/startmon` - ЗАПУСТИТЬ
+`/startmon` - ЗАПУСТИТЬ (с автоматической ротацией)
 `/stopmon` - остановить
 `/safetyinfo` - настройки безопасности
 
@@ -1012,7 +1320,15 @@ class UltimateCommentBot:
                 text = f"АККАУНТЫ ({total}) - Часть {batch_num//accounts_per_msg + 1}:\n\n"
                 
                 for i, (phone, data) in enumerate(batch_accounts, batch_num + 1):
-                    status = "✅" if data.get('active', False) else "❌"
+                    # NEW: Используем новые статусы
+                    status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                    if status_val == ACCOUNT_STATUS_ACTIVE:
+                        status = "✅ ACTIVE"
+                    elif status_val == ACCOUNT_STATUS_BROKEN:
+                        status = "🔴 BROKEN"
+                    else:
+                        status = "🔵 RESERVE"
+                    
                     name = data.get('name', 'Не авторизован')
                     username = data.get('username', 'нет')
                     text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
@@ -1043,34 +1359,66 @@ class UltimateCommentBot:
             try:
                 phone = event.text.split(maxsplit=1)[1]
                 if phone in self.accounts_data:
-                    current_status = self.accounts_data[phone].get('active', False)
-                    self.accounts_data[phone]['active'] = not current_status
-                    new_status = "✅ АКТИВЕН" if not current_status else "❌ РЕЗЕРВ"
+                    # NEW: Используем новые статусы
+                    current_status = self.accounts_data[phone].get('status', ACCOUNT_STATUS_RESERVE)
+                    
+                    # Переключаем между active и reserve (игнорируем broken)
+                    if current_status == ACCOUNT_STATUS_ACTIVE:
+                        new_status = ACCOUNT_STATUS_RESERVE
+                        status_text = "🔵 RESERVE"
+                    elif current_status == ACCOUNT_STATUS_BROKEN:
+                        # Если аккаунт broken, переводим в reserve
+                        new_status = ACCOUNT_STATUS_RESERVE
+                        status_text = "🔵 RESERVE (восстановлен из broken)"
+                    else:
+                        new_status = ACCOUNT_STATUS_ACTIVE
+                        status_text = "✅ ACTIVE"
+                    
+                    self.set_account_status(phone, new_status, "Manual toggle")
                     account_name = self.accounts_data[phone].get('name', phone)
-                    self.save_data()
-                    await event.respond(f"Аккаунт `{account_name}` ({phone})\nСтатус изменен: {new_status}")
+                    
+                    await event.respond(
+                        f"Аккаунт `{account_name}` ({phone})\n"
+                        f"Статус изменен: {status_text}\n\n"
+                        f"📊 Текущее состояние: {self.get_status_counts()}"
+                    )
                 else:
                     await event.respond("Аккаунт не найден")
             except:
-                await event.respond("Формат: `/toggleaccount +79123456789`\n\n⚠️ Эта команда переключает статус ОДНОГО аккаунта:\n✅ АКТИВЕН → ❌ РЕЗЕРВ\n❌ РЕЗЕРВ → ✅ АКТИВЕН")
+                await event.respond(
+                    "Формат: `/toggleaccount +79123456789`\n\n"
+                    "⚠️ Эта команда переключает статус ОДНОГО аккаунта:\n"
+                    "✅ ACTIVE → 🔵 RESERVE\n"
+                    "🔵 RESERVE → ✅ ACTIVE\n"
+                    "🔴 BROKEN → 🔵 RESERVE"
+                )
         
         @self.bot_client.on(events.NewMessage(pattern='/activeaccounts'))
         async def active_accounts(event):
             """Show only active accounts"""
             if not await self.is_admin(event.sender_id): return
             
-            active = {phone: data for phone, data in self.accounts_data.items() if data.get('active', False)}
+            # NEW: Используем новые статусы
+            active = {phone: data for phone, data in self.accounts_data.items() 
+                     if data.get('status') == ACCOUNT_STATUS_ACTIVE}
             
             if not active:
                 await event.respond("❌ Нет активных аккаунтов")
                 return
             
-            text = f"✅ **АКТИВНЫЕ АККАУНТЫ** ({len(active)}):\n\n"
+            text = f"✅ **АКТИВНЫЕ АККАУНТЫ** ({len(active)}/{self.max_parallel_accounts}):\n\n"
             for i, (phone, data) in enumerate(active.items(), 1):
                 name = data.get('name', 'Не авторизован')
                 username = data.get('username', 'нет')
-                text += f"{i}. `{name}` (@{username})\n   `{phone}`\n"
+                
+                # Показываем статистику сообщений
+                if phone in self.account_activity:
+                    msgs_count = len(self.account_activity[phone]['messages'])
+                    text += f"{i}. `{name}` (@{username})\n   `{phone}` (💬 {msgs_count}/h)\n"
+                else:
+                    text += f"{i}. `{name}` (@{username})\n   `{phone}`\n"
             
+            text += f"\n📊 Лимит: {self.messages_per_hour} сообщ/час на аккаунт"
             await event.respond(text)
         
         @self.bot_client.on(events.NewMessage(pattern='/reserveaccounts'))
@@ -1078,30 +1426,65 @@ class UltimateCommentBot:
             """Show only reserve accounts"""
             if not await self.is_admin(event.sender_id): return
             
+            # NEW: Используем новые статусы
             reserve = {phone: data for phone, data in self.accounts_data.items() 
-                      if not data.get('active', False) and data.get('session')}
+                      if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session')}
             
             if not reserve:
-                await event.respond("❌ Нет резервных аккаунтов\n\n💡 Используйте `/toggleaccount +номер` чтобы перевести аккаунт в резерв")
+                await event.respond(
+                    "❌ Нет резервных аккаунтов\n\n"
+                    "💡 Используйте `/toggleaccount +номер` чтобы перевести аккаунт в резерв"
+                )
                 return
             
-            text = f"🔄 **РЕЗЕРВНЫЕ АККАУНТЫ** ({len(reserve)}):\n\n"
+            text = f"🔵 **РЕЗЕРВНЫЕ АККАУНТЫ** ({len(reserve)}):\n\n"
             for i, (phone, data) in enumerate(reserve.items(), 1):
                 name = data.get('name', 'Не авторизован')
                 username = data.get('username', 'нет')
                 text += f"{i}. `{name}` (@{username})\n   `{phone}`\n"
             
-            text += "\n💡 Эти аккаунты автоматически активируются при бане активных"
+            text += f"\n💡 Эти аккаунты автоматически активируются при бане активных\n"
+            text += f"🔄 Ротация каждые {self.rotation_interval // 3600} часов"
             await event.respond(text)
         
         @self.bot_client.on(events.NewMessage(pattern='/blockedaccounts'))
         async def blocked_accounts_cmd(event):
-            """Show blocked accounts with reasons from database"""
+            """Show blocked/broken accounts with reasons from database"""
             if not await self.is_admin(event.sender_id): return
             
-            if not self.conn:
-                await event.respond("❌ БД недоступна")
-                return
+            # NEW: Показываем аккаунты со статусом BROKEN
+            broken = {phone: data for phone, data in self.accounts_data.items() 
+                     if data.get('status') == ACCOUNT_STATUS_BROKEN}
+            
+            text = f"🔴 **СЛОМАННЫЕ АККАУНТЫ** ({len(broken)}):\n\n"
+            
+            if not broken:
+                text += "✅ Нет сломанных аккаунтов\n\n"
+            else:
+                for i, (phone, data) in enumerate(broken.items(), 1):
+                    name = data.get('name', 'Не авторизован')
+                    username = data.get('username', 'нет')
+                    text += f"{i}. `{name}` (@{username})\n   `{phone}`\n"
+                text += "\n"
+            
+            # Также проверяем БД для истории блокировок
+            if self.conn:
+                try:
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT phone, block_date, reason FROM blocked_accounts ORDER BY block_date DESC LIMIT 10")
+                    blocked = cursor.fetchall()
+                    
+                    if blocked:
+                        text += f"\n📜 **История блокировок** (последние 10):\n\n"
+                        for phone, block_date, reason in blocked:
+                            date_str = block_date[:10] if block_date else "N/A"
+                            text += f"• `{phone}`\n  📅 {date_str}\n  ℹ️ {reason}\n\n"
+                except Exception as e:
+                    text += f"\n⚠️ Ошибка чтения БД: {e}"
+            
+            text += "\n💡 Используйте `/toggleaccount +номер` чтобы восстановить аккаунт в резерв"
+            
+            await event.respond(text)
             
             try:
                 cursor = self.conn.cursor()
@@ -1155,7 +1538,8 @@ class UltimateCommentBot:
             """Show current number of parallel accounts"""
             if not await self.is_admin(event.sender_id): return
             
-            active_count = sum(1 for d in self.accounts_data.values() if d.get('active'))
+            # NEW: Используем новые статусы
+            active_count = sum(1 for d in self.accounts_data.values() if d.get('status') == ACCOUNT_STATUS_ACTIVE)
             actual_parallel = min(active_count, self.max_parallel_accounts)
             
             text = f"📊 **НАСТРОЙКИ ПАРАЛЛЕЛЬНОЙ РАБОТЫ:**\n\n"
@@ -1167,6 +1551,168 @@ class UltimateCommentBot:
                 text += f"💡 Для использования {self.max_parallel_accounts} аккаунтов нужно иметь минимум {self.max_parallel_accounts} активных"
             
             await event.respond(text)
+        
+        # ============= NEW RATE LIMITING COMMANDS =============
+        @self.bot_client.on(events.NewMessage(pattern='/setratelimit'))
+        async def set_rate_limit(event):
+            """Set messages per hour limit for each account"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                limit = int(event.text.split(maxsplit=1)[1])
+                if limit < MIN_MESSAGES_PER_HOUR or limit > MAX_MESSAGES_PER_HOUR:
+                    await event.respond(
+                        f"❌ Лимит должен быть от {MIN_MESSAGES_PER_HOUR} до {MAX_MESSAGES_PER_HOUR} сообщений/час\n\n"
+                        f"📊 Рекомендации:\n"
+                        f"• 20 msg/h - максимально безопасно (по умолчанию)\n"
+                        f"• 30 msg/h - средний режим\n"
+                        f"• 40 msg/h - агрессивный режим (риск флуда)"
+                    )
+                    return
+                
+                self.messages_per_hour = limit
+                await event.respond(
+                    f"✅ Лимит установлен: **{limit} сообщений/час** на аккаунт\n\n"
+                    f"⏱️ Это означает ~{3600 // limit} секунд между сообщениями\n"
+                    f"⚠️ Изменения применяются немедленно ко всем активным аккаунтам"
+                )
+                logger.info(f"Rate limit set to {limit} messages/hour")
+            except (IndexError, ValueError):
+                await event.respond(
+                    f"Формат: `/setratelimit 20`\n\n"
+                    f"Диапазон: {MIN_MESSAGES_PER_HOUR}-{MAX_MESSAGES_PER_HOUR} сообщений/час\n"
+                    f"Текущий лимит: {self.messages_per_hour} msg/h"
+                )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/getratelimit'))
+        async def get_rate_limit(event):
+            """Show current rate limit settings"""
+            if not await self.is_admin(event.sender_id): return
+            
+            avg_interval = 3600 // self.messages_per_hour if self.messages_per_hour > 0 else 0
+            
+            text = f"⚡ **ЛИМИТЫ СКОРОСТИ:**\n\n"
+            text += f"📊 Лимит: **{self.messages_per_hour} сообщений/час** на аккаунт\n"
+            text += f"⏱️ Средний интервал: ~{avg_interval} сек между сообщениями\n"
+            text += f"🛡️ Защита от спама: {MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS} сек между своими аккаунтами\n\n"
+            text += f"💡 Диапазон: {MIN_MESSAGES_PER_HOUR}-{MAX_MESSAGES_PER_HOUR} msg/h"
+            
+            await event.respond(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/setrotation'))
+        async def set_rotation_interval(event):
+            """Set account rotation interval in seconds"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                interval = int(event.text.split(maxsplit=1)[1])
+                if interval < 3600:  # Minimum 1 hour
+                    await event.respond(
+                        "❌ Интервал не может быть меньше 1 часа (3600 секунд)\n\n"
+                        "📊 Рекомендации:\n"
+                        "• 14400 сек (4 часа) - по умолчанию\n"
+                        "• 21600 сек (6 часов) - средний\n"
+                        "• 28800 сек (8 часов) - долгий"
+                    )
+                    return
+                
+                self.rotation_interval = interval
+                hours = interval // 3600
+                await event.respond(
+                    f"✅ Интервал ротации установлен: **{interval} секунд** ({hours}ч)\n\n"
+                    f"🔄 Следующая ротация через ~{hours}ч\n"
+                    f"⚠️ Изменения применяются немедленно"
+                )
+                logger.info(f"Rotation interval set to {interval} seconds ({hours}h)")
+            except (IndexError, ValueError):
+                current_hours = self.rotation_interval // 3600
+                await event.respond(
+                    f"Формат: `/setrotation 14400`\n\n"
+                    f"Текущий интервал: {self.rotation_interval} сек ({current_hours}ч)\n"
+                    f"Минимум: 3600 сек (1ч)"
+                )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/getrotation'))
+        async def get_rotation_info(event):
+            """Show rotation interval and status"""
+            if not await self.is_admin(event.sender_id): return
+            
+            hours = self.rotation_interval // 3600
+            
+            text = f"🔄 **РОТАЦИЯ АККАУНТОВ:**\n\n"
+            text += f"⚙️ Интервал: **{self.rotation_interval} сек** ({hours}ч)\n"
+            
+            if self.last_rotation_time:
+                from datetime import datetime
+                last_rot = datetime.fromtimestamp(self.last_rotation_time)
+                time_since = datetime.now().timestamp() - self.last_rotation_time
+                time_until = self.rotation_interval - time_since
+                
+                text += f"🕐 Последняя ротация: {last_rot.strftime('%H:%M:%S')}\n"
+                text += f"⏳ Прошло: {int(time_since // 60)} мин\n"
+                
+                if time_until > 0:
+                    text += f"⏰ Следующая через: {int(time_until // 60)} мин\n"
+                else:
+                    text += f"⚠️ Ротация просрочена на {int(-time_until // 60)} мин\n"
+            else:
+                text += f"❌ Ротация еще не выполнялась\n"
+            
+            text += f"\n💡 Используйте `/rotatenow` для немедленной ротации"
+            
+            await event.respond(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/rotatenow'))
+        async def rotate_now(event):
+            """Perform account rotation immediately"""
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.monitoring:
+                await event.respond("❌ Мониторинг не запущен. Запустите `/startmon` сначала")
+                return
+            
+            await event.respond("🔄 Выполняю ротацию аккаунтов...")
+            await self.rotate_accounts()
+            await event.respond("✅ Ротация выполнена успешно!")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/accountstats'))
+        async def account_stats(event):
+            """Show detailed account activity statistics"""
+            if not await self.is_admin(event.sender_id): return
+            
+            text = f"📊 **СТАТИСТИКА АКТИВНОСТИ АККАУНТОВ:**\n\n"
+            
+            active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE]
+            
+            if not active_accounts:
+                text += "❌ Нет активных аккаунтов\n"
+            else:
+                for phone, data in active_accounts:
+                    name = data.get('name', phone)
+                    
+                    if phone in self.account_activity:
+                        activity = self.account_activity[phone]
+                        msgs_last_hour = len(activity['messages'])
+                        
+                        can_send, wait_time = self.can_account_send_message(phone)
+                        status_icon = "✅" if can_send else "⏳"
+                        
+                        text += f"{status_icon} **{name}**\n"
+                        text += f"   📱 `{phone}`\n"
+                        text += f"   💬 {msgs_last_hour}/{self.messages_per_hour} сообщений за час\n"
+                        
+                        if not can_send:
+                            text += f"   ⏱️ Ожидание: {wait_time // 60} мин {wait_time % 60} сек\n"
+                        
+                        text += "\n"
+                    else:
+                        text += f"⚪ **{name}** - нет активности\n\n"
+            
+            text += f"\n📈 Лимит: {self.messages_per_hour} msg/h на аккаунт"
+            
+            await event.respond(text)
+        # ============= END NEW COMMANDS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/addchannel'))
         async def add_channel(event):
@@ -1378,7 +1924,7 @@ class UltimateCommentBot:
                 # Get active account
                 user_account = None
                 for phone, data in self.accounts_data.items():
-                    if data.get('active') and data.get('session'):
+                    if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session'):
                         user_account = (phone, data)
                         break
                 
@@ -1615,7 +2161,8 @@ class UltimateCommentBot:
             self.monitoring = True
             self.monitoring_start_time = datetime.now()
             
-            active_count = sum(1 for data in self.accounts_data.values() if data.get('active', False))
+            active_count = sum(1 for data in self.accounts_data.values() 
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE)
             text = f"""🚀 АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ (SAFE MODE)!\n\n✅ Активных аккаунтов: `{active_count}`\n⚡ Параллельно работают: `2` (безопасно)\n📢 Каналов: `{len(self.channels)}`\n💬 Шаблонов: `{len(self.templates)}`\n⏱️ Задержка: 50-100 сек между комментариями\n💤 Перерыв: 3-7 мин между циклами\n\n📈 Скорость: ~36-72 комм/час (оптимально)\n🛡️ Защита от бана: АКТИВНА"""
             await event.respond(text)
             
@@ -2528,9 +3075,9 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts
+                # Get all active accounts (NEW: use status)
                 active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('active') and data.get('session')]
+                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
                 
                 if not active_accounts:
                     await event.respond("❌ Нет активных авторизованных аккаунтов")
@@ -2566,9 +3113,9 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts
+                # Get all active accounts (NEW: use status)
                 active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('active') and data.get('session')]
+                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
                 
                 if not active_accounts:
                     await event.respond("❌ Нет активных авторизованных аккаунтов")
@@ -2604,9 +3151,9 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts
+                # Get all active accounts (NEW: use status)
                 active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('active') and data.get('session')]
+                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
                 
                 if not active_accounts:
                     await event.respond("❌ Нет активных авторизованных аккаунтов")
@@ -2642,9 +3189,9 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get all active accounts
+                # Get all active accounts (NEW: use status)
                 active_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
-                                 if data.get('active') and data.get('session')]
+                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
                 
                 if not active_accounts:
                     await event.respond("❌ Нет активных авторизованных аккаунтов")
@@ -2852,21 +3399,17 @@ class UltimateCommentBot:
                         await client.connect()
                         
                         if await client.is_user_authorized():
-                            # Get current bio
-                            me = await client.get_me()
-                            old_bio = me.about or ""
-                            
-                            # Update
+                            # Update bio using UpdateProfileRequest
                             await client(UpdateProfileRequest(about=new_bio))
                             
-                            # Log
-                            await self.log_profile_change(phone, 'bio', old_bio, new_bio, True)
+                            # Log (without old bio, as it requires additional request)
+                            await self.log_profile_change(phone, 'bio', '', new_bio, True)
                             
                             await event.respond(
                                 f"✅ **Био обновлено для `{phone}`**\n\n"
                                 f"Новое био: {new_bio[:100]}"
                             )
-                            logger.info(f"Bio updated for {phone}")
+                            logger.info(f"Bio updated for {phone}: {new_bio[:50]}")
                         else:
                             await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
                         
@@ -3008,10 +3551,40 @@ class UltimateCommentBot:
         await asyncio.sleep(initial_delay)
         
         while self.monitoring:
+            # ============= NEW: Check account status and rate limits =============
+            # Проверяем статус аккаунта
+            current_status = self.get_account_status(phone)
+            if current_status != ACCOUNT_STATUS_ACTIVE:
+                logger.info(f"[{account_data.get('name', phone)}] Status is {current_status}, pausing worker")
+                await asyncio.sleep(30)  # Ждем и проверяем снова
+                continue
+            
+            # Проверяем лимит сообщений
+            can_send, wait_time = self.can_account_send_message(phone)
+            if not can_send:
+                logger.warning(f"[{account_data.get('name', phone)}] Rate limit reached. Waiting {wait_time}s")
+                await asyncio.sleep(min(wait_time + 10, 300))  # Ждем с небольшим запасом, но не более 5 минут
+                continue
+            # ============= END NEW =============
+            
             # Process each channel in the subset
             for channel in channel_subset:
                 if not self.monitoring:
                     break
+                
+                # ============= NEW: Re-check status before each channel =============
+                current_status = self.get_account_status(phone)
+                if current_status != ACCOUNT_STATUS_ACTIVE:
+                    logger.info(f"[{account_data.get('name', phone)}] Status changed to {current_status}, stopping")
+                    break
+                
+                # Проверяем лимит перед каждым комментарием
+                can_send, wait_time = self.can_account_send_message(phone)
+                if not can_send:
+                    logger.warning(f"[{account_data.get('name', phone)}] Rate limit reached mid-cycle. Pausing for {wait_time}s")
+                    await asyncio.sleep(min(wait_time + 10, 300))
+                    continue
+                # ============= END NEW =============
                 
                 # normalize channel entry
                 if isinstance(channel, dict):
@@ -3019,6 +3592,15 @@ class UltimateCommentBot:
                 else:
                     username = str(channel)
                 username = str(username).strip()
+                
+                # ============= NEW: Check if we can comment in this channel (anti-spam protection) =============
+                can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username)
+                if not can_comment:
+                    logger.info(f"[{account_data.get('name', phone)}] Another account commented in {username} recently. Waiting {wait_for_channel}s")
+                    await asyncio.sleep(wait_for_channel)
+                    # После ожидания пропускаем этот канал и идем к следующему
+                    continue
+                # ============= END NEW =============
                 
                 # Initialize tracking for this channel
                 if username not in self.commented_posts:
@@ -3210,6 +3792,11 @@ class UltimateCommentBot:
                             await client.send_message(discussion_entity, comment)
                         
                         comment_success = True
+                        
+                        # ============= NEW: Register message sent for rate limiting =============
+                        self.register_message_sent(phone, username)
+                        # ============= END NEW =============
+                        
                         logger.info(f"[{account_data.get('name', phone)}] ✅ @{username} (post {reply_id}): {comment}")
                         await self.add_comment_stat(phone, True)
 
@@ -3264,6 +3851,11 @@ class UltimateCommentBot:
                                     await client.send_message(discussion_entity, comment)
                                 
                                 comment_success = True
+                                
+                                # ============= NEW: Register message sent for rate limiting =============
+                                self.register_message_sent(phone, username)
+                                # ============= END NEW =============
+                                
                                 logger.info(f"[{account_data.get('name', phone)}] ✅ Joined & commented {username}")
                                 await self.add_comment_stat(phone, True)
                                 
@@ -3369,9 +3961,11 @@ class UltimateCommentBot:
             await asyncio.sleep(random.randint(180, 420))
     
     async def pro_auto_comment(self):
-        """Main commenting loop - now runs accounts in parallel with safety limits!"""
+        """Main commenting loop - runs accounts in parallel with rate limiting, rotation, and auto-replacement!"""
+        # ============= NEW: Работаем только с активными аккаунтами (статус 'active') =============
         active_accounts = {phone: data for phone, data in self.accounts_data.items()
-                         if data.get('active') and data.get('session')}
+                         if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
+        # ============= END NEW =============
         
         if not active_accounts:
             logger.error("No active accounts found!")
@@ -3381,16 +3975,21 @@ class UltimateCommentBot:
             logger.error("No channels found!")
             return
         
-        # Use configured max parallel accounts (can be changed via /setparallel)
+        # Use configured max parallel accounts
         MAX_PARALLEL_ACCOUNTS = self.max_parallel_accounts
+        
+        # ============= NEW: Initialize rotation timer =============
+        if self.last_rotation_time is None:
+            self.last_rotation_time = datetime.now().timestamp()
+        # ============= END NEW =============
         
         # Divide channels among accounts for parallel processing
         accounts_list = list(active_accounts.items())
         num_accounts = min(len(accounts_list), MAX_PARALLEL_ACCOUNTS)
         
         if len(accounts_list) > MAX_PARALLEL_ACCOUNTS:
-            logger.warning(f"⚠️ You have {len(accounts_list)} accounts, but only {MAX_PARALLEL_ACCOUNTS} will work in parallel (configured)")
-            logger.warning(f"⚠️ Other accounts will be used in rotation if active ones get banned")
+            logger.warning(f"⚠️ You have {len(accounts_list)} active accounts, but only {MAX_PARALLEL_ACCOUNTS} will work in parallel")
+            logger.warning(f"⚠️ Use /setparallel to change this limit")
         
         accounts_list = accounts_list[:MAX_PARALLEL_ACCOUNTS]  # Use first N accounts
         
@@ -3398,12 +3997,18 @@ class UltimateCommentBot:
         random.shuffle(channels_copy)
         
         # Calculate channels per account
-        channels_per_account = len(channels_copy) // num_accounts
-        remainder = len(channels_copy) % num_accounts
+        channels_per_account = len(channels_copy) // num_accounts if num_accounts > 0 else 0
+        remainder = len(channels_copy) % num_accounts if num_accounts > 0 else 0
         
-        logger.info(f"🚀 OPTIMAL MODE: {num_accounts} accounts (max {MAX_PARALLEL_ACCOUNTS}) × {len(channels_copy)} channels")
+        logger.info(f"🚀 SMART MODE: {num_accounts} active accounts (max {MAX_PARALLEL_ACCOUNTS}) × {len(channels_copy)} channels")
         logger.info(f"📊 Each account handles ~{channels_per_account} channels")
-        logger.info(f"⏱️ Delays: 50-100s between comments, 3-7min between cycles")
+        logger.info(f"⚡ Rate limit: {self.messages_per_hour} msg/hour per account")
+        logger.info(f"🔄 Rotation interval: {self.rotation_interval // 3600}h ({self.rotation_interval}s)")
+        logger.info(f"🛡️ Anti-spam: {MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS}s between own accounts in same chat")
+        
+        # ============= NEW: Start rotation task =============
+        rotation_task = asyncio.create_task(self.rotation_worker())
+        # ============= END NEW =============
         
         # Create worker tasks for each account
         tasks = []
@@ -3424,9 +4029,33 @@ class UltimateCommentBot:
         
         # Wait for all workers (they run until self.monitoring becomes False)
         try:
-            await asyncio.gather(*tasks)
+            # ============= NEW: Wait for both worker tasks and rotation task =============
+            all_tasks = tasks + [rotation_task]
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+            # ============= END NEW =============
         except Exception as e:
             logger.error(f"Error in parallel workers: {e}")
+    
+    async def rotation_worker(self):
+        """Background worker that performs periodic account rotation"""
+        logger.info(f"🔄 Rotation worker started (interval: {self.rotation_interval}s)")
+        
+        while self.monitoring:
+            try:
+                # Wait and check rotation periodically (every 5 minutes)
+                await asyncio.sleep(300)  # Check every 5 minutes
+                
+                if not self.monitoring:
+                    break
+                
+                # Check if rotation is needed
+                await self.check_and_rotate_if_needed()
+                
+            except Exception as e:
+                logger.error(f"Error in rotation worker: {e}")
+                await asyncio.sleep(60)  # Wait a bit before retry
+        
+        logger.info("🔄 Rotation worker stopped")
     
     async def run(self):
         await self.start()
