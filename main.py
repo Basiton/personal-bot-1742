@@ -4948,26 +4948,66 @@ class UltimateCommentBot:
                     except Exception as e:
                         await self.log_profile_change(phone, 'bio', '', new_bio, False)
                         error_msg = str(e)
+                        error_type = type(e).__name__
+                        
                         logger.error(f"PROFILE UPDATE: ERROR - Failed to update bio for phone={phone}")
-                        logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
+                        logger.error(f"PROFILE UPDATE: ERROR Type: {error_type}")
                         logger.error(f"PROFILE UPDATE: ERROR Message: {error_msg}")
                         import traceback
                         logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
                         
-                        # Специальная обработка FROZEN ошибки
-                        if "FROZEN" in error_msg or "420" in error_msg:
+                        # Детальная обработка конкретных ошибок
+                        if "ABOUT_TOO_LONG" in error_msg:
                             await event.respond(
-                                f"❌ **Изменение БИО заблокировано для `{phone}`**\n\n"
-                                f"⚠️ Telegram ограничил UpdateProfileRequest(about) для этого аккаунта.\n\n"
-                                f"💡 Возможно работают другие операции:\n"
-                                f"• Попробуйте /setname (изменение имени)\n"
-                                f"• Или выберите другой аккаунт для /setbio"
+                                f"❌ **Био слишком длинное для `{phone}`**\n\n"
+                                f"📏 Длина: {len(new_bio)} символов\n"
+                                f"⚠️ Telegram: максимум 70 символов\n\n"
+                                f"💡 Сократите текст и попробуйте снова"
+                            )
+                        elif "FROZEN" in error_msg or "USER_DEACTIVATED" in error_msg:
+                            await event.respond(
+                                f"❌ **Аккаунт `{phone}` заморожен/деактивирован**\n\n"
+                                f"⚠️ Telegram полностью ограничил этот аккаунт\n"
+                                f"🚫 Изменение профиля невозможно\n\n"
+                                f"💡 Используйте другой активный аккаунт"
+                            )
+                        elif "FLOOD_WAIT" in error_msg:
+                            # Извлекаем время ожидания из ошибки
+                            import re
+                            wait_match = re.search(r'(\d+)', error_msg)
+                            wait_seconds = int(wait_match.group(1)) if wait_match else 60
+                            wait_minutes = wait_seconds // 60
+                            
+                            await event.respond(
+                                f"⏰ **Флуд-контроль Telegram для `{phone}`**\n\n"
+                                f"⚠️ Слишком частые изменения профиля\n"
+                                f"⏳ Подождите: {wait_minutes} минут ({wait_seconds} сек)\n\n"
+                                f"💡 Это ограничение самого Telegram, не бота"
+                            )
+                        elif "AUTH_KEY_UNREGISTERED" in error_msg:
+                            await event.respond(
+                                f"❌ **Сессия `{phone}` недействительна**\n\n"
+                                f"🔑 Аккаунт разлогинен в Telegram\n"
+                                f"⚠️ Требуется повторная авторизация\n\n"
+                                f"💡 Используйте /auth {phone} для входа заново"
+                            )
+                        elif "PHONE_NUMBER_BANNED" in error_msg:
+                            await event.respond(
+                                f"🚫 **Аккаунт `{phone}` забанен в Telegram**\n\n"
+                                f"⛔ Номер заблокирован на уровне Telegram\n"
+                                f"❌ Использование невозможно\n\n"
+                                f"💡 Этот аккаунт нужно пометить как broken"
                             )
                         else:
                             await event.respond(
                                 f"❌ **Ошибка при обновлении био для `{phone}`**\n\n"
-                                f"Тип: {type(e).__name__}\n"
-                                f"Сообщение: {error_msg[:200]}"
+                                f"Тип ошибки: `{error_type}`\n"
+                                f"Сообщение: `{error_msg[:200]}`\n\n"
+                                f"📋 Детали записаны в лог\n\n"
+                                f"💡 Попробуйте:\n"
+                                f"• Другой аккаунт\n"
+                                f"• Более короткий текст\n"
+                                f"• Подождать 1 час"
                             )
                     finally:
                         if client and client.is_connected():
@@ -5676,6 +5716,16 @@ class UltimateCommentBot:
             logger.info(f"🧪 Test channels defined: {self.test_channels}")
             logger.info(f"🧪 Filtering from {len(self.channels)} total channels...")
             
+            # Нормализуем test_channels (добавляем @ если нет)
+            normalized_test_channels = []
+            for tc in self.test_channels:
+                if not tc.startswith('@'):
+                    normalized_test_channels.append('@' + tc)
+                else:
+                    normalized_test_channels.append(tc)
+            
+            logger.info(f"🧪 Normalized test channels: {normalized_test_channels}")
+            
             # В тестовом режиме используем только тестовые каналы
             channels_to_use = []
             for ch in self.channels:
@@ -5684,19 +5734,26 @@ class UltimateCommentBot:
                 if not ch_username.startswith('@'):
                     ch_username = '@' + ch_username
                 
-                logger.debug(f"   Checking channel: {ch_username}")
-                if ch_username in self.test_channels:
+                logger.info(f"   Checking channel: {ch_username}")
+                
+                # Сравниваем case-insensitive
+                if ch_username.lower() in [tc.lower() for tc in normalized_test_channels]:
                     channels_to_use.append(ch)
                     logger.info(f"   ✅ MATCH: {ch_username}")
+                else:
+                    logger.debug(f"   ❌ SKIP: {ch_username}")
             
             if not channels_to_use:
-                logger.error(f"🧪 ❌ TEST MODE: None of test channels {self.test_channels} found in channels list!")
-                logger.error(f"Available channels (first 10): {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:10]]}")
-                logger.error("💡 Check that test channel usernames match exactly (with @)")
+                logger.error(f"🧪 ❌ TEST MODE: None of test channels found!")
+                logger.error(f"🧪 Looking for: {normalized_test_channels}")
+                logger.error(f"🧪 Available channels: {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:20]]}")
+                logger.error("💡 Check that test channel usernames match (case-insensitive)")
                 logger.error("💡 Use /listchannels to see all available channels")
+                logger.error("💡 Use /addchannel to add missing test channels")
                 return
             
-            logger.info(f"🧪 TEST MODE ACTIVE: Using {len(channels_to_use)} test channels: {self.test_channels}")
+            logger.info(f"🧪 TEST MODE ACTIVE: Using {len(channels_to_use)} test channels out of {len(self.channels)} total")
+            logger.info(f"🧪 Filtered channels: {[ch.get('username') if isinstance(ch, dict) else ch for ch in channels_to_use]}")
             logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour per account")
             logger.warning("🧪 ⚠️ ALL OTHER CHANNELS WILL BE IGNORED!")
         else:
