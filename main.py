@@ -2294,9 +2294,85 @@ class UltimateCommentBot:
             self.monitoring = True
             self.monitoring_start_time = datetime.now()
             
+            # ============= РЕАЛЬНЫЕ ДАННЫЕ =============
+            # Подсчёт аккаунтов по статусам
             active_count = sum(1 for data in self.accounts_data.values() 
                              if data.get('status') == ACCOUNT_STATUS_ACTIVE)
-            text = f"""🚀 АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ (SAFE MODE)!\n\n✅ Активных аккаунтов: `{active_count}`\n⚡ Параллельно работают: `2` (безопасно)\n📢 Каналов: `{len(self.channels)}`\n💬 Шаблонов: `{len(self.templates)}`\n⏱️ Задержка: 50-100 сек между комментариями\n💤 Перерыв: 3-7 мин между циклами\n\n📈 Скорость: ~36-72 комм/час (оптимально)\n🛡️ Защита от бана: АКТИВНА"""
+            reserve_count = sum(1 for data in self.accounts_data.values() 
+                              if data.get('status') == ACCOUNT_STATUS_RESERVE)
+            broken_count = sum(1 for data in self.accounts_data.values() 
+                             if data.get('status') == ACCOUNT_STATUS_BROKEN)
+            
+            # Количество параллельных аккаунтов
+            parallel_limit = self.max_parallel_accounts
+            
+            # Количество каналов (с учётом тестового режима)
+            if self.test_mode and self.test_channels:
+                channels_count = len(self.test_channels)
+                channels_note = f" (ТЕСТОВЫЙ РЕЖИМ: {', '.join(self.test_channels[:3])}{'...' if len(self.test_channels) > 3 else ''})"
+            else:
+                channels_count = len(self.channels)
+                channels_note = ""
+            
+            # Количество шаблонов
+            templates_count = len(self.templates)
+            
+            # Расчёт задержки между комментариями
+            # Интервал = 3600 секунд / лимит_сообщений_в_час
+            avg_interval_sec = 3600 // self.messages_per_hour if self.messages_per_hour > 0 else 0
+            avg_interval_min = avg_interval_sec // 60
+            
+            # Расчёт ожидаемой скорости
+            # Скорость = лимит_на_аккаунт × количество_активных_аккаунтов
+            expected_speed = self.messages_per_hour * active_count
+            
+            # Определение режима безопасности
+            is_safe_mode = (
+                self.messages_per_hour <= 20 and  # Лимит консервативный
+                active_count <= 3 and              # Немного активных аккаунтов
+                parallel_limit <= 2                # Мало параллельных работников
+            )
+            
+            if is_safe_mode:
+                mode_text = "БЕЗОПАСНЫЙ РЕЖИМ"
+                mode_emoji = "🛡️"
+                risk_text = "🟢 **Риск бана: НИЗКИЙ**"
+            elif self.messages_per_hour > 30 or active_count > 5:
+                mode_text = "АГРЕССИВНЫЙ РЕЖИМ"
+                mode_emoji = "⚡"
+                risk_text = "🟡 **Риск бана: СРЕДНИЙ** (рекомендуется снизить лимиты)"
+            else:
+                mode_text = "СТАНДАРТНЫЙ РЕЖИМ"
+                mode_emoji = "⚙️"
+                risk_text = "🟢 **Риск бана: НИЗКИЙ**"
+            
+            # Расчёт интервала ротации в часах
+            rotation_hours = self.rotation_interval // 3600
+            
+            # Формирование сообщения
+            text = f"""🚀 **АВТОКОММЕНТАРИИ ЗАПУЩЕНЫ** {mode_emoji}
+
+📊 **КОНФИГУРАЦИЯ:**
+✅ Активных аккаунтов: `{active_count}`
+🔵 Резервных: `{reserve_count}`
+🔴 Заблокированных: `{broken_count}`
+
+⚡ Параллельно работают: `{parallel_limit}` аккаунтов
+📢 Каналов в работе: `{channels_count}`{channels_note}
+💬 Шаблонов комментариев: `{templates_count}`
+
+⏱️ **НАСТРОЙКИ СКОРОСТИ:**
+📊 Лимит: `{self.messages_per_hour}` комм/час на аккаунт
+⏳ Средний интервал: ~`{avg_interval_min}` мин между комментариями
+🔄 Ротация аккаунтов: каждые `{rotation_hours}` часов
+
+📈 **ОЖИДАЕМАЯ СКОРОСТЬ:**
+Максимум: `{expected_speed}` комм/час
+(= {self.messages_per_hour} × {active_count} аккаунтов)
+
+{risk_text}
+🔐 Режим: **{mode_text}**"""
+            
             await event.respond(text)
             
             # Start ONE worker (safe mode) - it will handle parallel accounts internally
