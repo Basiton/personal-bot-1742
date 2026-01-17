@@ -4367,32 +4367,51 @@ class UltimateCommentBot:
     
     async def account_worker(self, phone, account_data, channel_subset):
         """Worker function for each account to process its assigned channels"""
-        logger.info(f"[{account_data.get('name', phone)}] Starting worker for {len(channel_subset)} channels")
+        logger.info("="*60)
+        logger.info(f"👷 WORKER STARTED: {account_data.get('name', phone)} ({phone[-10:]})")
+        logger.info(f"📢 Assigned channels: {len(channel_subset)}")
+        for i, ch in enumerate(channel_subset[:5], 1):
+            ch_name = ch.get('username') if isinstance(ch, dict) else ch
+            logger.info(f"   {i}. {ch_name}")
+        if len(channel_subset) > 5:
+            logger.info(f"   ... and {len(channel_subset) - 5} more")
+        logger.info("="*60)
         
         # Add initial random delay (warmup) to avoid all accounts starting simultaneously
         initial_delay = random.randint(5, 30)
-        logger.info(f"[{account_data.get('name', phone)}] Initial warmup delay: {initial_delay}s")
+        logger.info(f"[{account_data.get('name', phone)}] ⏳ Initial warmup delay: {initial_delay}s")
         await asyncio.sleep(initial_delay)
         
+        logger.info(f"[{account_data.get('name', phone)}] 🔄 Entering main loop (monitoring={self.monitoring})")
+        
         while self.monitoring:
+            logger.info(f"[{account_data.get('name', phone)}] 🔄 Starting new cycle...")
+            
             # ============= NEW: Check account status and rate limits =============
             # Проверяем статус аккаунта
             current_status = self.get_account_status(phone)
+            logger.info(f"[{account_data.get('name', phone)}] 📊 Status check: {current_status}")
+            
             if current_status != ACCOUNT_STATUS_ACTIVE:
-                logger.info(f"[{account_data.get('name', phone)}] Status is {current_status}, pausing worker")
+                logger.warning(f"[{account_data.get('name', phone)}] ⚠️ Status is {current_status}, pausing worker")
                 await asyncio.sleep(30)  # Ждем и проверяем снова
                 continue
             
             # Проверяем лимит сообщений
             can_send, wait_time = self.can_account_send_message(phone)
+            logger.info(f"[{account_data.get('name', phone)}] 📊 Rate limit check: can_send={can_send}, wait_time={wait_time}")
+            
             if not can_send:
-                logger.warning(f"[{account_data.get('name', phone)}] Rate limit reached. Waiting {wait_time}s")
+                logger.warning(f"[{account_data.get('name', phone)}] ⚠️ Rate limit reached. Waiting {wait_time}s")
                 await asyncio.sleep(min(wait_time + 10, 300))  # Ждем с небольшим запасом, но не более 5 минут
                 continue
+            
+            logger.info(f"[{account_data.get('name', phone)}] ✅ All checks passed, starting channel processing...")
             # ============= END NEW =============
             
             # Process each channel in the subset
-            for channel in channel_subset:
+            logger.info(f"[{account_data.get('name', phone)}] 📢 Processing {len(channel_subset)} channels...")
+            for idx, channel in enumerate(channel_subset, 1):
                 if not self.monitoring:
                     break
                 
@@ -4633,7 +4652,7 @@ class UltimateCommentBot:
                     comment_success = False
                     try:
                         if reply_id:
-                            await client.send_message(discussion_entity, comment, reply_to_msg_id=reply_id)
+                            await client.send_message(discussion_entity, comment, reply_to=reply_id)
                             # Mark this post as commented
                             self.commented_posts[username].add(reply_id)
                         else:
@@ -4714,7 +4733,7 @@ class UltimateCommentBot:
                                 await asyncio.sleep(2)
                                 # Retry sending after join
                                 if reply_id:
-                                    await client.send_message(discussion_entity, comment, reply_to_msg_id=reply_id)
+                                    await client.send_message(discussion_entity, comment, reply_to=reply_id)
                                     self.commented_posts[username].add(reply_id)
                                 else:
                                     await client.send_message(discussion_entity, comment)
@@ -4831,22 +4850,49 @@ class UltimateCommentBot:
     
     async def pro_auto_comment(self):
         """Main commenting loop - runs accounts in parallel with rate limiting, rotation, and auto-replacement!"""
+        logger.info("="*80)
+        logger.info("🚀 PRO_AUTO_COMMENT STARTED")
+        logger.info("="*80)
+        
         # ============= NEW: Работаем только с активными аккаунтами (статус 'active') =============
+        logger.info(f"📊 Total accounts in system: {len(self.accounts_data)}")
+        
+        # Debug: show all accounts with statuses
+        for phone, data in self.accounts_data.items():
+            status = data.get('status', 'UNKNOWN')
+            has_session = 'session' in data and data.get('session')
+            logger.info(f"   Account {phone[-10:]}: status={status}, has_session={has_session}")
+        
         active_accounts = {phone: data for phone, data in self.accounts_data.items()
                          if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
         # ============= END NEW =============
         
+        logger.info(f"✅ Active accounts with sessions: {len(active_accounts)}")
+        if active_accounts:
+            for phone in active_accounts:
+                logger.info(f"   ✅ {phone[-10:]}")
+        
         if not active_accounts:
-            logger.error("No active accounts found!")
+            logger.error("❌ No active accounts found!")
+            logger.error("💡 Use /listaccounts to check account statuses")
+            logger.error("💡 Use /toggleaccount to activate accounts")
             return
         
+        logger.info(f"📢 Total channels in system: {len(self.channels)}")
         if not self.channels:
-            logger.error("No channels found!")
+            logger.error("❌ No channels found!")
+            logger.error("💡 Use /addchannel to add channels")
             return
         
         # ============= TEST MODE: Filter channels =============
         channels_to_use = self.channels
+        logger.info(f"🔍 Checking TEST MODE: enabled={self.test_mode}")
+        
         if self.test_mode and self.test_channels:
+            logger.info(f"🧪 TEST MODE IS ACTIVE!")
+            logger.info(f"🧪 Test channels defined: {self.test_channels}")
+            logger.info(f"🧪 Filtering from {len(self.channels)} total channels...")
+            
             # В тестовом режиме используем только тестовые каналы
             channels_to_use = []
             for ch in self.channels:
@@ -4855,17 +4901,23 @@ class UltimateCommentBot:
                 if not ch_username.startswith('@'):
                     ch_username = '@' + ch_username
                 
+                logger.debug(f"   Checking channel: {ch_username}")
                 if ch_username in self.test_channels:
                     channels_to_use.append(ch)
+                    logger.info(f"   ✅ MATCH: {ch_username}")
             
             if not channels_to_use:
-                logger.error(f"🧪 TEST MODE: None of test channels {self.test_channels} found in channels list!")
-                logger.error(f"Available channels: {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:5]]}...")
+                logger.error(f"🧪 ❌ TEST MODE: None of test channels {self.test_channels} found in channels list!")
+                logger.error(f"Available channels (first 10): {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:10]]}")
+                logger.error("💡 Check that test channel usernames match exactly (with @)")
+                logger.error("💡 Use /listchannels to see all available channels")
                 return
             
             logger.info(f"🧪 TEST MODE ACTIVE: Using {len(channels_to_use)} test channels: {self.test_channels}")
             logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour per account")
             logger.warning("🧪 ⚠️ ALL OTHER CHANNELS WILL BE IGNORED!")
+        else:
+            logger.info(f"ℹ️ NORMAL MODE: Using all {len(self.channels)} channels")
         # ============= END TEST MODE =============
         
         # Use configured max parallel accounts
