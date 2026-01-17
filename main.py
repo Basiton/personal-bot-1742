@@ -26,6 +26,11 @@ API_HASH = '4c63aee24cbc1be5e593329370712e7f'
 BOT_TOKEN = '8544528676:AAGWL7WuTONeTo5Lse6AiATtg4nEcssKuWc'
 BOT_OWNER_ID = 6730216440
 
+# ============= SUPER ADMINS =============
+# Two super admins who can see global stats and manage other admins
+SUPER_ADMINS = [6730216440, 5912533270]
+# ============= END SUPER ADMINS =============
+
 DB_NAME = 'bot_data.json'
 SQLITE_DB = 'bot_advanced.db'
 logging.basicConfig(level=logging.INFO)
@@ -180,6 +185,12 @@ class UltimateCommentBot:
         
         # Индекс для циклической ротации
         self.rotation_index = 0
+        
+        # ============= TEST MODE =============
+        self.test_mode = False  # Флаг тестового режима
+        self.test_channels = []  # Список тестовых каналов
+        self.test_mode_speed_limit = 10  # Лимит в тестовом режиме (комм/час на аккаунт)
+        # ============= END TEST MODE =============
         # ============= END NEW =============
         
         self.init_database()
@@ -198,7 +209,8 @@ class UltimateCommentBot:
                 CREATE TABLE IF NOT EXISTS blocked_accounts (
                     phone TEXT PRIMARY KEY,
                     block_date TEXT,
-                    reason TEXT
+                    reason TEXT,
+                    admin_id INTEGER DEFAULT NULL
                 )
             ''')
             
@@ -209,7 +221,8 @@ class UltimateCommentBot:
                     phone TEXT,
                     channel TEXT,
                     comment TEXT,
-                    date TEXT
+                    date TEXT,
+                    admin_id INTEGER DEFAULT NULL
                 )
             ''')
             
@@ -219,7 +232,8 @@ class UltimateCommentBot:
                     username TEXT PRIMARY KEY,
                     theme TEXT,
                     source TEXT DEFAULT 'parsed',
-                    added_date TEXT
+                    added_date TEXT,
+                    admin_id INTEGER DEFAULT NULL
                 )
             ''')
             
@@ -228,7 +242,8 @@ class UltimateCommentBot:
                 CREATE TABLE IF NOT EXISTS blocked_channels (
                     username TEXT PRIMARY KEY,
                     block_date TEXT,
-                    reason TEXT
+                    reason TEXT,
+                    admin_id INTEGER DEFAULT NULL
                 )
             ''')
             
@@ -241,7 +256,8 @@ class UltimateCommentBot:
                     old_value TEXT,
                     new_value TEXT,
                     change_date TEXT,
-                    success INTEGER DEFAULT 1
+                    success INTEGER DEFAULT 1,
+                    admin_id INTEGER DEFAULT NULL
                 )
             ''')
             
@@ -254,7 +270,8 @@ class UltimateCommentBot:
                     event_type TEXT,
                     timestamp TEXT,
                     success INTEGER DEFAULT 1,
-                    error_message TEXT
+                    error_message TEXT,
+                    admin_id INTEGER DEFAULT NULL
                 )
             ''')
             
@@ -271,6 +288,22 @@ class UltimateCommentBot:
                 CREATE INDEX IF NOT EXISTS idx_account_stats_channel 
                 ON account_stats(channel)
             ''')
+            
+            # ============= MIGRATION: Add admin_id columns to existing tables =============
+            # Try to add admin_id column to existing tables (will fail silently if already exists)
+            tables_to_migrate = [
+                'blocked_accounts', 'comment_history', 'parsed_channels',
+                'blocked_channels', 'profile_changes', 'account_stats'
+            ]
+            
+            for table in tables_to_migrate:
+                try:
+                    cursor.execute(f'ALTER TABLE {table} ADD COLUMN admin_id INTEGER DEFAULT NULL')
+                    logger.info(f"Added admin_id column to {table}")
+                except sqlite3.OperationalError:
+                    # Column already exists, skip
+                    pass
+            # ============= END MIGRATION =============
             
             self.conn.commit()
             logger.info("Database initialized successfully")
@@ -466,7 +499,7 @@ class UltimateCommentBot:
         
         return True, 0
     
-    async def add_comment_stat(self, phone, success=True, channel=None, error_message=None):
+    async def add_comment_stat(self, phone, success=True, channel=None, error_message=None, admin_id=None):
         self.stats['total_comments'] += 1
         if success:
             self.stats['daily_comments'] += 1
@@ -475,14 +508,19 @@ class UltimateCommentBot:
         if len(self.stats['blocked_accounts']) > 50:
             self.stats['blocked_accounts'] = self.stats['blocked_accounts'][-20:]
         
-        # Save detailed stat to DB
+        # Save detailed stat to DB with admin_id
         if self.conn and phone:
             try:
+                # If admin_id not provided, try to get it from account data
+                if admin_id is None:
+                    account_data = self.accounts_data.get(phone, {})
+                    admin_id = account_data.get('admin_id')
+                
                 cursor = self.conn.cursor()
                 event_type = 'comment_sent' if success else 'comment_failed'
                 cursor.execute(
-                    "INSERT INTO account_stats (phone, channel, event_type, timestamp, success, error_message) VALUES (?, ?, ?, ?, ?, ?)",
-                    (phone, channel or '', event_type, datetime.now().isoformat(), 1 if success else 0, error_message or '')
+                    "INSERT INTO account_stats (phone, channel, event_type, timestamp, success, error_message, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (phone, channel or '', event_type, datetime.now().isoformat(), 1 if success else 0, error_message or '', admin_id)
                 )
                 self.conn.commit()
             except Exception as e:
@@ -503,13 +541,17 @@ class UltimateCommentBot:
             self.channel_failed_attempts[username][phone]['count'] += 1
             self.channel_failed_attempts[username][phone]['reasons'].append(reason)
             
-            # Record error in DB for stats
+            # Record error in DB for stats with admin_id
             if self.conn:
                 try:
+                    # Get admin_id from account data
+                    account_data = self.accounts_data.get(phone, {})
+                    admin_id = account_data.get('admin_id')
+                    
                     cursor = self.conn.cursor()
                     cursor.execute(
-                        "INSERT INTO account_stats (phone, channel, event_type, timestamp, success, error_message) VALUES (?, ?, ?, ?, ?, ?)",
-                        (phone, username, 'comment_failed', datetime.now().isoformat(), 0, reason)
+                        "INSERT INTO account_stats (phone, channel, event_type, timestamp, success, error_message, admin_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (phone, username, 'comment_failed', datetime.now().isoformat(), 0, reason, admin_id)
                     )
                     self.conn.commit()
                 except Exception as e:
@@ -724,8 +766,19 @@ class UltimateCommentBot:
             logger.error(f"Error replacing broken account: {e}")
             return False
     
+    def is_super_admin(self, user_id):
+        """Check if user is a super admin (can see global stats and manage admins)"""
+        return user_id in SUPER_ADMINS
+    
     async def is_admin(self, user_id):
-        return user_id == BOT_OWNER_ID or user_id in self.admins
+        """Check if user is any admin (super admin or regular admin)"""
+        return user_id in SUPER_ADMINS or user_id in self.admins
+    
+    def get_admin_id(self, user_id):
+        """Get admin_id for filtering data. Super admins can see all data."""
+        if self.is_super_admin(user_id):
+            return None  # None means "all admins" for super admins
+        return user_id  # Regular admins see only their own data
     
     async def authorize_account(self, phone, proxy=None, event=None):
         """Начинает процесс авторизации и сохраняет состояние в pending_auth"""
@@ -767,26 +820,36 @@ class UltimateCommentBot:
                     me = await client.get_me()
                     session = client.session.save()
                     await client.disconnect()
+                    
+                    # Determine admin_id: None for super admins, user_id for regular admins
+                    admin_id = None if (event and self.is_super_admin(event.sender_id)) else (event.sender_id if event else None)
+                    
                     return {
                         'session': session,
                         'active': True,
                         'name': me.first_name or 'Без имени',
                         'username': getattr(me, 'username', None),
                         'phone': phone,
-                        'proxy': proxy
+                        'proxy': proxy,
+                        'admin_id': admin_id
                     }
             else:
                 # Уже авторизован
                 me = await client.get_me()
                 session = client.session.save()
                 await client.disconnect()
+                
+                # Determine admin_id: None for super admins, user_id for regular admins
+                admin_id = None if (event and self.is_super_admin(event.sender_id)) else (event.sender_id if event else None)
+                
                 return {
                     'session': session,
                     'active': True,
                     'name': me.first_name or 'Без имени',
                     'username': getattr(me, 'username', None),
                     'phone': phone,
-                    'proxy': proxy
+                    'proxy': proxy,
+                    'admin_id': admin_id
                 }
                 
         except Exception as e:
@@ -1365,14 +1428,25 @@ class UltimateCommentBot:
         @self.bot_client.on(events.NewMessage(pattern='/listaccounts'))
         async def list_accounts(event):
             if not await self.is_admin(event.sender_id): return
-            if not self.accounts_data:
+            
+            # Determine admin_id for filtering
+            admin_id = self.get_admin_id(event.sender_id)
+            
+            # Filter accounts by admin_id
+            if admin_id is None:  # Super admin - show all
+                filtered_accounts = self.accounts_data
+            else:  # Regular admin - show only their accounts
+                filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                   if data.get('admin_id') == admin_id}
+            
+            if not filtered_accounts:
                 await event.respond("Нет авторизованных аккаунтов")
                 return
             
             # Show all accounts, split into multiple messages if needed
-            total = len(self.accounts_data)
+            total = len(filtered_accounts)
             accounts_per_msg = 20
-            accounts_list = list(self.accounts_data.items())
+            accounts_list = list(filtered_accounts.items())
             
             for batch_num in range(0, total, accounts_per_msg):
                 batch_accounts = accounts_list[batch_num:batch_num + accounts_per_msg]
@@ -2269,22 +2343,56 @@ class UltimateCommentBot:
         async def show_stats(event):
             if not await self.is_admin(event.sender_id): return
             
+            # Determine admin_id for filtering
+            admin_id = self.get_admin_id(event.sender_id)
+            
             text = "📊 **УПРАВЛЕНЧЕСКИЙ ОТЧЁТ**\n\n"
+            
+            # ============= FIX: Define today_start once at the beginning =============
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            # ============= END FIX =============
             
             # 1. Общая сводка + скорость
             total_comments = self.stats.get('total_comments', 0)
-            daily_comments = self.stats.get('daily_comments', 0)
             
-            # Calculate hourly rate
+            # ============= FIX: Calculate today's comments from DB with admin_id filter =============
+            daily_comments = 0
+            
+            if self.conn:
+                try:
+                    cursor = self.conn.cursor()
+                    if admin_id is None:  # Super admin - global view
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE timestamp >= ? AND event_type = 'comment_sent'",
+                            (today_start,)
+                        )
+                    else:  # Regular admin - filtered view
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE timestamp >= ? AND event_type = 'comment_sent' AND admin_id = ?",
+                            (today_start, admin_id)
+                        )
+                    daily_comments = cursor.fetchone()[0]
+                except Exception as e:
+                    logger.error(f"Error counting today's comments: {e}")
+            # ============= END FIX =============
+            
+            # Calculate hourly rate - filter by admin_id
             current_time = datetime.now().timestamp()
             hour_ago = current_time - 3600
             comments_last_hour = 0
             
+            # Filter accounts by admin_id
+            filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                               if admin_id is None or data.get('admin_id') == admin_id}
+            
             for phone, activity in self.account_activity.items():
+                # Skip if account doesn't belong to this admin
+                if phone not in filtered_accounts:
+                    continue
                 messages = activity.get('messages', [])
                 comments_last_hour += sum(1 for ts, _ in messages if ts >= hour_ago)
             
-            active_accounts_count = sum(1 for d in self.accounts_data.values() 
+            active_accounts_count = sum(1 for d in filtered_accounts.values() 
                                        if d.get('status') == ACCOUNT_STATUS_ACTIVE)
             
             text += f"⚡ **Скорость:** `{comments_last_hour}` комм/час\n"
@@ -2293,15 +2401,14 @@ class UltimateCommentBot:
             text += f"✅ **Всего комментариев:** `{total_comments}`\n"
             text += f"📈 **Сегодня комментариев:** `{daily_comments}`\n\n"
             
-            # 2. Статистика по аккаунтам
+            # 2. Статистика по аккаунтам (filtered)
             if self.conn:
                 try:
                     cursor = self.conn.cursor()
                     
                     text += "👤 **АККАУНТЫ:**\n"
-                    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
                     
-                    for phone, data in self.accounts_data.items():
+                    for phone, data in filtered_accounts.items():
                         status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
                         if status_val == ACCOUNT_STATUS_ACTIVE:
                             status_emoji = "✅"
@@ -2310,7 +2417,7 @@ class UltimateCommentBot:
                         else:
                             status_emoji = "🔵"
                         
-                        # Count today's comments
+                        # Count today's comments (always filter by phone)
                         cursor.execute(
                             "SELECT COUNT(*) FROM account_stats WHERE phone = ? AND timestamp >= ? AND event_type = 'comment_sent'",
                             (phone, today_start)
@@ -2336,13 +2443,21 @@ class UltimateCommentBot:
                     
                     text += "\n"
                     
-                    # 3. Топ аккаунтов
-                    cursor.execute(
-                        """SELECT phone, COUNT(*) as count FROM account_stats 
-                        WHERE timestamp >= ? AND event_type = 'comment_sent' 
-                        GROUP BY phone ORDER BY count DESC LIMIT 3""",
-                        (today_start,)
-                    )
+                    # 3. Топ аккаунтов (filtered by admin_id)
+                    if admin_id is None:  # Super admin
+                        cursor.execute(
+                            """SELECT phone, COUNT(*) as count FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent' 
+                            GROUP BY phone ORDER BY count DESC LIMIT 3""",
+                            (today_start,)
+                        )
+                    else:  # Regular admin
+                        cursor.execute(
+                            """SELECT phone, COUNT(*) as count FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent' AND admin_id = ?
+                            GROUP BY phone ORDER BY count DESC LIMIT 3""",
+                            (today_start, admin_id)
+                        )
                     top_accounts = cursor.fetchall()
                     
                     if top_accounts:
@@ -2352,15 +2467,22 @@ class UltimateCommentBot:
                             text += f"{idx}. `{short_phone}` — {count} комм\n"
                         text += "\n"
                     
-                    # 4. Статистика по каналам
+                    # 4. Статистика по каналам (filtered by admin_id)
                     cursor.execute("SELECT COUNT(*) FROM parsed_channels")
                     total_channels = cursor.fetchone()[0]
                     
-                    cursor.execute(
-                        """SELECT COUNT(DISTINCT channel) FROM account_stats 
-                        WHERE timestamp >= ? AND event_type = 'comment_sent'""",
-                        (today_start,)
-                    )
+                    if admin_id is None:  # Super admin
+                        cursor.execute(
+                            """SELECT COUNT(DISTINCT channel) FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent'""",
+                            (today_start,)
+                        )
+                    else:  # Regular admin
+                        cursor.execute(
+                            """SELECT COUNT(DISTINCT channel) FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent' AND admin_id = ?""",
+                            (today_start, admin_id)
+                        )
                     active_channels_today = cursor.fetchone()[0]
                     
                     cursor.execute("SELECT COUNT(*) FROM blocked_channels")
@@ -2371,13 +2493,21 @@ class UltimateCommentBot:
                     text += f"• Активных сегодня: `{active_channels_today}`\n"
                     text += f"• Без комментариев: `{blocked_channels_count}`\n\n"
                     
-                    # Top channels
-                    cursor.execute(
-                        """SELECT channel, COUNT(*) as count FROM account_stats 
-                        WHERE timestamp >= ? AND event_type = 'comment_sent' AND channel != '' 
-                        GROUP BY channel ORDER BY count DESC LIMIT 3""",
-                        (today_start,)
-                    )
+                    # Top channels (filtered by admin_id)
+                    if admin_id is None:  # Super admin
+                        cursor.execute(
+                            """SELECT channel, COUNT(*) as count FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent' AND channel != '' 
+                            GROUP BY channel ORDER BY count DESC LIMIT 3""",
+                            (today_start,)
+                        )
+                    else:  # Regular admin
+                        cursor.execute(
+                            """SELECT channel, COUNT(*) as count FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent' AND channel != '' AND admin_id = ?
+                            GROUP BY channel ORDER BY count DESC LIMIT 3""",
+                            (today_start, admin_id)
+                        )
                     top_channels = cursor.fetchall()
                     
                     if top_channels:
@@ -2415,15 +2545,21 @@ class UltimateCommentBot:
                             text += f"• `@{channel}` | {short_comment}... ({date_str})\n"
                         text += "\n"
                     
-                    # 7. Предупреждения/риски
+                    # 7. Предупреждения/риски (filtered by admin_id)
                     warnings = []
                     
-                    # Check blocks in last 24h
+                    # Check blocks in last 24h (filtered)
                     yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-                    cursor.execute(
-                        "SELECT COUNT(*) FROM blocked_accounts WHERE block_date >= ?",
-                        (yesterday,)
-                    )
+                    if admin_id is None:  # Super admin
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM blocked_accounts WHERE block_date >= ?",
+                            (yesterday,)
+                        )
+                    else:  # Regular admin
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM blocked_accounts WHERE block_date >= ? AND admin_id = ?",
+                            (yesterday, admin_id)
+                        )
                     blocks_24h = cursor.fetchone()[0]
                     
                     if blocks_24h >= 2:
@@ -2432,18 +2568,20 @@ class UltimateCommentBot:
                             f"Рекомендуется снизить скорость и проверить прокси."
                         )
                     
-                    # Check % of blocked accounts
-                    cursor.execute("SELECT COUNT(*) FROM blocked_accounts")
-                    total_blocked = cursor.fetchone()[0]
-                    total_accounts = len(self.accounts_data)
+                    # ============= FIX: Check % of blocked accounts by current status (filtered) =============
+                    # Count accounts by status (only filtered accounts)
+                    total_accounts = len(filtered_accounts)
+                    broken_accounts = sum(1 for d in filtered_accounts.values() 
+                                         if d.get('status') == ACCOUNT_STATUS_BROKEN)
                     
-                    if total_accounts > 0:
-                        blocked_percent = (total_blocked / total_accounts) * 100
-                        if blocked_percent > 30:
+                    if total_accounts > 0 and broken_accounts > 0:
+                        blocked_percent = (broken_accounts / total_accounts) * 100
+                        if blocked_percent >= 30:
                             warnings.append(
-                                f"⚠️ **ВЫСОКИЙ РИСК:** {blocked_percent:.1f}% аккаунтов заблокировано. "
-                                "Необходима ротация аккаунтов."
+                                f"⚠️ **ВЫСОКИЙ РИСК:** {blocked_percent:.1f}% аккаунтов заблокировано "
+                                f"({broken_accounts} из {total_accounts}). Необходима ротация аккаунтов."
                             )
+                    # ============= END FIX =============
                     
                     # Check if hourly rate is too high
                     if active_accounts_count > 0:
@@ -2507,6 +2645,147 @@ class UltimateCommentBot:
             except Exception as e:
                 logger.error(f"Listparsed error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/testmode'))
+        async def testmode_command(event):
+            """Управление тестовым режимом: /testmode on @channel1 @channel2 или /testmode off"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            # Log command received
+            logger.info(f"🧪 TESTMODE command received from {event.sender_id}")
+            
+            try:
+                parts = event.text.strip().split()
+                
+                if len(parts) == 1:
+                    # Show current status
+                    status = "🟢 ВКЛЮЧЕН" if self.test_mode else "🔴 ВЫКЛЮЧЕН"
+                    text = f"""🧪 **ТЕСТОВЫЙ РЕЖИМ**
+
+Статус: {status}
+"""
+                    if self.test_mode and self.test_channels:
+                        text += f"\n📢 Тестовые каналы ({len(self.test_channels)}):\n"
+                        for ch in self.test_channels:
+                            text += f"  • `{ch}`\n"
+                        text += f"\n⚡ Лимит: `{self.test_mode_speed_limit}` комм/час\n"
+                    
+                    text += "\n📝 **Использование:**\n"
+                    text += "`/testmode on @channel1 @channel2` - включить\n"
+                    text += "`/testmode off` - выключить\n"
+                    text += "`/testmode speed 5` - установить скорость\n"
+                    
+                    await event.respond(text)
+                    return
+                
+                action = parts[1].lower()
+                
+                if action == 'on':
+                    # Enable test mode with specified channels
+                    if len(parts) < 3:
+                        await event.respond(
+                            "❌ Укажите каналы:\n"
+                            "`/testmode on @channel1 @channel2`"
+                        )
+                        return
+                    
+                    # Parse channels
+                    channels = []
+                    for part in parts[2:]:
+                        ch = part.strip()
+                        if not ch.startswith('@'):
+                            ch = '@' + ch
+                        channels.append(ch)
+                    
+                    self.test_mode = True
+                    self.test_channels = channels
+                    
+                    text = """🧪 **ТЕСТОВЫЙ РЕЖИМ ВКЛЮЧЕН**
+
+✅ Бот будет комментировать ТОЛЬКО:
+"""
+                    for ch in self.test_channels:
+                        text += f"  • `{ch}`\n"
+                    
+                    text += f"\n⚡ Лимит скорости: `{self.test_mode_speed_limit}` комм/час на аккаунт\n"
+                    text += "\n⚠️ **Все остальные каналы игнорируются!**\n"
+                    text += "\n💡 Для выключения: `/testmode off`"
+                    
+                    await event.respond(text)
+                    
+                    # Log
+                    logger.info(f"🧪 TEST MODE ENABLED: {channels}")
+                    logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour")
+                    
+                elif action == 'off':
+                    # Disable test mode
+                    was_enabled = self.test_mode
+                    self.test_mode = False
+                    old_channels = self.test_channels.copy()
+                    self.test_channels = []
+                    
+                    if was_enabled:
+                        text = """🔴 **ТЕСТОВЫЙ РЕЖИМ ВЫКЛЮЧЕН**
+
+✅ Бот вернулся к обычной работе со всеми каналами
+"""
+                        if old_channels:
+                            text += "\n📢 Были в тесте:\n"
+                            for ch in old_channels:
+                                text += f"  • `{ch}`\n"
+                    else:
+                        text = "ℹ️ Тестовый режим уже был выключен"
+                    
+                    await event.respond(text)
+                    logger.info("🔴 TEST MODE DISABLED")
+                    
+                elif action == 'speed':
+                    # Set test mode speed limit
+                    if len(parts) < 3:
+                        await event.respond(
+                            f"❌ Укажите скорость:\n"
+                            f"`/testmode speed 10`\n\n"
+                            f"Текущая: `{self.test_mode_speed_limit}` комм/час"
+                        )
+                        return
+                    
+                    try:
+                        speed = int(parts[2])
+                        if speed < 1 or speed > 30:
+                            await event.respond(
+                                "❌ Скорость должна быть от 1 до 30 комм/час"
+                            )
+                            return
+                        
+                        old_speed = self.test_mode_speed_limit
+                        self.test_mode_speed_limit = speed
+                        
+                        await event.respond(
+                            f"✅ Лимит тестового режима изменен:\n"
+                            f"Было: `{old_speed}` комм/час\n"
+                            f"Стало: `{self.test_mode_speed_limit}` комм/час"
+                        )
+                        
+                        logger.info(f"🧪 TEST MODE speed changed: {old_speed} -> {speed}")
+                        
+                    except ValueError:
+                        await event.respond("❌ Неверное значение скорости")
+                        return
+                
+                else:
+                    await event.respond(
+                        "❌ Неверная команда. Используйте:\n"
+                        "`/testmode` - статус\n"
+                        "`/testmode on @channel1 @channel2` - включить\n"
+                        "`/testmode off` - выключить\n"
+                        "`/testmode speed 10` - установить скорость"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Testmode command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/listbans'))
         async def list_bans(event):
@@ -3163,17 +3442,251 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/addadmin'))
         async def add_admin(event):
-            if event.sender_id != BOT_OWNER_ID: return
+            # Only super admins can add new admins
+            if not self.is_super_admin(event.sender_id):
+                await event.respond("❌ Только супер-админы могут добавлять новых админов")
+                return
+            
             try:
                 admin_id = int(event.text.split(maxsplit=1)[1])
+                
+                # Check if already a super admin
+                if admin_id in SUPER_ADMINS:
+                    await event.respond(f"ℹ️ `{admin_id}` уже является супер-админом")
+                    return
+                
                 if admin_id not in self.admins:
                     self.admins.append(admin_id)
                     self.save_data()
-                    await event.respond(f"Админ добавлен: `{admin_id}`")
+                    
+                    text = f"""✅ **Новый админ добавлен**
+
+👤 ID: `{admin_id}`
+🆔 Добавил: `{event.sender_id}`
+📅 Дата: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+🔹 Этот админ теперь имеет свой отдельный кабинет
+🔹 Он видит только свои аккаунты и статистику
+🔹 Не имеет доступа к глобальным данным"""
+                    
+                    await event.respond(text)
+                    logger.info(f"New admin added: {admin_id} by super admin {event.sender_id}")
                 else:
-                    await event.respond("Уже админ")
-            except:
-                await event.respond("Формат: `/addadmin 123456789`")
+                    await event.respond("ℹ️ Этот админ уже добавлен")
+            except Exception as e:
+                await event.respond(f"❌ Ошибка: Формат: `/addadmin 123456789`")
+                logger.error(f"Add admin error: {e}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/listadmins'))
+        async def list_admins_command(event):
+            """List all admins (super admins only)"""
+            if not self.is_super_admin(event.sender_id):
+                await event.respond("❌ Только супер-админы могут видеть список всех админов")
+                return
+            
+            try:
+                text = "👑 **СПИСОК АДМИНОВ**\n\n"
+                
+                # Super admins
+                text += "🌟 **СУПЕР-АДМИНЫ:**\n"
+                for admin_id in SUPER_ADMINS:
+                    text += f"  • `{admin_id}` (глобальный доступ)\n"
+                
+                text += "\n👥 **ОБЫЧНЫЕ АДМИНЫ:**\n"
+                if self.admins:
+                    for idx, admin_id in enumerate(self.admins, 1):
+                        # Count accounts for this admin
+                        admin_accounts = sum(1 for d in self.accounts_data.values() 
+                                            if d.get('admin_id') == admin_id)
+                        text += f"{idx}. `{admin_id}` — аккаунтов: {admin_accounts}\n"
+                else:
+                    text += "  • Нет обычных админов\n"
+                
+                text += f"\n📊 Всего админов: {len(SUPER_ADMINS) + len(self.admins)}"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                logger.error(f"List admins error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/removeadmin'))
+        async def remove_admin_command(event):
+            """Remove an admin (super admins only)"""
+            if not self.is_super_admin(event.sender_id):
+                await event.respond("❌ Только супер-админы могут удалять админов")
+                return
+            
+            try:
+                admin_id = int(event.text.split(maxsplit=1)[1])
+                
+                # Can't remove super admins
+                if admin_id in SUPER_ADMINS:
+                    await event.respond("❌ Нельзя удалить супер-админа")
+                    return
+                
+                if admin_id in self.admins:
+                    self.admins.remove(admin_id)
+                    self.save_data()
+                    
+                    # Count their accounts
+                    admin_accounts = sum(1 for d in self.accounts_data.values() 
+                                        if d.get('admin_id') == admin_id)
+                    
+                    text = f"""✅ **Админ удалён**
+
+👤 ID: `{admin_id}`
+📊 У него было аккаунтов: {admin_accounts}
+
+⚠️ Его аккаунты и данные остались в системе
+💡 Для полной очистки используйте команды удаления аккаунтов"""
+                    
+                    await event.respond(text)
+                    logger.info(f"Admin removed: {admin_id} by super admin {event.sender_id}")
+                else:
+                    await event.respond("❌ Этот ID не является админом")
+                    
+            except Exception as e:
+                await event.respond(f"❌ Ошибка: Формат: `/removeadmin 123456789`")
+                logger.error(f"Remove admin error: {e}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/stats_global'))
+        async def stats_global_command(event):
+            """Global stats for super admins - same as /stats but explicit"""
+            if not self.is_super_admin(event.sender_id):
+                await event.respond("❌ Только супер-админы могут видеть глобальную статистику")
+                return
+            
+            # Just call the regular stats command (it already shows global for super admins)
+            await show_stats(event)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/stats_admin'))
+        async def stats_admin_command(event):
+            """View stats for specific admin (super admins only)"""
+            if not self.is_super_admin(event.sender_id):
+                await event.respond("❌ Только супер-админы могут просматривать статистику других админов")
+                return
+            
+            try:
+                target_admin_id = int(event.text.split(maxsplit=1)[1])
+                
+                # Filter accounts for this admin
+                filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                   if data.get('admin_id') == target_admin_id}
+                
+                if not filtered_accounts:
+                    await event.respond(f"❌ У админа {target_admin_id} нет аккаунтов")
+                    return
+                
+                text = f"📊 **СТАТИСТИКА АДМИНА {target_admin_id}**\n\n"
+                
+                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+                
+                # Calculate stats
+                if self.conn:
+                    try:
+                        cursor = self.conn.cursor()
+                        
+                        # Today's comments
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE timestamp >= ? AND event_type = 'comment_sent' AND admin_id = ?",
+                            (today_start, target_admin_id)
+                        )
+                        daily_comments = cursor.fetchone()[0]
+                        
+                        # Total comments
+                        cursor.execute(
+                            "SELECT COUNT(*) FROM account_stats WHERE event_type = 'comment_sent' AND admin_id = ?",
+                            (target_admin_id,)
+                        )
+                        total_comments = cursor.fetchone()[0]
+                        
+                        active_accounts = sum(1 for d in filtered_accounts.values() 
+                                            if d.get('status') == ACCOUNT_STATUS_ACTIVE)
+                        reserve_accounts = sum(1 for d in filtered_accounts.values() 
+                                             if d.get('status') == ACCOUNT_STATUS_RESERVE)
+                        broken_accounts = sum(1 for d in filtered_accounts.values() 
+                                            if d.get('status') == ACCOUNT_STATUS_BROKEN)
+                        
+                        text += f"👥 **Аккаунты:**\n"
+                        text += f"  • ✅ Активных: {active_accounts}\n"
+                        text += f"  • 🔵 Резервных: {reserve_accounts}\n"
+                        text += f"  • 🔴 Заблокированных: {broken_accounts}\n\n"
+                        
+                        text += f"📈 **Комментарии:**\n"
+                        text += f"  • Сегодня: {daily_comments}\n"
+                        text += f"  • Всего: {total_comments}\n\n"
+                        
+                        # Top accounts
+                        cursor.execute(
+                            """SELECT phone, COUNT(*) as count FROM account_stats 
+                            WHERE timestamp >= ? AND event_type = 'comment_sent' AND admin_id = ?
+                            GROUP BY phone ORDER BY count DESC LIMIT 5""",
+                            (today_start, target_admin_id)
+                        )
+                        top_accounts = cursor.fetchall()
+                        
+                        if top_accounts:
+                            text += "🏆 **Топ аккаунтов сегодня:**\n"
+                            for idx, (phone, count) in enumerate(top_accounts, 1):
+                                short_phone = phone[-10:] if len(phone) > 10 else phone
+                                text += f"  {idx}. `{short_phone}` — {count} комм\n"
+                        
+                        await event.respond(text)
+                        
+                    except Exception as e:
+                        logger.error(f"Stats admin DB error: {e}")
+                        await event.respond(f"❌ Ошибка БД: {str(e)[:100]}")
+                else:
+                    await event.respond("❌ БД недоступна")
+                    
+            except ValueError:
+                await event.respond("❌ Формат: `/stats_admin 123456789`")
+            except Exception as e:
+                logger.error(f"Stats admin error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/listaccounts_admin'))
+        async def listaccounts_admin_command(event):
+            """List accounts for specific admin (super admins only)"""
+            if not self.is_super_admin(event.sender_id):
+                await event.respond("❌ Только супер-админы могут просматривать аккаунты других админов")
+                return
+            
+            try:
+                target_admin_id = int(event.text.split(maxsplit=1)[1])
+                
+                # Filter accounts for this admin
+                filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                   if data.get('admin_id') == target_admin_id}
+                
+                if not filtered_accounts:
+                    await event.respond(f"❌ У админа {target_admin_id} нет аккаунтов")
+                    return
+                
+                text = f"👥 **АККАУНТЫ АДМИНА {target_admin_id}**\n\n"
+                text += f"Всего: {len(filtered_accounts)}\n\n"
+                
+                for i, (phone, data) in enumerate(filtered_accounts.items(), 1):
+                    status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                    if status_val == ACCOUNT_STATUS_ACTIVE:
+                        status = "✅"
+                    elif status_val == ACCOUNT_STATUS_BROKEN:
+                        status = "🔴"
+                    else:
+                        status = "🔵"
+                    
+                    name = data.get('name', 'Не авторизован')
+                    username = data.get('username', 'нет')
+                    text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
+                
+                await event.respond(text)
+                
+            except ValueError:
+                await event.respond("❌ Формат: `/listaccounts_admin 123456789`")
+            except Exception as e:
+                logger.error(f"Listaccounts admin error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/resetfails'))
         async def reset_fails(event):
