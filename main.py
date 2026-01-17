@@ -59,9 +59,13 @@ ACCOUNT_STATUS_BROKEN = 'broken'
 # ============= END RATE LIMITING & ROTATION SETTINGS =============
 
 # YandexGPT configuration from environment variables
-YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID', 'b1g4or5i5s66hklqfg06')
-YANDEX_API_KEY = os.getenv('YANDEX_API_KEY', '')
+# Поддержка YC_API_KEY/YC_FOLDER_ID или старых названий
+YANDEX_API_KEY = os.getenv('YC_API_KEY') or os.getenv('YANDEX_API_KEY', '')
+YANDEX_FOLDER_ID = os.getenv('YC_FOLDER_ID') or os.getenv('YANDEX_FOLDER_ID', 'b1g4or5i5s66hklqfg06')
 YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+
+# Опция логирования комментариев для отладки промптов
+ENABLE_COMMENT_LOGGING = os.getenv('LOG_COMMENTS', '').lower() in ('true', '1', 'yes')
 
 def generate_neuro_comment(
     post_text: str,
@@ -70,7 +74,8 @@ def generate_neuro_comment(
     max_tokens: int = 120,
 ) -> str:
     """
-    Генерирует короткий нейтрально‑радостный комментарий к посту с помощью YandexGPT.
+    Генерирует короткий живой комментарий к посту с помощью YandexGPT.
+    Стиль: разговорный, конкретный, без формальностей.
     """
     # Fallback comments if API is not configured or fails
     fallback_comments = [
@@ -86,24 +91,49 @@ def generate_neuro_comment(
         logger.warning("YANDEX_API_KEY not configured, using fallback comments")
         return random.choice(fallback_comments)
     
-    prompt = f"""
-Создай короткий (20–50 слов) нейтрально-радостный комментарий к посту.
+    # Рандомизация стиля комментария (больше вариантов)
+    style_variants = [
+        ("короткий вопрос по сути поста", True, 0.3),  # (стиль, может_без_эмодзи, вероятность)
+        ("реакция на конкретные цифры/сроки", True, 0.4),
+        ("короткая резкая фраза-оценка, без вопроса", True, 0.5),
+        ("мини-реплика одним предложением", False, 0.6),
+        ("обрывистая реплика 3-5 слов", False, 0.7),
+    ]
+    
+    chosen_variant = random.choice(style_variants)
+    chosen_style, can_skip_emoji, emoji_skip_chance = chosen_variant
+    use_emoji = random.random() > emoji_skip_chance  # Иногда без эмодзи вообще
+    
+    # Еще более простой, разговорный промпт
+    prompt = f"""Короткий комментарий к Telegram-посту.
 
-ТЕМА КАНАЛА: {channel_theme}
-ТЕКСТ ПОСТА: {post_text[:600]}
+СТИЛЬ: простой, разговорный, как живой человек пишет в чате.
 
-Требования:
-- Русский язык.
-- Дружелюбный, живой тон.
-- 1–2 подходящих эмодзи.
-- Без ссылок, без прямой рекламы, без упоминания нейросетей и ИИ.
-- Можно задать уточняющий вопрос или поддержать автора.
-"""
+ФОРМАТ: {chosen_style}
+{"БЕЗ ЭМОДЗИ" if not use_emoji else "Можно 1 эмодзи (разный каждый раз)"}
+
+ВАЖНО:
+• Опирайся на КОНКРЕТИКУ: даты, цифры, факты из поста
+• Если в посте год/число — используй ТОЧНО его
+• Простые короткие фразы, не литературный язык
+• Можно обрывисто: "Смело", "Жёсткий дедлайн", "Звучит реально"
+
+ЗАПРЕЩЕНО:
+❌ "Желаю успехов", "Здорово, что", "Благодарю", "Спасибо за пост"
+❌ Длинные сложные предложения
+❌ Формальный/корпоративный тон
+❌ Вводные слова ("честно говоря", "на самом деле", "в общем")
+
+Тема: {channel_theme}
+
+Пост:
+{post_text[:800]}
+
+Комментарий:"""
 
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json",
-        "x-folder-id": YANDEX_FOLDER_ID,
     }
 
     payload = {
@@ -128,11 +158,103 @@ def generate_neuro_comment(
             return random.choice(fallback_comments)
         
         data = response.json()
-        text = data["result"]["alternatives"][0]["message"]["text"].strip()
-        return text
+        raw_comment = data["result"]["alternatives"][0]["message"]["text"].strip()
+        
+        # Постобработка для "человечности"
+        final_comment = humanize_comment(raw_comment)
+        
+        # Логирование (если включено)
+        if ENABLE_COMMENT_LOGGING:
+            logger.info(f"[COMMENT_GEN] Raw: {raw_comment}")
+            logger.info(f"[COMMENT_GEN] Final: {final_comment}")
+        
+        return final_comment
     except Exception as e:
         logger.warning(f"YandexGPT generation failed: {e}")
         return random.choice(fallback_comments)
+
+def humanize_comment(text: str) -> str:
+    """
+    Постобработка комментария для большей естественности.
+    Убирает отполированные формулировки, делает более разговорным и "шероховатым".
+    """
+    import re
+    
+    # Убираем лишние пробелы
+    text = " ".join(text.split())
+    
+    # Сначала удаляем формальные фразы (самые приоритетные)
+    formal_replacements = {
+        "Желаю вам успехов": "",
+        "Желаю успехов": "",
+        "Желаю удачи": "",
+        "Благодарю за пост": "",
+        "Спасибо за пост": "",
+        "Здорово, что вы": "",
+        "Здорово что вы": "",
+        "Рада за вас": "",
+        "Рад за вас": "",
+        "Это вдохновляет": "",
+    }
+    
+    for formal, replacement in formal_replacements.items():
+        if formal.lower() in text.lower():
+            text = re.sub(re.escape(formal), replacement, text, flags=re.IGNORECASE)
+    
+    # Удаляем вводные слова
+    filler_patterns = [
+        r'\bчестно говоря,?\s*',
+        r'\bна самом деле,?\s*',
+        r'\bв общем,?\s*',
+        r'\bв принципе,?\s*',
+        r'\bкак бы,?\s+',
+        r'\bпо сути,?\s*',
+        r'\bдействительно,?\s*',
+        r'\bбезусловно,?\s*',
+    ]
+    
+    for pattern in filler_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+    
+    # Упрощаем длинные конструкции
+    text = text.replace("Очень интересно", "Интересно")
+    text = text.replace("Очень круто", "Круто")
+    text = text.replace("Действительно интересно", "Интересно")
+    
+    # Иногда убираем запятые перед союзами (делаем более разговорным)
+    if random.random() < 0.4:
+        text = text.replace(", а ", " а ").replace(", но ", " но ").replace(", и ", " и ")
+    
+    # Иногда заменяем длинные конструкции на короткие
+    if random.random() < 0.3:
+        text = text.replace("является ", "— ")
+        text = text.replace("представляет собой ", "— ")
+        text = text.replace("не могу не сказать", "")
+        text = text.replace("хочется отметить", "")
+        text = text.replace("стоит отметить", "")
+    
+    # Убираем множественные пробелы и лишние знаки
+    text = re.sub(r'\s+', ' ', text)  # Любое количество пробелов → 1
+    text = re.sub(r'\s+([.,!?])', r'\1', text)  # Пробел перед знаком
+    text = re.sub(r'^[.,!?\s]+', '', text)  # Знаки в начале
+    text = re.sub(r'[.,!?\s]+$', '', text)  # Знаки в конце (кроме одного)
+    
+    # Восстанавливаем один знак в конце если нужно
+    if text and not text[-1] in '.!?':
+        # Если это вопрос, добавляем ?
+        if any(word in text.lower() for word in ['как', 'что', 'где', 'когда', 'почему', 'зачем', 'какой', 'сколько']):
+            text += '?'
+    
+    # Если текст стал слишком коротким или пустым
+    text = text.strip()
+    if not text or len(text) < 3:
+        return "Интересно"
+    
+    # Делаем первую букву заглавной
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    
+    return text
 
 class UltimateCommentBot:
     def __init__(self):
@@ -4211,54 +4333,75 @@ class UltimateCommentBot:
                     await event.respond("⏳ Обновляю имя...")
                     
                     # Log profile update details
-                    logger.info(f"PROFILE UPDATE: Starting name update - phone={phone}, "
-                               f"status={data.get('status')}, admin_id={data.get('admin_id')}")
+                    logger.info(f"PROFILE UPDATE: cmd=/setname, phone={phone}, "
+                               f"status={data.get('status')}, admin_id={data.get('admin_id')}, "
+                               f"has_session={bool(data.get('session'))}")
                     
                     # Update profile
+                    client = None
                     try:
+                        logger.info(f"PROFILE UPDATE: Creating client for phone={phone}")
                         client = TelegramClient(
                             StringSession(data['session']), 
                             API_ID, 
                             API_HASH,
                             proxy=data.get('proxy')
                         )
+                        
+                        logger.info(f"PROFILE UPDATE: Connecting client for phone={phone}")
                         await client.connect()
                         
-                        logger.info(f"PROFILE UPDATE: Client connected for {phone}")
-                        
-                        if await client.is_user_authorized():
-                            # Get current name
-                            me = await client.get_me()
-                            old_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
-                            
-                            # Update
-                            logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for {phone} with name={first_name} {last_name}")
-                            await client(UpdateProfileRequest(
-                                first_name=first_name,
-                                last_name=last_name
-                            ))
-                            
-                            # Log
-                            await self.log_profile_change(phone, 'name', old_name, new_name, True)
-                            
-                            logger.info(f"PROFILE UPDATE: SUCCESS - Name updated for {phone}")
-                            
-                            await event.respond(
-                                f"✅ **Имя обновлено для `{phone}`**\n\n"
-                                f"Новое имя: {first_name} {last_name}"
-                            )
-                            logger.info(f"Name updated for {phone}: {new_name}")
-                        else:
+                        logger.info(f"PROFILE UPDATE: Checking authorization for phone={phone}")
+                        if not await client.is_user_authorized():
                             logger.error(f"PROFILE UPDATE: FAILED - Account {phone} not authorized")
-                            await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                            await event.respond(f"❌ Аккаунт `{phone}` не авторизован. Возможно, сессия устарела.")
+                            await client.disconnect()
+                            await self.clear_user_state(event.sender_id)
+                            return
                         
-                        await client.disconnect()
+                        # Get current name
+                        logger.info(f"PROFILE UPDATE: Getting current profile for phone={phone}")
+                        me = await client.get_me()
+                        old_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
+                        logger.info(f"PROFILE UPDATE: Current name for {phone}: '{old_name}'")
+                        
+                        # Update name
+                        logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for phone={phone}, "
+                                   f"first_name='{first_name}', last_name='{last_name}'")
+                        
+                        result = await client(UpdateProfileRequest(
+                            first_name=first_name,
+                            last_name=last_name
+                        ))
+                        
+                        logger.info(f"PROFILE UPDATE: UpdateProfileRequest result type: {type(result).__name__}")
+                        logger.info(f"PROFILE UPDATE: SUCCESS - Name updated for phone={phone} from '{old_name}' to '{new_name}'")
+                        
+                        # Log to DB
+                        await self.log_profile_change(phone, 'name', old_name, new_name, True)
+                        
+                        await event.respond(
+                            f"✅ **Имя обновлено для `{phone}`**\n\n"
+                            f"Старое: {old_name or '(не задано)'}\n"
+                            f"Новое: {first_name} {last_name}"
+                        )
+                        
                     except Exception as e:
                         await self.log_profile_change(phone, 'name', '', new_name, False)
-                        logger.error(f"PROFILE UPDATE: ERROR - Failed to update name for {phone}: {e}")
-                        logger.error(f"PROFILE UPDATE: ERROR details - Type: {type(e).__name__}, Message: {str(e)}")
-                        await event.respond(f"❌ Ошибка: {str(e)[:100]}")
-                        logger.error(f"Error updating name for {phone}: {e}")
+                        logger.error(f"PROFILE UPDATE: ERROR - Failed to update name for phone={phone}")
+                        logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
+                        logger.error(f"PROFILE UPDATE: ERROR Message: {str(e)}")
+                        import traceback
+                        logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
+                        await event.respond(
+                            f"❌ **Ошибка при обновлении имени для `{phone}`**\n\n"
+                            f"Тип: {type(e).__name__}\n"
+                            f"Сообщение: {str(e)[:200]}"
+                        )
+                    finally:
+                        if client and client.is_connected():
+                            logger.info(f"PROFILE UPDATE: Disconnecting client for phone={phone}")
+                            await client.disconnect()
                     
                     # Clear state
                     await self.clear_user_state(event.sender_id)
@@ -4275,47 +4418,72 @@ class UltimateCommentBot:
                     await event.respond("⏳ Обновляю био...")
                     
                     # Log profile update details
-                    logger.info(f"PROFILE UPDATE: Starting bio update - phone={phone}, "
-                               f"status={data.get('status')}, admin_id={data.get('admin_id')}")
+                    logger.info(f"PROFILE UPDATE: cmd=/setbio, phone={phone}, "
+                               f"status={data.get('status')}, admin_id={data.get('admin_id')}, "
+                               f"has_session={bool(data.get('session'))}, bio_length={len(new_bio)}")
                     
                     # Update profile
+                    client = None
                     try:
+                        logger.info(f"PROFILE UPDATE: Creating client for phone={phone}")
                         client = TelegramClient(
                             StringSession(data['session']), 
                             API_ID, 
                             API_HASH,
                             proxy=data.get('proxy')
                         )
+                        
+                        logger.info(f"PROFILE UPDATE: Connecting client for phone={phone}")
                         await client.connect()
                         
-                        logger.info(f"PROFILE UPDATE: Client connected for {phone}")
-                        
-                        if await client.is_user_authorized():
-                            # Update bio using UpdateProfileRequest
-                            logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for {phone} with bio length={len(new_bio)}")
-                            await client(UpdateProfileRequest(about=new_bio))
-                            
-                            # Log (without old bio, as it requires additional request)
-                            await self.log_profile_change(phone, 'bio', '', new_bio, True)
-                            
-                            logger.info(f"PROFILE UPDATE: SUCCESS - Bio updated for {phone}")
-                            
-                            await event.respond(
-                                f"✅ **Био обновлено для `{phone}`**\n\n"
-                                f"Новое био: {new_bio[:100]}"
-                            )
-                            logger.info(f"Bio updated for {phone}: {new_bio[:50]}")
-                        else:
+                        logger.info(f"PROFILE UPDATE: Checking authorization for phone={phone}")
+                        if not await client.is_user_authorized():
                             logger.error(f"PROFILE UPDATE: FAILED - Account {phone} not authorized")
-                            await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                            await event.respond(f"❌ Аккаунт `{phone}` не авторизован. Возможно, сессия устарела.")
+                            await client.disconnect()
+                            await self.clear_user_state(event.sender_id)
+                            return
                         
-                        await client.disconnect()
+                        # Get current bio (if possible)
+                        logger.info(f"PROFILE UPDATE: Getting current profile for phone={phone}")
+                        me = await client.get_me()
+                        # Note: me.about might not be available, need to use GetFullUserRequest
+                        full = await client(GetFullUserRequest(me))
+                        old_bio = full.full_user.about or ''
+                        logger.info(f"PROFILE UPDATE: Current bio for {phone}: '{old_bio[:50]}...'")
+                        
+                        # Update bio
+                        logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for phone={phone} with bio='{new_bio[:50]}...'")
+                        
+                        result = await client(UpdateProfileRequest(about=new_bio))
+                        
+                        logger.info(f"PROFILE UPDATE: UpdateProfileRequest result type: {type(result).__name__}")
+                        logger.info(f"PROFILE UPDATE: SUCCESS - Bio updated for phone={phone}")
+                        
+                        # Log to DB
+                        await self.log_profile_change(phone, 'bio', old_bio, new_bio, True)
+                        
+                        await event.respond(
+                            f"✅ **Био обновлено для `{phone}`**\n\n"
+                            f"Новое био: {new_bio[:150]}"
+                        )
+                        
                     except Exception as e:
                         await self.log_profile_change(phone, 'bio', '', new_bio, False)
-                        logger.error(f"PROFILE UPDATE: ERROR - Failed to update bio for {phone}: {e}")
-                        logger.error(f"PROFILE UPDATE: ERROR details - Type: {type(e).__name__}, Message: {str(e)}")
-                        await event.respond(f"❌ Ошибка: {str(e)[:100]}")
-                        logger.error(f"Error updating bio for {phone}: {e}")
+                        logger.error(f"PROFILE UPDATE: ERROR - Failed to update bio for phone={phone}")
+                        logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
+                        logger.error(f"PROFILE UPDATE: ERROR Message: {str(e)}")
+                        import traceback
+                        logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
+                        await event.respond(
+                            f"❌ **Ошибка при обновлении био для `{phone}`**\n\n"
+                            f"Тип: {type(e).__name__}\n"
+                            f"Сообщение: {str(e)[:200]}"
+                        )
+                    finally:
+                        if client and client.is_connected():
+                            logger.info(f"PROFILE UPDATE: Disconnecting client for phone={phone}")
+                            await client.disconnect()
                     
                     # Clear state
                     await self.clear_user_state(event.sender_id)
@@ -4345,63 +4513,91 @@ class UltimateCommentBot:
                 phone = state_data.get('phone')
                 data = state_data.get('data')
                 
+                # Log profile update details
+                logger.info(f"PROFILE UPDATE: cmd=/setavatar, phone={phone}, "
+                           f"status={data.get('status')}, admin_id={data.get('admin_id')}, "
+                           f"has_session={bool(data.get('session'))}")
+                
                 # Download photo
+                logger.info(f"PROFILE UPDATE: Downloading photo for phone={phone}")
                 photo_path = await event.download_media(file=f"/tmp/avatar_{event.sender_id}.jpg")
                 
                 if not photo_path or not os.path.exists(photo_path):
+                    logger.error(f"PROFILE UPDATE: FAILED - Photo download failed for phone={phone}")
                     await event.respond("❌ Ошибка загрузки фото")
                     await self.clear_user_state(event.sender_id)
                     return
                 
+                logger.info(f"PROFILE UPDATE: Photo downloaded to {photo_path} for phone={phone}")
                 await event.respond("⏳ Загружаю аватарку...")
                 
-                # Log profile update details
-                logger.info(f"PROFILE UPDATE: Starting avatar upload - phone={phone}, "
-                           f"status={data.get('status')}, admin_id={data.get('admin_id')}")
-                
                 # Upload to selected account
+                client = None
                 try:
+                    logger.info(f"PROFILE UPDATE: Creating client for phone={phone}")
                     client = TelegramClient(
                         StringSession(data['session']), 
                         API_ID, 
                         API_HASH,
                         proxy=data.get('proxy')
                     )
+                    
+                    logger.info(f"PROFILE UPDATE: Connecting client for phone={phone}")
                     await client.connect()
                     
-                    logger.info(f"PROFILE UPDATE: Client connected for {phone}")
-                    
-                    if await client.is_user_authorized():
-                        # Upload profile photo
-                        logger.info(f"PROFILE UPDATE: Calling UploadProfilePhotoRequest for {phone}")
-                        await client(UploadProfilePhotoRequest(
-                            file=await client.upload_file(photo_path)
-                        ))
-                        
-                        # Log
-                        await self.log_profile_change(phone, 'avatar', '', 'uploaded', True)
-                        
-                        logger.info(f"PROFILE UPDATE: SUCCESS - Avatar uploaded for {phone}")
-                        
-                        await event.respond(f"✅ **Аватарка загружена для `{phone}`**")
-                        logger.info(f"Avatar uploaded for {phone}")
-                    else:
+                    logger.info(f"PROFILE UPDATE: Checking authorization for phone={phone}")
+                    if not await client.is_user_authorized():
                         logger.error(f"PROFILE UPDATE: FAILED - Account {phone} not authorized")
-                        await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                        await event.respond(f"❌ Аккаунт `{phone}` не авторизован. Возможно, сессия устарела.")
+                        await client.disconnect()
+                        await self.clear_user_state(event.sender_id)
+                        # Clean up temp file
+                        try:
+                            os.remove(photo_path)
+                        except:
+                            pass
+                        return
                     
-                    await client.disconnect()
+                    # Upload profile photo using upload_profile_photo method
+                    logger.info(f"PROFILE UPDATE: Uploading photo file for phone={phone}")
+                    uploaded_file = await client.upload_file(photo_path)
+                    logger.info(f"PROFILE UPDATE: File uploaded, type: {type(uploaded_file).__name__}")
+                    
+                    logger.info(f"PROFILE UPDATE: Calling UploadProfilePhotoRequest for phone={phone}")
+                    result = await client(UploadProfilePhotoRequest(file=uploaded_file))
+                    
+                    logger.info(f"PROFILE UPDATE: UploadProfilePhotoRequest result type: {type(result).__name__}")
+                    logger.info(f"PROFILE UPDATE: SUCCESS - Avatar uploaded for phone={phone}")
+                    
+                    # Log to DB
+                    await self.log_profile_change(phone, 'avatar', '', 'uploaded', True)
+                    
+                    await event.respond(f"✅ **Аватарка загружена для `{phone}`**")
+                    
                 except Exception as e:
                     await self.log_profile_change(phone, 'avatar', '', '', False)
-                    logger.error(f"PROFILE UPDATE: ERROR - Failed to upload avatar for {phone}: {e}")
-                    logger.error(f"PROFILE UPDATE: ERROR details - Type: {type(e).__name__}, Message: {str(e)}")
-                    await event.respond(f"❌ Ошибка: {str(e)[:100]}")
-                    logger.error(f"Error uploading avatar for {phone}: {e}")
-                
-                # Clean up temp file
-                try:
-                    os.remove(photo_path)
-                except:
-                    pass
+                    logger.error(f"PROFILE UPDATE: ERROR - Failed to upload avatar for phone={phone}")
+                    logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
+                    logger.error(f"PROFILE UPDATE: ERROR Message: {str(e)}")
+                    import traceback
+                    logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
+                    await event.respond(
+                        f"❌ **Ошибка при загрузке аватарки для `{phone}`**\n\n"
+                        f"Тип: {type(e).__name__}\n"
+                        f"Сообщение: {str(e)[:200]}"
+                    )
+                finally:
+                    if client and client.is_connected():
+                        logger.info(f"PROFILE UPDATE: Disconnecting client for phone={phone}")
+                        await client.disconnect()
+                    
+                    # Clean up temp file
+                    try:
+                        if photo_path and os.path.exists(photo_path):
+                            os.remove(photo_path)
+                            logger.info(f"PROFILE UPDATE: Temp file removed: {photo_path}")
+                    except Exception as cleanup_error:
+                        logger.warning(f"PROFILE UPDATE: Failed to remove temp file: {cleanup_error}")
                 
                 # Clear state
                 await self.clear_user_state(event.sender_id)
@@ -4455,7 +4651,9 @@ class UltimateCommentBot:
         """Worker function for each account to process its assigned channels"""
         logger.info("="*60)
         logger.info(f"👷 WORKER STARTED: {account_data.get('name', phone)} ({phone[-10:]})")
-        logger.info(f"📢 Assigned channels: {len(channel_subset)}")
+        logger.info(f"� Account status: {account_data.get('status', 'unknown')}")
+        logger.info(f"👤 Admin ID: {account_data.get('admin_id', 'none')}")
+        logger.info(f"�📢 Assigned channels: {len(channel_subset)}")
         for i, ch in enumerate(channel_subset[:5], 1):
             ch_name = ch.get('username') if isinstance(ch, dict) else ch
             logger.info(f"   {i}. {ch_name}")
@@ -4470,6 +4668,29 @@ class UltimateCommentBot:
         
         logger.info(f"[{account_data.get('name', phone)}] 🔄 Entering main loop (monitoring={self.monitoring})")
         
+        # ============= NEW: Create client ONCE for this worker =============
+        worker_client = None
+        try:
+            logger.info(f"👷 [{account_data.get('name', phone)}] Creating Telethon client...")
+            worker_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            await worker_client.connect()
+            
+            if not await worker_client.is_user_authorized():
+                logger.error(f"👷 WORKER STOPPED: Account {phone} not authorized!")
+                return
+            
+            logger.info(f"👷 [{account_data.get('name', phone)}] ✅ Client ready, starting comment loop")
+        except Exception as e:
+            logger.error(f"👷 WORKER STOPPED: Could not connect client for {phone}: {e}")
+            return
+        # ============= END NEW =============
+        
+        # Main work loop
         while self.monitoring:
             logger.info(f"[{account_data.get('name', phone)}] 🔄 Starting new cycle...")
             
@@ -4527,412 +4748,436 @@ class UltimateCommentBot:
                 if not can_comment:
                     logger.info(f"[{account_data.get('name', phone)}] Another account commented in {username} recently. Waiting {wait_for_channel}s")
                     await asyncio.sleep(wait_for_channel)
-                    # После ожидания пропускаем этот канал и идем к следующему
-                    continue
-                # ============= END NEW =============
+                # После ожидания пропускаем этот канал и идем к следующему
+                continue
+            # ============= END NEW =============
+            
+            # Initialize tracking for this channel
+            if username not in self.commented_posts:
+                self.commented_posts[username] = set()
+
+            # ============= USE WORKER CLIENT (created once) =============
+            client = worker_client  # Use the persistent client
+            # ============= END =============
+            
+            try:
+                # ============= REMOVED: client creation/connection (now done once at worker start) =============
                 
-                # Initialize tracking for this channel
-                if username not in self.commented_posts:
-                    self.commented_posts[username] = set()
-
-                client = TelegramClient(StringSession(account_data['session']), API_ID, API_HASH, proxy=account_data.get('proxy'))
-                await client.connect()
+                # resolve channel entity with auto-join for public channels
+                channel_entity = None
+                # Remove @ if present for URL construction
+                username_clean = username.lstrip('@') if username.startswith('@') else username
                 try:
-                    if not await client.is_user_authorized():
-                        logger.warning(f"Account not authorized: {phone}")
-                        await asyncio.sleep(5)
-                        continue
-
-                    # resolve channel entity with auto-join for public channels
-                    channel_entity = None
-                    # Remove @ if present for URL construction
-                    username_clean = username.lstrip('@') if username.startswith('@') else username
+                    # Try get_entity (works if already cached or subscribed)
                     try:
-                        # Try get_entity (works if already cached or subscribed)
+                        channel_entity = await client.get_entity(username)
+                    except:
+                        channel_entity = await client.get_entity('https://t.me/' + username_clean)
+                except Exception as e_get:
+                    # If not found, try to join the channel first
+                    logger.info(f"[{account_data.get('name', phone)}] Trying to join {username}...")
+                    try:
+                        # Join via URL (works for public channels)
+                        result = await client(functions.channels.JoinChannelRequest('https://t.me/' + username_clean))
+                        await asyncio.sleep(1)
+                        # Now try to get entity again
                         try:
                             channel_entity = await client.get_entity(username)
+                            logger.info(f"[{account_data.get('name', phone)}] Joined and got {username}")
                         except:
                             channel_entity = await client.get_entity('https://t.me/' + username_clean)
-                    except Exception as e_get:
-                        # If not found, try to join the channel first
-                        logger.info(f"[{account_data.get('name', phone)}] Trying to join {username}...")
-                        try:
-                            # Join via URL (works for public channels)
-                            result = await client(functions.channels.JoinChannelRequest('https://t.me/' + username_clean))
-                            await asyncio.sleep(1)
-                            # Now try to get entity again
-                            try:
-                                channel_entity = await client.get_entity(username)
-                                logger.info(f"[{account_data.get('name', phone)}] Joined and got {username}")
-                            except:
-                                channel_entity = await client.get_entity('https://t.me/' + username_clean)
-                        except Exception as e_join:
-                            logger.error(f"[{account_data.get('name', phone)}] Cannot join/get {username}: {e_join}")
-                            await self.mark_channel_failed_for_account(username, phone, f"Cannot access: {str(e_join)[:50]}")
-                            await asyncio.sleep(1)
-                            continue
-                    
-                    if not channel_entity:
-                        logger.error(f"[{account_data.get('name', phone)}] Failed to get entity for {username}")
-                        await self.mark_channel_failed_for_account(username, phone, "Failed to get entity")
+                    except Exception as e_join:
+                        logger.error(f"[{account_data.get('name', phone)}] Cannot join/get {username}: {e_join}")
+                        await self.mark_channel_failed_for_account(username, phone, f"Cannot access: {str(e_join)[:50]}")
                         await asyncio.sleep(1)
                         continue
-
-                    # find linked discussion chat id with improved error handling
-                    linked_chat_id = None
-                    discussion_entity = None
-                    comments_disabled = False
-                    
-                    try:
-                        full = await client(functions.channels.GetFullChannelRequest(channel=channel_entity))
-                        
-                        # Try multiple ways to get linked_chat_id
-                        if hasattr(full, 'full_chat'):
-                            # Check if comments are explicitly disabled
-                            if hasattr(full.full_chat, 'available_reactions') and not full.full_chat.available_reactions:
-                                logger.info(f"[{account_data.get('name', phone)}] {username} has reactions disabled")
-                            
-                            if hasattr(full.full_chat, 'linked_chat_id'):
-                                linked_chat_id = full.full_chat.linked_chat_id
-                                logger.info(f"[{account_data.get('name', phone)}] Found linked_chat_id: {linked_chat_id}")
-                        
-                        # Fallback: check in chats list
-                        if not linked_chat_id and hasattr(full, 'chats'):
-                            for ch in full.chats:
-                                # Check if this is a discussion chat (megagroup)
-                                if hasattr(ch, 'megagroup') and ch.megagroup:
-                                    try:
-                                        discussion_entity = ch
-                                        linked_chat_id = ch.id
-                                        logger.info(f"[{account_data.get('name', phone)}] Found discussion group in chats for {username}")
-                                        break
-                                    except Exception:
-                                        continue
-                    except Exception as e_full:
-                        logger.error(f"[{account_data.get('name', phone)}] GetFullChannel error for {username}: {e_full}")
-                        # If we can't get full info, mark as potentially no discussion
-                        await asyncio.sleep(2)
-                        continue
-
-                    # If we don't have discussion_entity yet, try to get it by ID
-                    if linked_chat_id and not discussion_entity:
-                        # Try multiple methods to resolve the entity
-                        methods_tried = 0
-                        for attempt in range(3):
-                            try:
-                                methods_tried += 1
-                                if attempt == 0:
-                                    # Method 1: Direct get by ID
-                                    discussion_entity = await client.get_entity(int(linked_chat_id))
-                                elif attempt == 1:
-                                    # Method 2: Using PeerChannel
-                                    from telethon.tl.types import PeerChannel
-                                    discussion_entity = await client.get_entity(PeerChannel(int(linked_chat_id)))
-                                else:
-                                    # Method 3: Negative ID (sometimes works)
-                                    discussion_entity = await client.get_entity(-100 + int(linked_chat_id) if linked_chat_id > 0 else linked_chat_id)
-                                
-                                if discussion_entity:
-                                    logger.info(f"[{account_data.get('name', phone)}] Resolved discussion entity (method {attempt+1})")
-                                    break
-                            except Exception as e_get:
-                                if attempt == 2:
-                                    logger.error(f"[{account_data.get('name', phone)}] All methods failed to get discussion entity: {e_get}")
-                                await asyncio.sleep(0.5)
-                    
-                    # Check if we successfully got discussion entity
-                    if not discussion_entity and not linked_chat_id:
-                        # Channel has no discussion group - mark as failed with specific reason
-                        await self.mark_channel_failed_for_account(username, phone, "No discussion group")
-                        logger.warning(f"[{account_data.get('name', phone)}] {username} has no discussion - marking as failed")
-                        await asyncio.sleep(1)
-                        continue
-                    elif not discussion_entity:
-                        # Has linked_chat_id but couldn't resolve - might be temporary
-                        logger.warning(f"[{account_data.get('name', phone)}] Could not resolve discussion for {username} - will retry later")
-                        await asyncio.sleep(2)
-                        continue
-
-                    # Get recent messages to find new posts (check last 10 messages for better coverage)
-                    try:
-                        msgs = await client.get_messages(discussion_entity, limit=10)
-                        
-                        # Find first message that hasn't been commented on yet
-                        reply_id = None
-                        post_text = ""
-                        for msg in msgs:
-                            if msg.id not in self.commented_posts[username]:
-                                reply_id = msg.id
-                                # Get text from this message
-                                post_text = msg.text or msg.message or ""
-                                break
-                        
-                        # If all recent posts are commented, comment on the latest one
-                        if not reply_id and msgs:
-                            reply_id = msgs[0].id
-                            post_text = msgs[0].text or msgs[0].message or ""
-                            # Clean old tracking to prevent memory issues
-                            if len(self.commented_posts[username]) > 30:
-                                oldest_ids = sorted(list(self.commented_posts[username]))[:15]
-                                for old_id in oldest_ids:
-                                    self.commented_posts[username].discard(old_id)
-                        
-                        # If we don't have post text from discussion, try to get from channel
-                        if not post_text:
-                            try:
-                                channel_msgs = await client.get_messages(channel_entity, limit=5)
-                                if channel_msgs:
-                                    post_text = channel_msgs[0].text or channel_msgs[0].message or "Интересный пост!"
-                            except Exception as e_ch:
-                                logger.debug(f"Could not get channel messages: {e_ch}")
-                                post_text = "Интересный пост!"
-                        
-                        # Generate AI comment based on post text
-                        channel_theme_str = channel.get('theme', 'общая') if isinstance(channel, dict) else 'общая'
-                        comment = generate_neuro_comment(
-                            post_text=post_text,
-                            channel_theme=channel_theme_str
-                        )
-                        
-                        # ============= TEST MODE: Check for duplicate comments =============
-                        if self.test_mode:
-                            if not hasattr(self, '_last_test_comments'):
-                                self._last_test_comments = []
-                            
-                            # Check if this comment was used recently
-                            if comment in self._last_test_comments:
-                                logger.warning(f"🧪 TEST MODE: Duplicate comment detected! Regenerating...")
-                                # Try to regenerate
-                                comment = generate_neuro_comment(
-                                    post_text=post_text,
-                                    channel_theme=channel_theme_str
-                                )
-                                # If still duplicate, use variation
-                                if comment in self._last_test_comments:
-                                    base_comment = random.choice(self.templates)
-                                    comment = self.generate_comment_variation(base_comment)
-                            
-                            # Keep last 10 comments to check for duplicates
-                            self._last_test_comments.append(comment)
-                            if len(self._last_test_comments) > 10:
-                                self._last_test_comments.pop(0)
-                        # ============= END TEST MODE =============
-                        
-                    except Exception as e_msgs:
-                        logger.error(f"Error getting messages: {e_msgs}")
-                        reply_id = None
-                        # Use fallback comment generation
-                        base_comment = random.choice(self.templates)
-                        comment = self.generate_comment_variation(base_comment)
-
-                    # Try to join discussion group first (auto-join for guests)
-                    try:
-                        await client(functions.channels.JoinChannelRequest(discussion_entity))
-                        logger.info(f"[{account_data.get('name', phone)}] Joined discussion for {username}")
-                        await asyncio.sleep(1)
-                    except Exception as join_err:
-                        # Already joined or can't join - not critical
-                        logger.debug(f"[{account_data.get('name', phone)}] Join discussion: {join_err}")
-                    
-                    # send comment into discussion
-                    comment_success = False
-                    try:
-                        if reply_id:
-                            await client.send_message(discussion_entity, comment, reply_to=reply_id)
-                            # Mark this post as commented
-                            self.commented_posts[username].add(reply_id)
-                        else:
-                            await client.send_message(discussion_entity, comment)
-                        
-                        comment_success = True
-                        
-                        # ============= NEW: Register message sent for rate limiting =============
-                        self.register_message_sent(phone, username)
-                        # ============= END NEW =============
-                        
-                        # ============= TEST MODE: Detailed logging =============
-                        if self.test_mode:
-                            short_comment = comment[:50] if len(comment) > 50 else comment
-                            logger.info(f"🧪 TEST MODE SUCCESS:")
-                            logger.info(f"   Channel: @{username}")
-                            logger.info(f"   Account: {account_data.get('name', phone)} ({phone})")
-                            logger.info(f"   Comment: {short_comment}...")
-                            logger.info(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
-                            logger.info(f"   Post ID: {reply_id}")
-                        # ============= END TEST MODE =============
-                        
-                        logger.info(f"[{account_data.get('name', phone)}] ✅ @{username} (post {reply_id}): {comment}")
-                        await self.add_comment_stat(phone, True, channel=username)
-
-                        if self.conn:
-                            try:
-                                cursor = self.conn.cursor()
-                                cursor.execute(
-                                    "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
-                                    (phone, username, comment, datetime.now().isoformat()),
-                                )
-                                self.conn.commit()
-                            except Exception as db_err:
-                                logger.error(f"DB log error: {db_err}")
-                                
-                    except Exception as send_exc:
-                        err_text = str(send_exc)
-                        
-                        # ============= TEST MODE: Detailed error logging =============
-                        if self.test_mode:
-                            logger.error(f"🧪 TEST MODE ERROR:")
-                            logger.error(f"   Channel: @{username}")
-                            logger.error(f"   Account: {account_data.get('name', phone)} ({phone})")
-                            logger.error(f"   Error: {err_text[:100]}")
-                            logger.error(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
-                        # ============= END TEST MODE =============
-                        
-                        logger.error(f"[{account_data.get('name', phone)}] ❌ Send error for @{username}: {err_text}")
-                        
-                        # Categorize errors for better handling
-                        permanent_errors = [
-                            "You can't write in this chat",
-                            "CHAT_WRITE_FORBIDDEN",
-                            "CHAT_SEND_PLAIN_FORBIDDEN",
-                            "CHANNEL_PRIVATE"
-                        ]
-                        
-                        temp_errors = [
-                            "FloodWait",
-                            "SLOWMODE_WAIT",
-                            "TIMEOUT",
-                            "CONNECTION"
-                        ]
-                        
-                        # Check for permanent errors
-                        is_permanent = any(err in err_text for err in permanent_errors)
-                        is_temp = any(err in err_text for err in temp_errors)
-                        
-                        if is_permanent:
-                            await self.mark_channel_failed_for_account(username, phone, "Comments disabled/forbidden")
-                            logger.warning(f"[{account_data.get('name', phone)}] {username} marked as no-comment channel")
-                        elif "CHAT_GUEST_SEND_FORBIDDEN" in err_text:
-                            # Need to join - retry
-                            logger.info(f"[{account_data.get('name', phone)}] Guest forbidden - trying to join {username}")
-                            try:
-                                await client(functions.channels.JoinChannelRequest(discussion_entity))
-                                await asyncio.sleep(2)
-                                # Retry sending after join
-                                if reply_id:
-                                    await client.send_message(discussion_entity, comment, reply_to=reply_id)
-                                    self.commented_posts[username].add(reply_id)
-                                else:
-                                    await client.send_message(discussion_entity, comment)
-                                
-                                comment_success = True
-                                
-                                # ============= NEW: Register message sent for rate limiting =============
-                                self.register_message_sent(phone, username)
-                                # ============= END NEW =============
-                                
-                                logger.info(f"[{account_data.get('name', phone)}] ✅ Joined & commented {username}")
-                                await self.add_comment_stat(phone, True, channel=username)
-                                
-                                if self.conn:
-                                    try:
-                                        cursor = self.conn.cursor()
-                                        cursor.execute(
-                                            "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
-                                            (phone, username, comment, datetime.now().isoformat()),
-                                        )
-                                        self.conn.commit()
-                                    except Exception as db_err:
-                                        logger.error(f"DB log error: {db_err}")
-                            except Exception as retry_err:
-                                logger.error(f"[{account_data.get('name', phone)}] Retry failed: {retry_err}")
-                                # Only mark as failed after retry failed
-                                await self.mark_channel_failed_for_account(username, phone, "Guest send forbidden (after retry)")
-                        elif "CHAT_RESTRICTED" in err_text:
-                            await self.mark_channel_failed_for_account(username, phone, "Chat restricted")
-                        elif "USER_BANNED_IN_CHANNEL" in err_text:
-                            logger.warning(f"[{account_data.get('name', phone)}] Banned in {username} - account specific")
-                            await self.mark_channel_failed_for_account(username, phone, "Account banned in this channel")
-                        elif is_temp:
-                            # Temporary errors - don't mark as failed
-                            logger.warning(f"[{account_data.get('name', phone)}] Temporary error on {username}: {err_text}")
-                            if "FloodWait" in err_text:
-                                raise  # Re-raise to trigger FloodWait handling below
-                        else:
-                            # Unknown error - log but don't fail immediately
-                            logger.error(f"[{account_data.get('name', phone)}] Unknown error on {username}: {err_text}")
-                            # Mark as failed only after 2nd attempt
-                            if username not in self.channel_failed_attempts or phone not in self.channel_failed_attempts.get(username, {}):
-                                logger.info(f"[{account_data.get('name', phone)}] First unknown error - will retry {username} later")
-                            else:
-                                await self.mark_channel_failed_for_account(username, phone, f"Unknown: {err_text[:30]}")
-                except Exception as e:
-                    error_str = str(e)
-                    logger.error(f"[{account_data.get('name', phone)}] Error commenting on {username}: {error_str}")
-                    
-                    # Only handle serious account-level errors
-                    if "FloodWait" in error_str:
-                        # Extract wait time if available
-                        try:
-                            import re
-                            wait_match = re.search(r'(\d+)', error_str)
-                            wait_seconds = int(wait_match.group(1)) if wait_match else 60
-                            logger.warning(f"[{account_data.get('name', phone)}] FloodWait {wait_seconds}s - waiting...")
-                            await asyncio.sleep(min(wait_seconds + 5, 120))  # Wait but max 2 minutes
-                        except Exception:
-                            await asyncio.sleep(60)
-                    elif "USER_DEACTIVATED" in error_str or "AUTH_KEY_UNREGISTERED" in error_str:
-                        # Account is permanently banned
-                        logger.error(f"[{account_data.get('name', phone)}] ACCOUNT PERMANENTLY BANNED!")
-                        try:
-                            if self.conn:
-                                cursor = self.conn.cursor()
-                                cursor.execute(
-                                    "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
-                                    (phone, datetime.now().isoformat(), "Account Deactivated"),
-                                )
-                                self.conn.commit()
-                            await self.handle_account_ban(phone, "Account Deactivated")
-                            # Stop this worker
-                            break
-                        except Exception as db_err:
-                            logger.error(f"DB error: {db_err}")
-                    elif "banned" in error_str.lower() and "channel" not in error_str.lower():
-                        # Account banned (not just in one channel)
-                        logger.error(f"[{account_data.get('name', phone)}] ACCOUNT BANNED!")
-                        try:
-                            if self.conn:
-                                cursor = self.conn.cursor()
-                                cursor.execute(
-                                    "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
-                                    (phone, datetime.now().isoformat(), "Account Ban"),
-                                )
-                                self.conn.commit()
-                            await self.handle_account_ban(phone, "Account Ban")
-                            # Stop this worker
-                            break
-                        except Exception as db_err:
-                            logger.error(f"DB error: {db_err}")
-                    else:
-                        # Temporary error - continue with next channel
-                        logger.info(f"[{account_data.get('name', phone)}] Skipping {username} due to temporary error")
-                        await asyncio.sleep(3)
-                finally:
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
                 
-                # Delay between comments from same account (50-100 sec for optimal mode)
-                # Random delays make activity look more human
-                delay = random.randint(50, 100)  # 50-100 seconds between comments (optimal mode)
-                logger.info(f"[{account_data.get('name', phone)}] Waiting {delay}s before next comment...")
-                await asyncio.sleep(delay)
+                if not channel_entity:
+                    logger.error(f"[{account_data.get('name', phone)}] Failed to get entity for {username}")
+                    await self.mark_channel_failed_for_account(username, phone, "Failed to get entity")
+                    await asyncio.sleep(1)
+                    continue
+
+                # find linked discussion chat id with improved error handling
+                linked_chat_id = None
+                discussion_entity = None
+                comments_disabled = False
+                
+                try:
+                    full = await client(functions.channels.GetFullChannelRequest(channel=channel_entity))
+                    
+                    # Try multiple ways to get linked_chat_id
+                    if hasattr(full, 'full_chat'):
+                        # Check if comments are explicitly disabled
+                        if hasattr(full.full_chat, 'available_reactions') and not full.full_chat.available_reactions:
+                            logger.info(f"[{account_data.get('name', phone)}] {username} has reactions disabled")
+                        
+                        if hasattr(full.full_chat, 'linked_chat_id'):
+                            linked_chat_id = full.full_chat.linked_chat_id
+                            logger.info(f"[{account_data.get('name', phone)}] Found linked_chat_id: {linked_chat_id}")
+                    
+                    # Fallback: check in chats list
+                    if not linked_chat_id and hasattr(full, 'chats'):
+                        for ch in full.chats:
+                            # Check if this is a discussion chat (megagroup)
+                            if hasattr(ch, 'megagroup') and ch.megagroup:
+                                try:
+                                    discussion_entity = ch
+                                    linked_chat_id = ch.id
+                                    logger.info(f"[{account_data.get('name', phone)}] Found discussion group in chats for {username}")
+                                    break
+                                except Exception:
+                                    continue
+                except Exception as e_full:
+                    logger.error(f"[{account_data.get('name', phone)}] GetFullChannel error for {username}: {e_full}")
+                    # If we can't get full info, mark as potentially no discussion
+                    await asyncio.sleep(2)
+                    continue
+
+                # If we don't have discussion_entity yet, try to get it by ID
+                if linked_chat_id and not discussion_entity:
+                    # Try multiple methods to resolve the entity
+                    methods_tried = 0
+                    for attempt in range(3):
+                        try:
+                            methods_tried += 1
+                            if attempt == 0:
+                                # Method 1: Direct get by ID
+                                discussion_entity = await client.get_entity(int(linked_chat_id))
+                            elif attempt == 1:
+                                # Method 2: Using PeerChannel
+                                from telethon.tl.types import PeerChannel
+                                discussion_entity = await client.get_entity(PeerChannel(int(linked_chat_id)))
+                            else:
+                                # Method 3: Negative ID (sometimes works)
+                                discussion_entity = await client.get_entity(-100 + int(linked_chat_id) if linked_chat_id > 0 else linked_chat_id)
+                            
+                            if discussion_entity:
+                                logger.info(f"[{account_data.get('name', phone)}] Resolved discussion entity (method {attempt+1})")
+                                break
+                        except Exception as e_get:
+                            if attempt == 2:
+                                logger.error(f"[{account_data.get('name', phone)}] All methods failed to get discussion entity: {e_get}")
+                            await asyncio.sleep(0.5)
+                
+                # Check if we successfully got discussion entity
+                if not discussion_entity and not linked_chat_id:
+                    # Channel has no discussion group - mark as failed with specific reason
+                    await self.mark_channel_failed_for_account(username, phone, "No discussion group")
+                    logger.warning(f"[{account_data.get('name', phone)}] {username} has no discussion - marking as failed")
+                    await asyncio.sleep(1)
+                    continue
+                elif not discussion_entity:
+                    # Has linked_chat_id but couldn't resolve - might be temporary
+                    logger.warning(f"[{account_data.get('name', phone)}] Could not resolve discussion for {username} - will retry later")
+                    await asyncio.sleep(2)
+                    continue
+
+                # Get recent messages to find new posts (check last 10 messages for better coverage)
+                try:
+                    msgs = await client.get_messages(discussion_entity, limit=10)
+                    
+                    # Find first message that hasn't been commented on yet
+                    reply_id = None
+                    post_text = ""
+                    for msg in msgs:
+                        if msg.id not in self.commented_posts[username]:
+                            reply_id = msg.id
+                            # Get text from this message
+                            post_text = msg.text or msg.message or ""
+                            break
+                    
+                    # If all recent posts are commented, comment on the latest one
+                    if not reply_id and msgs:
+                        reply_id = msgs[0].id
+                        post_text = msgs[0].text or msgs[0].message or ""
+                        # Clean old tracking to prevent memory issues
+                        if len(self.commented_posts[username]) > 30:
+                            oldest_ids = sorted(list(self.commented_posts[username]))[:15]
+                            for old_id in oldest_ids:
+                                self.commented_posts[username].discard(old_id)
+                    
+                    # If we don't have post text from discussion, try to get from channel
+                    if not post_text:
+                        try:
+                            channel_msgs = await client.get_messages(channel_entity, limit=5)
+                            if channel_msgs:
+                                post_text = channel_msgs[0].text or channel_msgs[0].message or "Интересный пост!"
+                        except Exception as e_ch:
+                            logger.debug(f"Could not get channel messages: {e_ch}")
+                            post_text = "Интересный пост!"
+                    
+                    # Generate AI comment based on post text
+                    channel_theme_str = channel.get('theme', 'общая') if isinstance(channel, dict) else 'общая'
+                    comment = generate_neuro_comment(
+                        post_text=post_text,
+                        channel_theme=channel_theme_str
+                    )
+                    
+                    # ============= TEST MODE: Check for duplicate comments =============
+                    if self.test_mode:
+                        if not hasattr(self, '_last_test_comments'):
+                            self._last_test_comments = []
+                        
+                        # Check if this comment was used recently
+                        if comment in self._last_test_comments:
+                            logger.warning(f"🧪 TEST MODE: Duplicate comment detected! Regenerating...")
+                            # Try to regenerate
+                            comment = generate_neuro_comment(
+                                post_text=post_text,
+                                channel_theme=channel_theme_str
+                            )
+                            # If still duplicate, use variation
+                            if comment in self._last_test_comments:
+                                base_comment = random.choice(self.templates)
+                                comment = self.generate_comment_variation(base_comment)
+                        
+                        # Keep last 10 comments to check for duplicates
+                        self._last_test_comments.append(comment)
+                        if len(self._last_test_comments) > 10:
+                            self._last_test_comments.pop(0)
+                    # ============= END TEST MODE =============
+                    
+                except Exception as e_msgs:
+                    logger.error(f"Error getting messages: {e_msgs}")
+                    reply_id = None
+                    # Use fallback comment generation
+                    base_comment = random.choice(self.templates)
+                    comment = self.generate_comment_variation(base_comment)
+
+                # Try to join discussion group first (auto-join for guests)
+                try:
+                    await client(functions.channels.JoinChannelRequest(discussion_entity))
+                    logger.info(f"[{account_data.get('name', phone)}] Joined discussion for {username}")
+                    await asyncio.sleep(1)
+                except Exception as join_err:
+                    # Already joined or can't join - not critical
+                    logger.debug(f"[{account_data.get('name', phone)}] Join discussion: {join_err}")
+                
+                # send comment into discussion
+                comment_success = False
+                try:
+                    if reply_id:
+                        await client.send_message(discussion_entity, comment, reply_to=reply_id)
+                        # Mark this post as commented
+                        self.commented_posts[username].add(reply_id)
+                    else:
+                        await client.send_message(discussion_entity, comment)
+                    
+                    comment_success = True
+                    
+                    # ============= NEW: Register message sent for rate limiting =============
+                    self.register_message_sent(phone, username)
+                    # ============= END NEW =============
+                    
+                    # ============= ENHANCED LOGGING: Show which account sent comment =============
+                    short_comment = comment[:50] if len(comment) > 50 else comment
+                    account_name = account_data.get('name', phone[-10:])
+                    
+                    if self.test_mode:
+                        logger.info(f"🧪 TEST MODE SUCCESS:")
+                        logger.info(f"   Channel: @{username}")
+                        logger.info(f"   Account: {account_name} ({phone})")
+                        logger.info(f"   Comment: {short_comment}...")
+                        logger.info(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
+                        logger.info(f"   Post ID: {reply_id}")
+                    else:
+                        logger.info(f"✅💬 COMMENT SENT from [{account_name}] to @{username}")
+                        logger.info(f"   📱 Phone: {phone}")
+                        logger.info(f"   💬 Comment: {short_comment}...")
+                        logger.info(f"   🆔 Post ID: {reply_id}")
+                        logger.info(f"   ⏰ Time: {datetime.now().strftime('%H:%M:%S')}")
+                    # ============= END ENHANCED LOGGING =============
+                    
+                    await self.add_comment_stat(phone, True, channel=username)
+
+                    if self.conn:
+                        try:
+                            cursor = self.conn.cursor()
+                            cursor.execute(
+                                "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
+                                (phone, username, comment, datetime.now().isoformat()),
+                            )
+                            self.conn.commit()
+                        except Exception as db_err:
+                            logger.error(f"DB log error: {db_err}")
+                            
+                except Exception as send_exc:
+                    err_text = str(send_exc)
+                    
+                    # ============= TEST MODE: Detailed error logging =============
+                    if self.test_mode:
+                        logger.error(f"🧪 TEST MODE ERROR:")
+                        logger.error(f"   Channel: @{username}")
+                        logger.error(f"   Account: {account_data.get('name', phone)} ({phone})")
+                        logger.error(f"   Error: {err_text[:100]}")
+                        logger.error(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
+                    # ============= END TEST MODE =============
+                    
+                    logger.error(f"[{account_data.get('name', phone)}] ❌ Send error for @{username}: {err_text}")
+                    
+                    # Categorize errors for better handling
+                    permanent_errors = [
+                        "You can't write in this chat",
+                        "CHAT_WRITE_FORBIDDEN",
+                        "CHAT_SEND_PLAIN_FORBIDDEN",
+                        "CHANNEL_PRIVATE"
+                    ]
+                    
+                    temp_errors = [
+                        "FloodWait",
+                        "SLOWMODE_WAIT",
+                        "TIMEOUT",
+                        "CONNECTION"
+                    ]
+                    
+                    # Check for permanent errors
+                    is_permanent = any(err in err_text for err in permanent_errors)
+                    is_temp = any(err in err_text for err in temp_errors)
+                    
+                    if is_permanent:
+                        await self.mark_channel_failed_for_account(username, phone, "Comments disabled/forbidden")
+                        logger.warning(f"[{account_data.get('name', phone)}] {username} marked as no-comment channel")
+                    elif "CHAT_GUEST_SEND_FORBIDDEN" in err_text:
+                        # Need to join - retry
+                        logger.info(f"[{account_data.get('name', phone)}] Guest forbidden - trying to join {username}")
+                        try:
+                            await client(functions.channels.JoinChannelRequest(discussion_entity))
+                            await asyncio.sleep(2)
+                            # Retry sending after join
+                            if reply_id:
+                                await client.send_message(discussion_entity, comment, reply_to=reply_id)
+                                self.commented_posts[username].add(reply_id)
+                            else:
+                                await client.send_message(discussion_entity, comment)
+                            
+                            comment_success = True
+                            
+                            # ============= NEW: Register message sent for rate limiting =============
+                            self.register_message_sent(phone, username)
+                            # ============= END NEW =============
+                            
+                            logger.info(f"[{account_data.get('name', phone)}] ✅ Joined & commented {username}")
+                            await self.add_comment_stat(phone, True, channel=username)
+                            
+                            if self.conn:
+                                try:
+                                    cursor = self.conn.cursor()
+                                    cursor.execute(
+                                        "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
+                                        (phone, username, comment, datetime.now().isoformat()),
+                                    )
+                                    self.conn.commit()
+                                except Exception as db_err:
+                                    logger.error(f"DB log error: {db_err}")
+                        except Exception as retry_err:
+                            logger.error(f"[{account_data.get('name', phone)}] Retry failed: {retry_err}")
+                            # Only mark as failed after retry failed
+                            await self.mark_channel_failed_for_account(username, phone, "Guest send forbidden (after retry)")
+                    elif "CHAT_RESTRICTED" in err_text:
+                        await self.mark_channel_failed_for_account(username, phone, "Chat restricted")
+                    elif "USER_BANNED_IN_CHANNEL" in err_text:
+                        logger.warning(f"[{account_data.get('name', phone)}] Banned in {username} - account specific")
+                        await self.mark_channel_failed_for_account(username, phone, "Account banned in this channel")
+                    elif is_temp:
+                        # Temporary errors - don't mark as failed
+                        logger.warning(f"[{account_data.get('name', phone)}] Temporary error on {username}: {err_text}")
+                        if "FloodWait" in err_text:
+                            raise  # Re-raise to trigger FloodWait handling below
+                    else:
+                        # Unknown error - log but don't fail immediately
+                        logger.error(f"[{account_data.get('name', phone)}] Unknown error on {username}: {err_text}")
+                        # Mark as failed only after 2nd attempt
+                        if username not in self.channel_failed_attempts or phone not in self.channel_failed_attempts.get(username, {}):
+                            logger.info(f"[{account_data.get('name', phone)}] First unknown error - will retry {username} later")
+                        else:
+                            await self.mark_channel_failed_for_account(username, phone, f"Unknown: {err_text[:30]}")
+            except Exception as e:
+                error_str = str(e)
+                logger.error(f"[{account_data.get('name', phone)}] Error commenting on {username}: {error_str}")
+                
+                # Only handle serious account-level errors
+                if "FloodWait" in error_str:
+                    # Extract wait time if available
+                    try:
+                        import re
+                        wait_match = re.search(r'(\d+)', error_str)
+                        wait_seconds = int(wait_match.group(1)) if wait_match else 60
+                        logger.warning(f"[{account_data.get('name', phone)}] FloodWait {wait_seconds}s - waiting...")
+                        await asyncio.sleep(min(wait_seconds + 5, 120))  # Wait but max 2 minutes
+                    except Exception:
+                        await asyncio.sleep(60)
+                elif "USER_DEACTIVATED" in error_str or "AUTH_KEY_UNREGISTERED" in error_str:
+                    # Account is permanently banned
+                    logger.error(f"[{account_data.get('name', phone)}] ACCOUNT PERMANENTLY BANNED!")
+                    try:
+                        if self.conn:
+                            cursor = self.conn.cursor()
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
+                                (phone, datetime.now().isoformat(), "Account Deactivated"),
+                            )
+                            self.conn.commit()
+                        await self.handle_account_ban(phone, "Account Deactivated")
+                        # Stop this worker
+                        break
+                    except Exception as db_err:
+                        logger.error(f"DB error: {db_err}")
+                elif "banned" in error_str.lower() and "channel" not in error_str.lower():
+                    # Account banned (not just in one channel)
+                    logger.error(f"[{account_data.get('name', phone)}] ACCOUNT BANNED!")
+                    try:
+                        if self.conn:
+                            cursor = self.conn.cursor()
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
+                                (phone, datetime.now().isoformat(), "Account Ban"),
+                            )
+                            self.conn.commit()
+                        await self.handle_account_ban(phone, "Account Ban")
+                        # Stop this worker
+                        break
+                    except Exception as db_err:
+                        logger.error(f"DB error: {db_err}")
+                else:
+                    # Temporary error - continue with next channel
+                    logger.info(f"[{account_data.get('name', phone)}] Skipping {username} due to temporary error")
+                    await asyncio.sleep(3)
+            except:  # Catch-all for any other errors in channel processing
+                pass  # Continue to next channel
+            
+            # ============= REMOVED: client.disconnect() - client persists for worker lifetime =============
+            
+            # ============= NEW: Smart delay based on rate limiting =============
+            # Calculate optimal delay based on messages_per_hour
+            if self.test_mode:
+                target_rate = self.test_mode_speed_limit
+            else:
+                target_rate = self.messages_per_hour
+            
+            # Delay = 3600 / target_rate (seconds per message)
+            base_delay = (3600 // target_rate) if target_rate > 0 else 60
+            # Add randomness (±20%)
+            delay = random.randint(int(base_delay * 0.8), int(base_delay * 1.2))
+            
+            logger.info(f"[{account_data.get('name', phone)}] ⏰ Waiting {delay}s (target: {target_rate} msg/hour)")
+            await asyncio.sleep(delay)
+            # ============= END NEW =============
             
             # After completing all channels, shuffle and start over
             random.shuffle(channel_subset)
             logger.info(f"[{account_data.get('name', phone)}] Completed cycle, restarting...")
-            # Longer break between cycles (3-7 minutes)
-            await asyncio.sleep(random.randint(180, 420))
+            # Shorter break between cycles (30-60 seconds) for better parallelism
+            await asyncio.sleep(random.randint(30, 60))
+        
+        # Cleanup when worker stops
+        logger.info(f"👷 [{account_data.get('name', phone)}] WORKER STOPPING - disconnecting client...")
+        if worker_client and worker_client.is_connected():
+            try:
+                await worker_client.disconnect()
+                logger.info(f"👷 [{account_data.get('name', phone)}] ✅ Client disconnected")
+            except Exception as e:
+                logger.error(f"👷 [{account_data.get('name', phone)}] Error disconnecting: {e}")
     
     async def pro_auto_comment(self):
         """Main commenting loop - runs accounts in parallel with rate limiting, rotation, and auto-replacement!"""
@@ -5009,6 +5254,28 @@ class UltimateCommentBot:
         # Use configured max parallel accounts
         MAX_PARALLEL_ACCOUNTS = self.max_parallel_accounts
         
+        logger.info("="*80)
+        logger.info("⚙️  PARALLEL PROCESSING CONFIGURATION")
+        logger.info("="*80)
+        logger.info(f"📊 Total active accounts available: {len(active_accounts)}")
+        logger.info(f"⚡ MAX_PARALLEL_ACCOUNTS setting: {MAX_PARALLEL_ACCOUNTS}")
+        logger.info(f"🎯 Will create workers for: {min(len(active_accounts), MAX_PARALLEL_ACCOUNTS)} accounts")
+        
+        if len(active_accounts) == 1:
+            logger.warning("⚠️⚠️⚠️ ONLY 1 ACTIVE ACCOUNT! ⚠️⚠️⚠️")
+            logger.warning("⚠️ This means NO PARALLEL PROCESSING!")
+            logger.warning("⚠️ To enable parallel work:")
+            logger.warning("⚠️   1. Use /listaccounts to see all accounts")
+            logger.warning("⚠️   2. Use /toggleaccount to activate more accounts")
+            logger.warning("⚠️   3. Or add new accounts with /auth")
+        elif MAX_PARALLEL_ACCOUNTS == 1:
+            logger.warning("⚠️⚠️⚠️ MAX_PARALLEL_ACCOUNTS = 1 ⚠️⚠️⚠️")
+            logger.warning("⚠️ Even though you have multiple active accounts,")
+            logger.warning("⚠️ only 1 will work due to parallel limit!")
+            logger.warning("⚠️ Use /setparallel <number> to increase (e.g., /setparallel 3)")
+        
+        logger.info("="*80)
+        
         # ============= NEW: Initialize rotation timer =============
         if self.last_rotation_time is None:
             self.last_rotation_time = datetime.now().timestamp()
@@ -5059,18 +5326,35 @@ class UltimateCommentBot:
         tasks = []
         start_idx = 0
         
+        logger.info("="*80)
+        logger.info(f"🚀 CREATING {len(accounts_list)} PARALLEL WORKERS")
+        logger.info("="*80)
+        
+        if len(accounts_list) == 1:
+            logger.warning("⚠️ WARNING: Only 1 worker will be created!")
+            logger.warning("⚠️ Reason: Only 1 active account found or MAX_PARALLEL_ACCOUNTS=1")
+            logger.warning("⚠️ Solution: Add more accounts with /auth and set to 'active' status")
+            logger.warning("⚠️ Or increase limit with /setparallel")
+        
         for i, (phone, data) in enumerate(accounts_list):
             # Give extra channels to first accounts if there's a remainder
             end_idx = start_idx + channels_per_account + (1 if i < remainder else 0)
             channel_subset = channels_copy[start_idx:end_idx]
             
-            logger.info(f"[{data.get('name', phone)}] Assigned channels {start_idx+1}-{end_idx}")
+            logger.info(f"🔧 Creating worker #{i+1}/{len(accounts_list)} for [{data.get('name', phone)}]")
+            logger.info(f"   Phone: {phone}")
+            logger.info(f"   Status: {data.get('status', 'unknown')}")
+            logger.info(f"   Channels: {start_idx+1}-{end_idx} ({len(channel_subset)} total)")
             
             # Create worker task for this account
             task = asyncio.create_task(self.account_worker(phone, data, channel_subset))
             tasks.append(task)
             
             start_idx = end_idx
+        
+        logger.info("="*80)
+        logger.info(f"✅ ALL {len(tasks)} WORKERS CREATED AND LAUNCHED")
+        logger.info("="*80)
         
         # Wait for all workers (they run until self.monitoring becomes False)
         try:
