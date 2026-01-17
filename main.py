@@ -317,6 +317,16 @@ class UltimateCommentBot:
         # Настройки лимитов скорости
         self.messages_per_hour = DEFAULT_MESSAGES_PER_HOUR  # Лимит сообщений в час на аккаунт
         self.rotation_interval = DEFAULT_ROTATION_INTERVAL  # Интервал ротации в секундах
+        
+        # Worker mode: 'cyclic' (all workers process all channels) or 'distributed' (channels divided)
+        # cyclic - для тестов и малых проектов (5-20 каналов)
+        # distributed - для продакшна (50+ каналов)
+        self.worker_mode = 'distributed'  # По умолчанию distributed для 100+ каналов
+        self.max_cycles_per_worker = 3  # Количество циклов перед ротацией (0 = бесконечно)
+        
+        # Worker tracking for automatic recovery
+        self.active_worker_tasks = []  # Список активных воркеров
+        self.worker_recovery_enabled = True  # Автоматическое восстановление воркеров
     
     async def can_do_profile_operation(self, phone, operation_type):
         """
@@ -950,10 +960,17 @@ class UltimateCommentBot:
                         f"🔴 Сломан: `{account_name}` ({phone})\n"
                         f"Причина: {reason}\n\n"
                         f"✅ Активирован резервный: `{reserve_name}` ({reserve_phone})\n\n"
-                        f"📊 Состояние: {self.get_status_counts()}"
+                        f"📊 Состояние: {self.get_status_counts()}\n\n"
+                        f"🔄 Система автоматически перезапустится через 10 секунд"
                     )
                 except Exception as notify_err:
                     logger.error(f"Failed to notify owner: {notify_err}")
+                
+                # ============= NEW: Автоматический перезапуск =============
+                if self.monitoring and self.worker_recovery_enabled:
+                    logger.info("🔄 Scheduling monitoring restart in 10 seconds...")
+                    asyncio.create_task(self.restart_monitoring_after_replacement())
+                # ============= END NEW =============
                 
                 return True
             else:
@@ -975,6 +992,115 @@ class UltimateCommentBot:
         except Exception as e:
             logger.error(f"Error replacing broken account: {e}")
             return False
+    
+    async def restart_monitoring_after_replacement(self):
+        """Перезапускает мониторинг после замены аккаунта"""
+        try:
+            await asyncio.sleep(10)  # Даём время на завершение старых воркеров
+            
+            if not self.monitoring:
+                logger.info("⚠️ Monitoring already stopped, skipping restart")
+                return
+            
+            logger.info("="*80)
+            logger.info("🔄 RESTARTING MONITORING AFTER ACCOUNT REPLACEMENT")
+            logger.info("="*80)
+            
+            # Останавливаем текущие воркеры
+            logger.info("⏸️ Stopping current workers...")
+            self.monitoring = False
+            
+            # Ждём завершения старых воркеров
+            if self.active_worker_tasks:
+                logger.info(f"⏳ Waiting for {len(self.active_worker_tasks)} workers to finish...")
+                await asyncio.sleep(5)
+                self.active_worker_tasks.clear()
+            
+            # Перезапускаем
+            logger.info("🚀 Starting new workers with updated accounts...")
+            self.monitoring = True
+            asyncio.create_task(self.pro_auto_comment())
+            
+            logger.info("✅ Monitoring restarted successfully")
+            
+            # Уведомляем владельца
+            try:
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"✅ **Мониторинг перезапущен**\n\n"
+                    f"🚀 Новые воркеры запущены с обновлённым составом аккаунтов\n"
+                    f"📊 Состояние: {self.get_status_counts()}"
+                )
+            except Exception as notify_err:
+                logger.error(f"Failed to notify owner: {notify_err}")
+                
+        except Exception as e:
+            logger.error(f"Error restarting monitoring: {e}")
+            try:
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"❌ **Ошибка перезапуска мониторинга**\n\n"
+                    f"Причина: {str(e)}\n\n"
+                    f"💡 Используйте /stopmon и /startmon вручную"
+                )
+            except:
+                pass
+    
+    async def health_check_worker(self):
+        """Периодически проверяет количество воркеров и восстанавливает при необходимости"""
+        logger.info("🏥 Health check worker started")
+        
+        while self.monitoring:
+            try:
+                await asyncio.sleep(120)  # Проверка каждые 2 минуты
+                
+                if not self.monitoring:
+                    break
+                
+                # Подсчёт активных аккаунтов
+                active_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                 if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
+                
+                expected_workers = min(len(active_accounts), self.max_parallel_accounts)
+                
+                # Подсчёт живых воркеров
+                alive_workers = sum(1 for task in self.active_worker_tasks if not task.done())
+                
+                if alive_workers < expected_workers:
+                    logger.warning("="*80)
+                    logger.warning(f"⚠️ WORKER COUNT MISMATCH DETECTED!")
+                    logger.warning(f"   Expected: {expected_workers} workers")
+                    logger.warning(f"   Running: {alive_workers} workers")
+                    logger.warning(f"   Missing: {expected_workers - alive_workers} workers")
+                    logger.warning("="*80)
+                    
+                    if self.worker_recovery_enabled:
+                        logger.info("🔄 Initiating automatic recovery...")
+                        
+                        # Уведомляем владельца
+                        try:
+                            await self.bot_client.send_message(
+                                BOT_OWNER_ID,
+                                f"⚠️ **Обнаружена проблема с воркерами**\n\n"
+                                f"Ожидается: {expected_workers}\n"
+                                f"Работает: {alive_workers}\n"
+                                f"Недостаёт: {expected_workers - alive_workers}\n\n"
+                                f"🔄 Автоматическое восстановление через 10 секунд"
+                            )
+                        except:
+                            pass
+                        
+                        # Перезапуск
+                        await self.restart_monitoring_after_replacement()
+                        break  # Выходим, новый health check запустится с новым мониторингом
+                else:
+                    logger.debug(f"✅ Health check OK: {alive_workers}/{expected_workers} workers")
+                    
+            except Exception as e:
+                logger.error(f"Health check error: {e}")
+                await asyncio.sleep(60)
+        
+        logger.info("🏥 Health check worker stopped")
     
     def is_super_admin(self, user_id):
         """Check if user is a super admin (can see global stats and manage admins)"""
@@ -1440,6 +1566,13 @@ class UltimateCommentBot:
 `/getrotation` - текущий интервал ротации 🆕
 `/rotatenow` - выполнить ротацию немедленно 🆕
 `/accountstats` - статистика активности аккаунтов 🆕
+
+**🔄 РЕЖИМ РАБОТЫ (для 100+ каналов):**
+`/setworkermode distributed` - каналы делятся между аккаунтами 🆕
+`/setworkermode cyclic` - каждый аккаунт проходит все каналы 🆕
+`/setmaxcycles 3` - лимит циклов перед ротацией (0=∞) 🆕
+`/getworkersettings` - посмотреть все настройки воркеров 🆕
+`/togglerecovery` - вкл/выкл автовосстановление после бана 🆕
 
 **📢 КАНАЛЫ:**
 `/addchannel @username` - добавить
@@ -1942,6 +2075,131 @@ class UltimateCommentBot:
             
             await event.respond(text)
         
+
+        # ============= NEW: WORKER MODE & CYCLES COMMANDS =============
+        @self.bot_client.on(events.NewMessage(pattern='/setworkermode'))
+        async def set_worker_mode(event):
+            """Set worker mode: cyclic or distributed"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                mode = event.text.split(maxsplit=1)[1].lower()
+                if mode not in ['cyclic', 'distributed']:
+                    await event.respond(
+                        "❌ Режим должен быть: `cyclic` или `distributed`\n\n"
+                        "🔄 **CYCLIC** - каждый аккаунт проходит ВСЕ каналы\n"
+                        "   • Для тестов и 5-20 каналов\n"
+                        "   • Предсказуемое поведение\n\n"
+                        "📊 **DISTRIBUTED** - каналы делятся между аккаунтами\n"
+                        "   • Для продакшна с 50+ каналами\n"
+                        "   • Быстрая обработка больших списков"
+                    )
+                    return
+                
+                self.worker_mode = mode
+                await event.respond(
+                    f"✅ Режим установлен: **{mode.upper()}**\n\n"
+                    f"{'🔄' if mode == 'cyclic' else '📊'} "
+                    f"{'Каждый аккаунт проходит ВСЕ каналы' if mode == 'cyclic' else 'Каналы делятся между аккаунтами'}\n"
+                    f"⚠️ Изменения вступят в силу после перезапуска (`/stopmon` → `/startmon`)"
+                )
+                logger.info(f"Worker mode set to: {mode}")
+            except (IndexError, ValueError):
+                await event.respond(
+                    f"Формат: `/setworkermode distributed` или `/setworkermode cyclic`\n\n"
+                    f"Текущий режим: **{self.worker_mode}**"
+                )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/setmaxcycles'))
+        async def set_max_cycles(event):
+            """Set maximum cycles per worker before rotation"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                cycles = int(event.text.split(maxsplit=1)[1])
+                if cycles < 0 or cycles > 100:
+                    await event.respond("❌ Количество циклов должно быть от 0 до 100\n\n0 = бесконечно")
+                    return
+                
+                self.max_cycles_per_worker = cycles
+                if cycles == 0:
+                    await event.respond(
+                        f"✅ Воркеры будут работать **бесконечно**\n\n"
+                        f"🔄 Циклы не ограничены\n"
+                        f"⚠️ Ротация аккаунтов отключена"
+                    )
+                else:
+                    await event.respond(
+                        f"✅ Максимум циклов: **{cycles}**\n\n"
+                        f"🔄 Каждый воркер отработает {cycles} циклов\n"
+                        f"🔄 Потом уйдёт в резерв (если есть резервные)\n"
+                        f"⚠️ Изменения вступят в силу после перезапуска"
+                    )
+                logger.info(f"Max cycles per worker set to: {cycles}")
+            except (IndexError, ValueError):
+                await event.respond(
+                    f"Формат: `/setmaxcycles 3`\n\n"
+                    f"Текущее значение: **{self.max_cycles_per_worker}** (0=бесконечно)"
+                )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/getworkersettings'))
+        async def get_worker_settings(event):
+            """Show all worker settings"""
+            if not await self.is_admin(event.sender_id): return
+            
+            active_count = sum(1 for d in self.accounts_data.values() if d.get('status') == ACCOUNT_STATUS_ACTIVE)
+            
+            text = f"⚙️ **НАСТРОЙКИ ВОРКЕРОВ:**\n\n"
+            
+            text += f"📊 **Режим:** {self.worker_mode.upper()}\n"
+            if self.worker_mode == 'cyclic':
+                text += f"   • Каждый аккаунт проходит ВСЕ каналы\n"
+                text += f"   • Идеально для 5-20 каналов\n"
+            else:
+                text += f"   • Каналы делятся между аккаунтами\n"
+                text += f"   • Оптимально для 50+ каналов\n"
+            
+            text += f"\n🔄 **Макс циклов:** {self.max_cycles_per_worker if self.max_cycles_per_worker > 0 else 'бесконечно'}\n"
+            if self.max_cycles_per_worker > 0:
+                text += f"   • Каждый воркер = {self.max_cycles_per_worker} циклов\n"
+                text += f"   • Потом уходит в резерв\n"
+            else:
+                text += f"   • Ротация отключена\n"
+            
+            text += f"\n🚀 **Параллельность:** {self.max_parallel_accounts}\n"
+            text += f"✅ **Активных:** {active_count}\n"
+            text += f"⚡ **Скорость:** {self.messages_per_hour} msg/h\n"
+            
+            text += f"\n📊 **Каналов:** {len(self.channels)}\n"
+            if self.worker_mode == 'distributed' and active_count > 0:
+                channels_per_worker = len(self.channels) // min(active_count, self.max_parallel_accounts)
+                text += f"   • На воркер: ~{channels_per_worker}\n"
+            
+            text += f"\n📄 **Команды:**\n"
+            text += f"`/setworkermode distributed` - для 100+ каналов\n"
+            text += f"`/setworkermode cyclic` - для тестов\n"
+            text += f"`/setmaxcycles 3` - лимит циклов (0=∞)\n"
+            text += f"`/setparallel 2` - кол-во воркеров\n"
+            text += f"`/togglerecovery` - вкл/выкл автовосстановление"
+            
+            await event.respond(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/togglerecovery'))
+        async def toggle_recovery(event):
+            """Toggle automatic worker recovery"""
+            if not await self.is_admin(event.sender_id): return
+            
+            self.worker_recovery_enabled = not self.worker_recovery_enabled
+            status = "✅ Включено" if self.worker_recovery_enabled else "❌ Выключено"
+            
+            await event.respond(
+                f"🔄 **Автовосстановление воркеров:** {status}\n\n"
+                f"{'📌 Система автоматически перезапустится при замене аккаунта' if self.worker_recovery_enabled else '⚠️ Требуется ручной перезапуск после бана'}\n\n"
+                f"💡 Health check проверяет воркеры каждые 2 минуты"
+            )
+            logger.info(f"Worker recovery {'enabled' if self.worker_recovery_enabled else 'disabled'}")
+        # ============= END NEW COMMANDS =============
+
         @self.bot_client.on(events.NewMessage(pattern='/setrotation'))
         async def set_rotation_interval(event):
             """Set account rotation interval in seconds"""
@@ -4961,31 +5219,47 @@ class UltimateCommentBot:
         
         return random.choice(variations)
     
-    async def account_worker(self, phone, account_data, channel_subset):
-        """Worker function for each account to process its assigned channels"""
-        logger.info("="*60)
-        logger.info(f"👷 WORKER STARTED: {account_data.get('name', phone)} ({phone[-10:]})")
-        logger.info(f"� Account status: {account_data.get('status', 'unknown')}")
-        logger.info(f"👤 Admin ID: {account_data.get('admin_id', 'none')}")
-        logger.info(f"�📢 Assigned channels: {len(channel_subset)}")
-        for i, ch in enumerate(channel_subset[:5], 1):
-            ch_name = ch.get('username') if isinstance(ch, dict) else ch
-            logger.info(f"   {i}. {ch_name}")
-        if len(channel_subset) > 5:
-            logger.info(f"   ... and {len(channel_subset) - 5} more")
-        logger.info("="*60)
+    async def account_worker(self, phone, account_data, all_channels, worker_index, total_workers, mode='distributed'):
+        """Worker function: processes channels based on mode (cyclic or distributed)"""
+        account_name = account_data.get('name', phone[-10:])
         
-        # Add initial random delay (warmup) to avoid all accounts starting simultaneously
-        initial_delay = random.randint(5, 30)
-        logger.info(f"[{account_data.get('name', phone)}] ⏳ Initial warmup delay: {initial_delay}s")
-        await asyncio.sleep(initial_delay)
+        # В distributed режиме делим каналы между воркерами
+        if mode == 'distributed':
+            channels_per_worker = len(all_channels) // total_workers
+            remainder = len(all_channels) % total_workers
+            
+            start_idx = worker_index * channels_per_worker + min(worker_index, remainder)
+            end_idx = start_idx + channels_per_worker + (1 if worker_index < remainder else 0)
+            my_channels = all_channels[start_idx:end_idx]
+            
+            logger.info("="*60)
+            logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
+            logger.info(f"   Name: {account_name}")
+            logger.info(f"   Mode: DISTRIBUTED (dedicated channels)")
+            logger.info(f"   My channels: {start_idx+1}-{end_idx} ({len(my_channels)} total)")
+            logger.info(f"   Status: {account_data.get('status', 'unknown')}")
+            logger.info("="*60)
+        else:  # cyclic mode
+            my_channels = all_channels
+            logger.info("="*60)
+            logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
+            logger.info(f"   Name: {account_name}")
+            logger.info(f"   Mode: CYCLIC (all channels with offset)")
+            logger.info(f"   Total channels: {len(all_channels)}")
+            logger.info(f"   Offset: starts from channel #{(worker_index % len(all_channels)) + 1}")
+            logger.info(f"   Status: {account_data.get('status', 'unknown')}")
+            logger.info("="*60)
         
-        logger.info(f"[{account_data.get('name', phone)}] 🔄 Entering main loop (monitoring={self.monitoring})")
+        # Offset delay to spread workers
+        initial_offset = worker_index * 10
+        if initial_offset > 0:
+            logger.info(f"[{account_name}] Offset delay: {initial_offset}s")
+            await asyncio.sleep(initial_offset)
         
-        # ============= NEW: Create client ONCE for this worker =============
+        # Create Telethon client once
         worker_client = None
         try:
-            logger.info(f"👷 [{account_data.get('name', phone)}] Creating Telethon client...")
+            logger.info(f"[{account_name}] Creating Telethon client...")
             worker_client = TelegramClient(
                 StringSession(account_data['session']), 
                 API_ID, 
@@ -4995,370 +5269,248 @@ class UltimateCommentBot:
             await worker_client.connect()
             
             if not await worker_client.is_user_authorized():
-                logger.error(f"👷 WORKER STOPPED: Account {phone} not authorized!")
+                logger.error(f"[{account_name}] Account not authorized!")
                 return
             
-            logger.info(f"👷 [{account_data.get('name', phone)}] ✅ Client ready, starting comment loop")
+            logger.info(f"[{account_name}] Client ready")
         except Exception as e:
-            logger.error(f"👷 WORKER STOPPED: Could not connect client for {phone}: {e}")
+            logger.error(f"[{account_name}] Failed to create client: {e}")
             return
-        # ============= END NEW =============
         
-        # Main work loop
-        while self.monitoring:
-            logger.info(f"[{account_data.get('name', phone)}] 🔄 Starting new cycle...")
-            
-            # ============= NEW: Check account status and rate limits =============
-            # Проверяем статус аккаунта
-            current_status = self.get_account_status(phone)
-            logger.info(f"[{account_data.get('name', phone)}] 📊 Status check: {current_status}")
-            
-            if current_status != ACCOUNT_STATUS_ACTIVE:
-                logger.warning(f"[{account_data.get('name', phone)}] ⚠️ Status is {current_status}, pausing worker")
-                await asyncio.sleep(30)  # Ждем и проверяем снова
-                continue
-            
-            # Проверяем лимит сообщений
-            can_send, wait_time = self.can_account_send_message(phone)
-            logger.info(f"[{account_data.get('name', phone)}] 📊 Rate limit check: can_send={can_send}, wait_time={wait_time}")
-            
-            if not can_send:
-                logger.warning(f"[{account_data.get('name', phone)}] ⚠️ Rate limit reached. Waiting {wait_time}s")
-                await asyncio.sleep(min(wait_time + 10, 300))  # Ждем с небольшим запасом, но не более 5 минут
-                continue
-            
-            logger.info(f"[{account_data.get('name', phone)}] ✅ All checks passed, starting channel processing...")
-            # ============= END NEW =============
-            
-            # Process each channel in the subset
-            logger.info(f"[{account_data.get('name', phone)}] 📢 Processing {len(channel_subset)} channels...")
-            for idx, channel in enumerate(channel_subset, 1):
-                if not self.monitoring:
+        # Main cycle loop
+        cycle_number = 0
+        max_cycles = self.max_cycles_per_worker
+        
+        try:
+            while self.monitoring:
+                # Проверка лимита циклов (если установлен)
+                if max_cycles > 0 and cycle_number >= max_cycles:
+                    logger.info("="*60)
+                    logger.info(f"[{account_name}] ROTATION: completed {max_cycles} cycles")
+                    logger.info(f"[{account_name}] Moving to reserve, next account will take over")
+                    logger.info("="*60)
                     break
                 
-                # ============= NEW: Re-check status before each channel =============
+                cycle_number += 1
+                commented_channels = []
+                
+                logger.info("="*60)
+                logger.info(f"[{account_name}] CYCLE #{cycle_number} STARTED")
+                logger.info(f"[{account_name}] Channels: {len(my_channels)}")
+                if max_cycles > 0:
+                    logger.info(f"[{account_name}] Progress: {cycle_number}/{max_cycles} cycles")
+                logger.info("="*60)
+                
+                # Check account status
                 current_status = self.get_account_status(phone)
                 if current_status != ACCOUNT_STATUS_ACTIVE:
-                    logger.info(f"[{account_data.get('name', phone)}] Status changed to {current_status}, stopping")
-                    break
-                
-                # Проверяем лимит перед каждым комментарием
-                can_send, wait_time = self.can_account_send_message(phone)
-                if not can_send:
-                    logger.warning(f"[{account_data.get('name', phone)}] Rate limit reached mid-cycle. Pausing for {wait_time}s")
-                    await asyncio.sleep(min(wait_time + 10, 300))
+                    logger.warning(f"[{account_name}] Status: {current_status}, pausing...")
+                    await asyncio.sleep(30)
                     continue
-                # ============= END NEW =============
                 
-                # normalize channel entry
-                if isinstance(channel, dict):
-                    username = channel.get('username') or channel.get('name')
+                # Process channels based on mode
+                if mode == 'cyclic':
+                    # В cyclic режиме используем offset для распределения
+                    start_offset = worker_index % len(my_channels)
                 else:
-                    username = str(channel)
-                username = str(username).strip()
+                    # В distributed режиме обрабатываем последовательно
+                    start_offset = 0
                 
-                # ============= NEW: Check if we can comment in this channel (anti-spam protection) =============
-                can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username)
-                if not can_comment:
-                    logger.info(f"[{account_data.get('name', phone)}] Another account commented in {username} recently. Waiting {wait_for_channel}s")
-                    await asyncio.sleep(wait_for_channel)
-                # После ожидания пропускаем этот канал и идем к следующему
-                continue
-            # ============= END NEW =============
-            
-            # Initialize tracking for this channel
-            if username not in self.commented_posts:
-                self.commented_posts[username] = set()
-
-            # ============= USE WORKER CLIENT (created once) =============
-            client = worker_client  # Use the persistent client
-            # ============= END =============
-            
-            try:
-                # ============= REMOVED: client creation/connection (now done once at worker start) =============
-                
-                # resolve channel entity with auto-join for public channels
-                channel_entity = None
-                # Remove @ if present for URL construction
-                username_clean = username.lstrip('@') if username.startswith('@') else username
-                try:
-                    # Try get_entity (works if already cached or subscribed)
-                    try:
-                        channel_entity = await client.get_entity(username)
-                    except:
-                        channel_entity = await client.get_entity('https://t.me/' + username_clean)
-                except Exception as e_get:
-                    # If not found, try to join the channel first
-                    logger.info(f"[{account_data.get('name', phone)}] Trying to join {username}...")
-                    try:
-                        # Join via URL (works for public channels)
-                        result = await client(functions.channels.JoinChannelRequest('https://t.me/' + username_clean))
-                        await asyncio.sleep(1)
-                        # Now try to get entity again
-                        try:
-                            channel_entity = await client.get_entity(username)
-                            logger.info(f"[{account_data.get('name', phone)}] Joined and got {username}")
-                        except:
-                            channel_entity = await client.get_entity('https://t.me/' + username_clean)
-                    except Exception as e_join:
-                        logger.error(f"[{account_data.get('name', phone)}] Cannot join/get {username}: {e_join}")
-                        await self.mark_channel_failed_for_account(username, phone, f"Cannot access: {str(e_join)[:50]}")
-                        await asyncio.sleep(1)
+                for step, idx in enumerate(range(len(my_channels)), 1):
+                    if not self.monitoring:
+                        break
+                    
+                    # Check status before each comment
+                    current_status = self.get_account_status(phone)
+                    if current_status != ACCOUNT_STATUS_ACTIVE:
+                        logger.info(f"[{account_name}] Status changed, stopping cycle")
+                        break
+                    
+                    # Check rate limit
+                    can_send, wait_time = self.can_account_send_message(phone)
+                    if not can_send:
+                        logger.warning(f"[{account_name}] Rate limit. Wait: {wait_time}s")
+                        await asyncio.sleep(min(wait_time + 10, 300))
+                        can_send, wait_time = self.can_account_send_message(phone)
+                        if not can_send:
+                            logger.info(f"[{account_name}] Still limited, skipping")
+                            continue
+                    
+                    # Get channel with offset
+                    channel_idx = (start_offset + idx) % len(my_channels)
+                    channel = my_channels[channel_idx]
+                    
+                    # Normalize channel
+                    if isinstance(channel, dict):
+                        username = channel.get('username') or channel.get('name')
+                    else:
+                        username = str(channel)
+                    username = str(username).strip().lstrip('@')
+                    
+                    # Anti-spam protection
+                    can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username)
+                    if not can_comment:
+                        logger.info(f"[{account_name}] @{username} recently commented, skipping")
                         continue
-                
-                if not channel_entity:
-                    logger.error(f"[{account_data.get('name', phone)}] Failed to get entity for {username}")
-                    await self.mark_channel_failed_for_account(username, phone, "Failed to get entity")
-                    await asyncio.sleep(1)
-                    continue
-
-                # find linked discussion chat id with improved error handling
-                linked_chat_id = None
-                discussion_entity = None
-                comments_disabled = False
-                
-                try:
-                    full = await client(functions.channels.GetFullChannelRequest(channel=channel_entity))
                     
-                    # Try multiple ways to get linked_chat_id
-                    if hasattr(full, 'full_chat'):
-                        # Check if comments are explicitly disabled
-                        if hasattr(full.full_chat, 'available_reactions') and not full.full_chat.available_reactions:
-                            logger.info(f"[{account_data.get('name', phone)}] {username} has reactions disabled")
-                        
-                        if hasattr(full.full_chat, 'linked_chat_id'):
-                            linked_chat_id = full.full_chat.linked_chat_id
-                            logger.info(f"[{account_data.get('name', phone)}] Found linked_chat_id: {linked_chat_id}")
+                    # Initialize tracking
+                    if username not in self.commented_posts:
+                        self.commented_posts[username] = set()
                     
-                    # Fallback: check in chats list
-                    if not linked_chat_id and hasattr(full, 'chats'):
-                        for ch in full.chats:
-                            # Check if this is a discussion chat (megagroup)
-                            if hasattr(ch, 'megagroup') and ch.megagroup:
-                                try:
-                                    discussion_entity = ch
-                                    linked_chat_id = ch.id
-                                    logger.info(f"[{account_data.get('name', phone)}] Found discussion group in chats for {username}")
-                                    break
-                                except Exception:
-                                    continue
-                except Exception as e_full:
-                    logger.error(f"[{account_data.get('name', phone)}] GetFullChannel error for {username}: {e_full}")
-                    # If we can't get full info, mark as potentially no discussion
-                    await asyncio.sleep(2)
-                    continue
-
-                # If we don't have discussion_entity yet, try to get it by ID
-                if linked_chat_id and not discussion_entity:
-                    # Try multiple methods to resolve the entity
-                    methods_tried = 0
-                    for attempt in range(3):
+                    client = worker_client
+                    
+                    try:
+                        # Get/join channel
+                        channel_entity = None
                         try:
-                            methods_tried += 1
-                            if attempt == 0:
-                                # Method 1: Direct get by ID
-                                discussion_entity = await client.get_entity(int(linked_chat_id))
-                            elif attempt == 1:
-                                # Method 2: Using PeerChannel
-                                from telethon.tl.types import PeerChannel
-                                discussion_entity = await client.get_entity(PeerChannel(int(linked_chat_id)))
-                            else:
-                                # Method 3: Negative ID (sometimes works)
-                                discussion_entity = await client.get_entity(-100 + int(linked_chat_id) if linked_chat_id > 0 else linked_chat_id)
-                            
-                            if discussion_entity:
-                                logger.info(f"[{account_data.get('name', phone)}] Resolved discussion entity (method {attempt+1})")
-                                break
+                            try:
+                                channel_entity = await client.get_entity(username)
+                            except:
+                                channel_entity = await client.get_entity('https://t.me/' + username)
                         except Exception as e_get:
-                            if attempt == 2:
-                                logger.error(f"[{account_data.get('name', phone)}] All methods failed to get discussion entity: {e_get}")
-                            await asyncio.sleep(0.5)
-                
-                # Check if we successfully got discussion entity
-                if not discussion_entity and not linked_chat_id:
-                    # Channel has no discussion group - mark as failed with specific reason
-                    await self.mark_channel_failed_for_account(username, phone, "No discussion group")
-                    logger.warning(f"[{account_data.get('name', phone)}] {username} has no discussion - marking as failed")
-                    await asyncio.sleep(1)
-                    continue
-                elif not discussion_entity:
-                    # Has linked_chat_id but couldn't resolve - might be temporary
-                    logger.warning(f"[{account_data.get('name', phone)}] Could not resolve discussion for {username} - will retry later")
-                    await asyncio.sleep(2)
-                    continue
-
-                # Get recent messages to find new posts (check last 10 messages for better coverage)
-                try:
-                    msgs = await client.get_messages(discussion_entity, limit=10)
-                    
-                    # Find first message that hasn't been commented on yet
-                    reply_id = None
-                    post_text = ""
-                    for msg in msgs:
-                        if msg.id not in self.commented_posts[username]:
-                            reply_id = msg.id
-                            # Get text from this message
-                            post_text = msg.text or msg.message or ""
-                            break
-                    
-                    # If all recent posts are commented, comment on the latest one
-                    if not reply_id and msgs:
-                        reply_id = msgs[0].id
-                        post_text = msgs[0].text or msgs[0].message or ""
-                        # Clean old tracking to prevent memory issues
-                        if len(self.commented_posts[username]) > 30:
-                            oldest_ids = sorted(list(self.commented_posts[username]))[:15]
-                            for old_id in oldest_ids:
-                                self.commented_posts[username].discard(old_id)
-                    
-                    # If we don't have post text from discussion, try to get from channel
-                    if not post_text:
-                        try:
-                            channel_msgs = await client.get_messages(channel_entity, limit=5)
-                            if channel_msgs:
-                                post_text = channel_msgs[0].text or channel_msgs[0].message or "Интересный пост!"
-                        except Exception as e_ch:
-                            logger.debug(f"Could not get channel messages: {e_ch}")
-                            post_text = "Интересный пост!"
-                    
-                    # Generate AI comment based on post text
-                    channel_theme_str = channel.get('theme', 'общая') if isinstance(channel, dict) else 'общая'
-                    comment = generate_neuro_comment(
-                        post_text=post_text,
-                        channel_theme=channel_theme_str
-                    )
-                    
-                    # ============= TEST MODE: Check for duplicate comments =============
-                    if self.test_mode:
-                        if not hasattr(self, '_last_test_comments'):
-                            self._last_test_comments = []
+                            logger.info(f"[{account_name}] Joining @{username}...")
+                            try:
+                                result = await client(functions.channels.JoinChannelRequest('https://t.me/' + username))
+                                await asyncio.sleep(1)
+                                try:
+                                    channel_entity = await client.get_entity(username)
+                                except:
+                                    channel_entity = await client.get_entity('https://t.me/' + username)
+                            except Exception as e_join:
+                                logger.error(f"[{account_name}] Cannot access @{username}: {e_join}")
+                                await self.mark_channel_failed_for_account(username, phone, f"Access error")
+                                await asyncio.sleep(1)
+                                continue
                         
-                        # Check if this comment was used recently
-                        if comment in self._last_test_comments:
-                            logger.warning(f"🧪 TEST MODE: Duplicate comment detected! Regenerating...")
-                            # Try to regenerate
+                        if not channel_entity:
+                            logger.error(f"[{account_name}] Failed to get @{username}")
+                            await asyncio.sleep(1)
+                            continue
+                        
+                        # Find discussion group
+                        linked_chat_id = None
+                        discussion_entity = None
+                        
+                        try:
+                            full = await client(functions.channels.GetFullChannelRequest(channel=channel_entity))
+                            
+                            if hasattr(full, 'full_chat'):
+                                if hasattr(full.full_chat, 'linked_chat_id'):
+                                    linked_chat_id = full.full_chat.linked_chat_id
+                            
+                            if not linked_chat_id and hasattr(full, 'chats'):
+                                for ch in full.chats:
+                                    if hasattr(ch, 'megagroup') and ch.megagroup:
+                                        try:
+                                            discussion_entity = ch
+                                            linked_chat_id = ch.id
+                                            break
+                                        except Exception:
+                                            continue
+                        except Exception as e_full:
+                            logger.error(f"[{account_name}] GetFullChannel error for @{username}: {e_full}")
+                            await asyncio.sleep(2)
+                            continue
+                        
+                        # Resolve discussion entity
+                        if linked_chat_id and not discussion_entity:
+                            for attempt in range(3):
+                                try:
+                                    if attempt == 0:
+                                        discussion_entity = await client.get_entity(int(linked_chat_id))
+                                    elif attempt == 1:
+                                        from telethon.tl.types import PeerChannel
+                                        discussion_entity = await client.get_entity(PeerChannel(int(linked_chat_id)))
+                                    else:
+                                        discussion_entity = await client.get_entity(-100 + int(linked_chat_id) if linked_chat_id > 0 else linked_chat_id)
+                                    
+                                    if discussion_entity:
+                                        break
+                                except Exception as e_get:
+                                    if attempt == 2:
+                                        logger.error(f"[{account_name}] Cannot resolve discussion for @{username}")
+                                    await asyncio.sleep(0.5)
+                        
+                        if not discussion_entity and not linked_chat_id:
+                            await self.mark_channel_failed_for_account(username, phone, "No discussion group")
+                            logger.warning(f"[{account_name}] @{username} has no discussion")
+                            await asyncio.sleep(1)
+                            continue
+                        elif not discussion_entity:
+                            logger.warning(f"[{account_name}] Could not resolve discussion for @{username}")
+                            await asyncio.sleep(2)
+                            continue
+                        
+                        # Get messages
+                        try:
+                            msgs = await client.get_messages(discussion_entity, limit=10)
+                            
+                            reply_id = None
+                            post_text = ""
+                            for msg in msgs:
+                                if msg.id not in self.commented_posts[username]:
+                                    reply_id = msg.id
+                                    post_text = msg.text or msg.message or ""
+                                    break
+                            
+                            if not reply_id and msgs:
+                                reply_id = msgs[0].id
+                                post_text = msgs[0].text or msgs[0].message or ""
+                                if len(self.commented_posts[username]) > 30:
+                                    oldest_ids = sorted(list(self.commented_posts[username]))[:15]
+                                    for old_id in oldest_ids:
+                                        self.commented_posts[username].discard(old_id)
+                            
+                            if not post_text:
+                                try:
+                                    channel_msgs = await client.get_messages(channel_entity, limit=5)
+                                    if channel_msgs:
+                                        post_text = channel_msgs[0].text or channel_msgs[0].message or "Интересный пост!"
+                                except Exception:
+                                    post_text = "Интересный пост!"
+                            
+                            # Generate comment
+                            channel_theme_str = channel.get('theme', 'общая') if isinstance(channel, dict) else 'общая'
                             comment = generate_neuro_comment(
                                 post_text=post_text,
                                 channel_theme=channel_theme_str
                             )
-                            # If still duplicate, use variation
-                            if comment in self._last_test_comments:
-                                base_comment = random.choice(self.templates)
-                                comment = self.generate_comment_variation(base_comment)
-                        
-                        # Keep last 10 comments to check for duplicates
-                        self._last_test_comments.append(comment)
-                        if len(self._last_test_comments) > 10:
-                            self._last_test_comments.pop(0)
-                    # ============= END TEST MODE =============
-                    
-                except Exception as e_msgs:
-                    logger.error(f"Error getting messages: {e_msgs}")
-                    reply_id = None
-                    # Use fallback comment generation
-                    base_comment = random.choice(self.templates)
-                    comment = self.generate_comment_variation(base_comment)
-
-                # Try to join discussion group first (auto-join for guests)
-                try:
-                    await client(functions.channels.JoinChannelRequest(discussion_entity))
-                    logger.info(f"[{account_data.get('name', phone)}] Joined discussion for {username}")
-                    await asyncio.sleep(1)
-                except Exception as join_err:
-                    # Already joined or can't join - not critical
-                    logger.debug(f"[{account_data.get('name', phone)}] Join discussion: {join_err}")
-                
-                # send comment into discussion
-                comment_success = False
-                try:
-                    if reply_id:
-                        await client.send_message(discussion_entity, comment, reply_to=reply_id)
-                        # Mark this post as commented
-                        self.commented_posts[username].add(reply_id)
-                    else:
-                        await client.send_message(discussion_entity, comment)
-                    
-                    comment_success = True
-                    
-                    # ============= NEW: Register message sent for rate limiting =============
-                    self.register_message_sent(phone, username)
-                    # ============= END NEW =============
-                    
-                    # ============= ENHANCED LOGGING: Show which account sent comment =============
-                    short_comment = comment[:50] if len(comment) > 50 else comment
-                    account_name = account_data.get('name', phone[-10:])
-                    
-                    if self.test_mode:
-                        logger.info(f"🧪 TEST MODE SUCCESS:")
-                        logger.info(f"   Channel: @{username}")
-                        logger.info(f"   Account: {account_name} ({phone})")
-                        logger.info(f"   Comment: {short_comment}...")
-                        logger.info(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
-                        logger.info(f"   Post ID: {reply_id}")
-                    else:
-                        logger.info(f"✅💬 COMMENT SENT from [{account_name}] to @{username}")
-                        logger.info(f"   📱 Phone: {phone}")
-                        logger.info(f"   💬 Comment: {short_comment}...")
-                        logger.info(f"   🆔 Post ID: {reply_id}")
-                        logger.info(f"   ⏰ Time: {datetime.now().strftime('%H:%M:%S')}")
-                    # ============= END ENHANCED LOGGING =============
-                    
-                    await self.add_comment_stat(phone, True, channel=username)
-
-                    if self.conn:
-                        try:
-                            cursor = self.conn.cursor()
-                            cursor.execute(
-                                "INSERT INTO comment_history (phone, channel, comment, date) VALUES (?, ?, ?, ?)",
-                                (phone, username, comment, datetime.now().isoformat()),
-                            )
-                            self.conn.commit()
-                        except Exception as db_err:
-                            logger.error(f"DB log error: {db_err}")
                             
-                except Exception as send_exc:
-                    err_text = str(send_exc)
-                    
-                    # ============= TEST MODE: Detailed error logging =============
-                    if self.test_mode:
-                        logger.error(f"🧪 TEST MODE ERROR:")
-                        logger.error(f"   Channel: @{username}")
-                        logger.error(f"   Account: {account_data.get('name', phone)} ({phone})")
-                        logger.error(f"   Error: {err_text[:100]}")
-                        logger.error(f"   Time: {datetime.now().strftime('%H:%M:%S')}")
-                    # ============= END TEST MODE =============
-                    
-                    logger.error(f"[{account_data.get('name', phone)}] ❌ Send error for @{username}: {err_text}")
-                    
-                    # Categorize errors for better handling
-                    permanent_errors = [
-                        "You can't write in this chat",
-                        "CHAT_WRITE_FORBIDDEN",
-                        "CHAT_SEND_PLAIN_FORBIDDEN",
-                        "CHANNEL_PRIVATE"
-                    ]
-                    
-                    temp_errors = [
-                        "FloodWait",
-                        "SLOWMODE_WAIT",
-                        "TIMEOUT",
-                        "CONNECTION"
-                    ]
-                    
-                    # Check for permanent errors
-                    is_permanent = any(err in err_text for err in permanent_errors)
-                    is_temp = any(err in err_text for err in temp_errors)
-                    
-                    if is_permanent:
-                        await self.mark_channel_failed_for_account(username, phone, "Comments disabled/forbidden")
-                        logger.warning(f"[{account_data.get('name', phone)}] {username} marked as no-comment channel")
-                    elif "CHAT_GUEST_SEND_FORBIDDEN" in err_text:
-                        # Need to join - retry
-                        logger.info(f"[{account_data.get('name', phone)}] Guest forbidden - trying to join {username}")
+                            # Test mode duplicate check
+                            if self.test_mode:
+                                if not hasattr(self, '_last_test_comments'):
+                                    self._last_test_comments = []
+                                
+                                if comment in self._last_test_comments:
+                                    logger.warning(f"[{account_name}] Duplicate comment detected, regenerating...")
+                                    comment = generate_neuro_comment(
+                                        post_text=post_text,
+                                        channel_theme=channel_theme_str
+                                    )
+                                    if comment in self._last_test_comments:
+                                        base_comment = random.choice(self.templates)
+                                        comment = self.generate_comment_variation(base_comment)
+                                
+                                self._last_test_comments.append(comment)
+                                if len(self._last_test_comments) > 10:
+                                    self._last_test_comments.pop(0)
+                            
+                        except Exception as e_msgs:
+                            logger.error(f"[{account_name}] Error getting messages: {e_msgs}")
+                            reply_id = None
+                            base_comment = random.choice(self.templates)
+                            comment = self.generate_comment_variation(base_comment)
+                        
+                        # Join discussion
                         try:
                             await client(functions.channels.JoinChannelRequest(discussion_entity))
-                            await asyncio.sleep(2)
-                            # Retry sending after join
+                            await asyncio.sleep(1)
+                        except Exception:
+                            pass
+                        
+                        # Send comment
+                        comment_success = False
+                        try:
                             if reply_id:
                                 await client.send_message(discussion_entity, comment, reply_to=reply_id)
                                 self.commented_posts[username].add(reply_id)
@@ -5366,12 +5518,27 @@ class UltimateCommentBot:
                                 await client.send_message(discussion_entity, comment)
                             
                             comment_success = True
-                            
-                            # ============= NEW: Register message sent for rate limiting =============
                             self.register_message_sent(phone, username)
-                            # ============= END NEW =============
                             
-                            logger.info(f"[{account_data.get('name', phone)}] ✅ Joined & commented {username}")
+                            # Logging
+                            short_comment = comment[:50] if len(comment) > 50 else comment
+                            current_time = datetime.now().strftime('%H:%M:%S')
+                            commented_channels.append(f"@{username}")
+                            
+                            if self.test_mode:
+                                logger.info(f"TEST MODE SUCCESS:")
+                                logger.info(f"   Channel: @{username}")
+                                logger.info(f"   Account: {account_name} ({phone})")
+                                logger.info(f"   Comment: {short_comment}...")
+                                logger.info(f"   Time: {current_time}")
+                                logger.info(f"   Post ID: {reply_id}")
+                            else:
+                                logger.info(f"COMMENT: account={phone} -> channel=@{username}, cycle={cycle_number}, step={step}")
+                                logger.info(f"   Success at {current_time}")
+                                logger.info(f"   Phone: {phone}")
+                                logger.info(f"   Comment: {short_comment}...")
+                                logger.info(f"   Post ID: {reply_id}")
+                            
                             await self.add_comment_stat(phone, True, channel=username)
                             
                             if self.conn:
@@ -5384,115 +5551,86 @@ class UltimateCommentBot:
                                     self.conn.commit()
                                 except Exception as db_err:
                                     logger.error(f"DB log error: {db_err}")
-                        except Exception as retry_err:
-                            logger.error(f"[{account_data.get('name', phone)}] Retry failed: {retry_err}")
-                            # Only mark as failed after retry failed
-                            await self.mark_channel_failed_for_account(username, phone, "Guest send forbidden (after retry)")
-                    elif "CHAT_RESTRICTED" in err_text:
-                        await self.mark_channel_failed_for_account(username, phone, "Chat restricted")
-                    elif "USER_BANNED_IN_CHANNEL" in err_text:
-                        logger.warning(f"[{account_data.get('name', phone)}] Banned in {username} - account specific")
-                        await self.mark_channel_failed_for_account(username, phone, "Account banned in this channel")
-                    elif is_temp:
-                        # Temporary errors - don't mark as failed
-                        logger.warning(f"[{account_data.get('name', phone)}] Temporary error on {username}: {err_text}")
-                        if "FloodWait" in err_text:
-                            raise  # Re-raise to trigger FloodWait handling below
+                        
+                        except Exception as send_exc:
+                            err_text = str(send_exc)
+                            
+                            if self.test_mode:
+                                logger.error(f"TEST MODE ERROR:")
+                                logger.error(f"   Channel: @{username}")
+                                logger.error(f"   Account: {account_name} ({phone})")
+                                logger.error(f"   Error: {err_text[:100]}")
+                            
+                            logger.error(f"[{account_name}] Send error for @{username}: {err_text}")
+                            
+                            # Error handling...
+                            permanent_errors = [
+                                "You can't write in this chat",
+                                "CHAT_WRITE_FORBIDDEN",
+                                "CHAT_SEND_PLAIN_FORBIDDEN",
+                                "CHANNEL_PRIVATE"
+                            ]
+                            
+                            is_permanent = any(err in err_text for err in permanent_errors)
+                            
+                            if is_permanent:
+                                await self.mark_channel_failed_for_account(username, phone, "Comments forbidden")
+                            elif "FloodWait" in err_text:
+                                try:
+                                    import re
+                                    wait_match = re.search(r'(\d+)', err_text)
+                                    wait_seconds = int(wait_match.group(1)) if wait_match else 60
+                                    logger.warning(f"[{account_name}] FloodWait {wait_seconds}s")
+                                    await asyncio.sleep(min(wait_seconds + 5, 120))
+                                except Exception:
+                                    await asyncio.sleep(60)
+                            elif "USER_DEACTIVATED" in err_text or "AUTH_KEY_UNREGISTERED" in err_text:
+                                logger.error(f"[{account_name}] ACCOUNT BANNED!")
+                                await self.handle_account_ban(phone, "Account Deactivated")
+                                break
+                            else:
+                                await asyncio.sleep(3)
+                    
+                    except Exception as e:
+                        logger.error(f"[{account_name}] Error on @{username}: {str(e)[:100]}")
+                        await asyncio.sleep(3)
+                    
+                    # Delay between comments
+                    if self.test_mode:
+                        target_rate = self.test_mode_speed_limit
                     else:
-                        # Unknown error - log but don't fail immediately
-                        logger.error(f"[{account_data.get('name', phone)}] Unknown error on {username}: {err_text}")
-                        # Mark as failed only after 2nd attempt
-                        if username not in self.channel_failed_attempts or phone not in self.channel_failed_attempts.get(username, {}):
-                            logger.info(f"[{account_data.get('name', phone)}] First unknown error - will retry {username} later")
-                        else:
-                            await self.mark_channel_failed_for_account(username, phone, f"Unknown: {err_text[:30]}")
-            except Exception as e:
-                error_str = str(e)
-                logger.error(f"[{account_data.get('name', phone)}] Error commenting on {username}: {error_str}")
+                        target_rate = self.messages_per_hour
+                    
+                    base_delay = (3600 // target_rate) if target_rate > 0 else 60
+                    delay = random.randint(int(base_delay * 0.8), int(base_delay * 1.2))
+                    
+                    logger.info(f"[{account_name}] Waiting {delay}s (target: {target_rate} msg/hour)")
+                    await asyncio.sleep(delay)
                 
-                # Only handle serious account-level errors
-                if "FloodWait" in error_str:
-                    # Extract wait time if available
-                    try:
-                        import re
-                        wait_match = re.search(r'(\d+)', error_str)
-                        wait_seconds = int(wait_match.group(1)) if wait_match else 60
-                        logger.warning(f"[{account_data.get('name', phone)}] FloodWait {wait_seconds}s - waiting...")
-                        await asyncio.sleep(min(wait_seconds + 5, 120))  # Wait but max 2 minutes
-                    except Exception:
-                        await asyncio.sleep(60)
-                elif "USER_DEACTIVATED" in error_str or "AUTH_KEY_UNREGISTERED" in error_str:
-                    # Account is permanently banned
-                    logger.error(f"[{account_data.get('name', phone)}] ACCOUNT PERMANENTLY BANNED!")
-                    try:
-                        if self.conn:
-                            cursor = self.conn.cursor()
-                            cursor.execute(
-                                "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
-                                (phone, datetime.now().isoformat(), "Account Deactivated"),
-                            )
-                            self.conn.commit()
-                        await self.handle_account_ban(phone, "Account Deactivated")
-                        # Stop this worker
-                        break
-                    except Exception as db_err:
-                        logger.error(f"DB error: {db_err}")
-                elif "banned" in error_str.lower() and "channel" not in error_str.lower():
-                    # Account banned (not just in one channel)
-                    logger.error(f"[{account_data.get('name', phone)}] ACCOUNT BANNED!")
-                    try:
-                        if self.conn:
-                            cursor = self.conn.cursor()
-                            cursor.execute(
-                                "INSERT OR IGNORE INTO blocked_accounts (phone, block_date, reason) VALUES (?, ?, ?)",
-                                (phone, datetime.now().isoformat(), "Account Ban"),
-                            )
-                            self.conn.commit()
-                        await self.handle_account_ban(phone, "Account Ban")
-                        # Stop this worker
-                        break
-                    except Exception as db_err:
-                        logger.error(f"DB error: {db_err}")
-                else:
-                    # Temporary error - continue with next channel
-                    logger.info(f"[{account_data.get('name', phone)}] Skipping {username} due to temporary error")
-                    await asyncio.sleep(3)
-            except:  # Catch-all for any other errors in channel processing
-                pass  # Continue to next channel
-            
-            # ============= REMOVED: client.disconnect() - client persists for worker lifetime =============
-            
-            # ============= NEW: Smart delay based on rate limiting =============
-            # Calculate optimal delay based on messages_per_hour
-            if self.test_mode:
-                target_rate = self.test_mode_speed_limit
-            else:
-                target_rate = self.messages_per_hour
-            
-            # Delay = 3600 / target_rate (seconds per message)
-            base_delay = (3600 // target_rate) if target_rate > 0 else 60
-            # Add randomness (±20%)
-            delay = random.randint(int(base_delay * 0.8), int(base_delay * 1.2))
-            
-            logger.info(f"[{account_data.get('name', phone)}] ⏰ Waiting {delay}s (target: {target_rate} msg/hour)")
-            await asyncio.sleep(delay)
-            # ============= END NEW =============
-            
-            # After completing all channels, shuffle and start over
-            random.shuffle(channel_subset)
-            logger.info(f"[{account_data.get('name', phone)}] Completed cycle, restarting...")
-            # Shorter break between cycles (30-60 seconds) for better parallelism
-            await asyncio.sleep(random.randint(30, 60))
+                # Cycle completed
+                logger.info("="*60)
+                logger.info(f"WORKER FINISHED CYCLE: account={phone}, cycle={cycle_number}")
+                logger.info(f"   Commented channels: {commented_channels}")
+                logger.info(f"   Total: {len(commented_channels)}")
+                logger.info("="*60)
+                
+                # Break between cycles
+                cycle_break = random.randint(30, 60)
+                logger.info(f"[{account_name}] Break: {cycle_break}s")
+                await asyncio.sleep(cycle_break)
         
-        # Cleanup when worker stops
-        logger.info(f"👷 [{account_data.get('name', phone)}] WORKER STOPPING - disconnecting client...")
-        if worker_client and worker_client.is_connected():
-            try:
-                await worker_client.disconnect()
-                logger.info(f"👷 [{account_data.get('name', phone)}] ✅ Client disconnected")
-            except Exception as e:
-                logger.error(f"👷 [{account_data.get('name', phone)}] Error disconnecting: {e}")
-    
+        except Exception as outer_e:
+            logger.error(f"[{account_name}] Fatal error: {outer_e}")
+        finally:
+            # Cleanup
+            logger.info(f"[{account_name}] WORKER STOPPING")
+            if worker_client and worker_client.is_connected():
+                try:
+                    await worker_client.disconnect()
+                    logger.info(f"[{account_name}] Client disconnected")
+                except Exception as e:
+                    logger.error(f"[{account_name}] Disconnect error: {e}")
+
     async def pro_auto_comment(self):
         """Main commenting loop - runs accounts in parallel with rate limiting, rotation, and auto-replacement!"""
         logger.info("="*80)
@@ -5615,8 +5753,6 @@ class UltimateCommentBot:
         random.shuffle(channels_copy)
         
         # Calculate channels per account
-        channels_per_account = len(channels_copy) // num_accounts if num_accounts > 0 else 0
-        remainder = len(channels_copy) % num_accounts if num_accounts > 0 else 0
         
         # ============= TEST MODE: Log info =============
         if self.test_mode:
@@ -5627,18 +5763,26 @@ class UltimateCommentBot:
             logger.info(f"🚀 SMART MODE: {num_accounts} active accounts (max {MAX_PARALLEL_ACCOUNTS}) × {len(channels_copy)} channels")
         # ============= END TEST MODE =============
         
-        logger.info(f"📊 Each account handles ~{channels_per_account} channels")
+        # Логирование режима работы
+        if self.worker_mode == 'distributed':
+            channels_per_worker = len(channels_copy) // num_accounts
+            logger.info(f"📊 Mode: DISTRIBUTED - each account gets ~{channels_per_worker} dedicated channels")
+            logger.info(f"📊 Total: {num_accounts} accounts × ~{channels_per_worker} channels = {len(channels_copy)} total")
+        else:
+            logger.info(f"📊 Mode: CYCLIC - each account processes ALL {len(channels_copy)} channels with offset")
+        
         logger.info(f"⚡ Rate limit: {self.messages_per_hour} msg/hour per account")
-        logger.info(f"🔄 Rotation interval: {self.rotation_interval // 3600}h ({self.rotation_interval}s)")
+        logger.info(f"🔄 Max cycles per worker: {self.max_cycles_per_worker} (0=infinite)")
         logger.info(f"🛡️ Anti-spam: {MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS}s between own accounts in same chat")
         
-        # ============= NEW: Start rotation task =============
+        # ============= NEW: Start rotation and health check tasks =============
         rotation_task = asyncio.create_task(self.rotation_worker())
+        health_task = asyncio.create_task(self.health_check_worker())
         # ============= END NEW =============
         
         # Create worker tasks for each account
         tasks = []
-        start_idx = 0
+        self.active_worker_tasks.clear()  # Очищаем старый список
         
         logger.info("="*80)
         logger.info(f"🚀 CREATING {len(accounts_list)} PARALLEL WORKERS")
@@ -5652,19 +5796,21 @@ class UltimateCommentBot:
         
         for i, (phone, data) in enumerate(accounts_list):
             # Give extra channels to first accounts if there's a remainder
-            end_idx = start_idx + channels_per_account + (1 if i < remainder else 0)
-            channel_subset = channels_copy[start_idx:end_idx]
             
             logger.info(f"🔧 Creating worker #{i+1}/{len(accounts_list)} for [{data.get('name', phone)}]")
             logger.info(f"   Phone: {phone}")
             logger.info(f"   Status: {data.get('status', 'unknown')}")
-            logger.info(f"   Channels: {start_idx+1}-{end_idx} ({len(channel_subset)} total)")
+            logger.info(f"   Will process: ALL {len(channels_copy)} channels")
+            logger.info(f"   Offset: starts from channel #{(i % len(channels_copy)) + 1}")
             
             # Create worker task for this account
-            task = asyncio.create_task(self.account_worker(phone, data, channel_subset))
+            # Create worker task - каждый воркер получает ВСЕ каналы
+            task = asyncio.create_task(
+                self.account_worker(phone, data, channels_copy, i, len(accounts_list), mode=self.worker_mode)
+            )
             tasks.append(task)
+            self.active_worker_tasks.append(task)  # Отслеживаем для health check
             
-            start_idx = end_idx
         
         logger.info("="*80)
         logger.info(f"✅ ALL {len(tasks)} WORKERS CREATED AND LAUNCHED")
