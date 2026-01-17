@@ -2703,8 +2703,7 @@ class UltimateCommentBot:
             text += f"📈 **Сегодня комментариев:** `{daily_comments}`\n\n"
             
             # 2. Статистика по аккаунтам (filtered)
-            if sel
-            f.conn:
+            if self.conn:
                 try:
                     cursor = self.conn.cursor()
                     
