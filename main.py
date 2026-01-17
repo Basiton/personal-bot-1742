@@ -2407,12 +2407,27 @@ class UltimateCommentBot:
             if not self.bio_links:
                 await event.respond("Сначала `/addbio`!")
                 return
+            
+            # Determine admin_id for filtering
+            admin_id = self.get_admin_id(event.sender_id)
+            
+            # Filter accounts by admin_id
+            if admin_id is None:  # Super admin - show all
+                filtered_accounts = self.accounts_data
+            else:  # Regular admin - show only their accounts
+                filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                   if data.get('admin_id') == admin_id}
+            
             bio_text = " | ".join(self.bio_links[:4])
             updated = 0
-            for phone, data in self.accounts_data.items():
-                if data.get('active') and data.get('session'):
+            
+            # Update only ACTIVE accounts with sessions
+            for phone, data in filtered_accounts.items():
+                if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session'):
                     if await self.set_account_bio(data, bio_text):
                         updated += 1
+                        logger.info(f"Bio updated via /setbioall for {phone}")
+            
             await event.respond(f"BIO обновлен: `{bio_text}`\n{updated} аккаунтов")
         
         @self.bot_client.on(events.NewMessage(pattern='/stats'))
@@ -3875,8 +3890,18 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get ALL accounts (not just active)
-                all_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                # Determine admin_id for filtering (same as /listaccounts)
+                admin_id = self.get_admin_id(event.sender_id)
+                
+                # Filter accounts by admin_id
+                if admin_id is None:  # Super admin - show all
+                    filtered_accounts = self.accounts_data
+                else:  # Regular admin - show only their accounts
+                    filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                       if data.get('admin_id') == admin_id}
+                
+                # Get accounts with sessions only, sorted for stable order
+                all_accounts = [(phone, data) for phone, data in sorted(filtered_accounts.items()) 
                                 if data.get('session')]
                 
                 if not all_accounts:
@@ -3921,8 +3946,18 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get ALL accounts (not just active)
-                all_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                # Determine admin_id for filtering (same as /listaccounts)
+                admin_id = self.get_admin_id(event.sender_id)
+                
+                # Filter accounts by admin_id
+                if admin_id is None:  # Super admin - show all
+                    filtered_accounts = self.accounts_data
+                else:  # Regular admin - show only their accounts
+                    filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                       if data.get('admin_id') == admin_id}
+                
+                # Get accounts with sessions only, sorted for stable order
+                all_accounts = [(phone, data) for phone, data in sorted(filtered_accounts.items()) 
                                 if data.get('session')]
                 
                 if not all_accounts:
@@ -3967,8 +4002,18 @@ class UltimateCommentBot:
                 return
             
             try:
-                # Get ALL accounts (not just active)
-                all_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                # Determine admin_id for filtering (same as /listaccounts)
+                admin_id = self.get_admin_id(event.sender_id)
+                
+                # Filter accounts by admin_id
+                if admin_id is None:  # Super admin - show all
+                    filtered_accounts = self.accounts_data
+                else:  # Regular admin - show only their accounts
+                    filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                       if data.get('admin_id') == admin_id}
+                
+                # Get accounts with sessions only, sorted for stable order
+                all_accounts = [(phone, data) for phone, data in sorted(filtered_accounts.items()) 
                                 if data.get('session')]
                 
                 if not all_accounts:
@@ -4109,6 +4154,11 @@ class UltimateCommentBot:
                     # Get selected account
                     selected_phone, selected_data = accounts[account_num - 1]
                     
+                    # Log selected account details
+                    logger.info(f"PROFILE UPDATE: Account selected - index={account_num}, phone={selected_phone}, "
+                               f"status={selected_data.get('status')}, admin_id={selected_data.get('admin_id')}, "
+                               f"has_session={bool(selected_data.get('session'))}")
+                    
                     # Update state based on command type
                     if state == 'waiting_account_selection_for_name':
                         self.user_states[event.sender_id] = {
@@ -4160,6 +4210,10 @@ class UltimateCommentBot:
                     
                     await event.respond("⏳ Обновляю имя...")
                     
+                    # Log profile update details
+                    logger.info(f"PROFILE UPDATE: Starting name update - phone={phone}, "
+                               f"status={data.get('status')}, admin_id={data.get('admin_id')}")
+                    
                     # Update profile
                     try:
                         client = TelegramClient(
@@ -4170,12 +4224,15 @@ class UltimateCommentBot:
                         )
                         await client.connect()
                         
+                        logger.info(f"PROFILE UPDATE: Client connected for {phone}")
+                        
                         if await client.is_user_authorized():
                             # Get current name
                             me = await client.get_me()
                             old_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
                             
                             # Update
+                            logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for {phone} with name={first_name} {last_name}")
                             await client(UpdateProfileRequest(
                                 first_name=first_name,
                                 last_name=last_name
@@ -4184,17 +4241,22 @@ class UltimateCommentBot:
                             # Log
                             await self.log_profile_change(phone, 'name', old_name, new_name, True)
                             
+                            logger.info(f"PROFILE UPDATE: SUCCESS - Name updated for {phone}")
+                            
                             await event.respond(
                                 f"✅ **Имя обновлено для `{phone}`**\n\n"
                                 f"Новое имя: {first_name} {last_name}"
                             )
                             logger.info(f"Name updated for {phone}: {new_name}")
                         else:
+                            logger.error(f"PROFILE UPDATE: FAILED - Account {phone} not authorized")
                             await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
                         
                         await client.disconnect()
                     except Exception as e:
                         await self.log_profile_change(phone, 'name', '', new_name, False)
+                        logger.error(f"PROFILE UPDATE: ERROR - Failed to update name for {phone}: {e}")
+                        logger.error(f"PROFILE UPDATE: ERROR details - Type: {type(e).__name__}, Message: {str(e)}")
                         await event.respond(f"❌ Ошибка: {str(e)[:100]}")
                         logger.error(f"Error updating name for {phone}: {e}")
                     
@@ -4212,6 +4274,10 @@ class UltimateCommentBot:
                     
                     await event.respond("⏳ Обновляю био...")
                     
+                    # Log profile update details
+                    logger.info(f"PROFILE UPDATE: Starting bio update - phone={phone}, "
+                               f"status={data.get('status')}, admin_id={data.get('admin_id')}")
+                    
                     # Update profile
                     try:
                         client = TelegramClient(
@@ -4222,12 +4288,17 @@ class UltimateCommentBot:
                         )
                         await client.connect()
                         
+                        logger.info(f"PROFILE UPDATE: Client connected for {phone}")
+                        
                         if await client.is_user_authorized():
                             # Update bio using UpdateProfileRequest
+                            logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for {phone} with bio length={len(new_bio)}")
                             await client(UpdateProfileRequest(about=new_bio))
                             
                             # Log (without old bio, as it requires additional request)
                             await self.log_profile_change(phone, 'bio', '', new_bio, True)
+                            
+                            logger.info(f"PROFILE UPDATE: SUCCESS - Bio updated for {phone}")
                             
                             await event.respond(
                                 f"✅ **Био обновлено для `{phone}`**\n\n"
@@ -4235,11 +4306,14 @@ class UltimateCommentBot:
                             )
                             logger.info(f"Bio updated for {phone}: {new_bio[:50]}")
                         else:
+                            logger.error(f"PROFILE UPDATE: FAILED - Account {phone} not authorized")
                             await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
                         
                         await client.disconnect()
                     except Exception as e:
                         await self.log_profile_change(phone, 'bio', '', new_bio, False)
+                        logger.error(f"PROFILE UPDATE: ERROR - Failed to update bio for {phone}: {e}")
+                        logger.error(f"PROFILE UPDATE: ERROR details - Type: {type(e).__name__}, Message: {str(e)}")
                         await event.respond(f"❌ Ошибка: {str(e)[:100]}")
                         logger.error(f"Error updating bio for {phone}: {e}")
                     
@@ -4281,6 +4355,10 @@ class UltimateCommentBot:
                 
                 await event.respond("⏳ Загружаю аватарку...")
                 
+                # Log profile update details
+                logger.info(f"PROFILE UPDATE: Starting avatar upload - phone={phone}, "
+                           f"status={data.get('status')}, admin_id={data.get('admin_id')}")
+                
                 # Upload to selected account
                 try:
                     client = TelegramClient(
@@ -4291,8 +4369,11 @@ class UltimateCommentBot:
                     )
                     await client.connect()
                     
+                    logger.info(f"PROFILE UPDATE: Client connected for {phone}")
+                    
                     if await client.is_user_authorized():
                         # Upload profile photo
+                        logger.info(f"PROFILE UPDATE: Calling UploadProfilePhotoRequest for {phone}")
                         await client(UploadProfilePhotoRequest(
                             file=await client.upload_file(photo_path)
                         ))
@@ -4300,14 +4381,19 @@ class UltimateCommentBot:
                         # Log
                         await self.log_profile_change(phone, 'avatar', '', 'uploaded', True)
                         
+                        logger.info(f"PROFILE UPDATE: SUCCESS - Avatar uploaded for {phone}")
+                        
                         await event.respond(f"✅ **Аватарка загружена для `{phone}`**")
                         logger.info(f"Avatar uploaded for {phone}")
                     else:
+                        logger.error(f"PROFILE UPDATE: FAILED - Account {phone} not authorized")
                         await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
                     
                     await client.disconnect()
                 except Exception as e:
                     await self.log_profile_change(phone, 'avatar', '', '', False)
+                    logger.error(f"PROFILE UPDATE: ERROR - Failed to upload avatar for {phone}: {e}")
+                    logger.error(f"PROFILE UPDATE: ERROR details - Type: {type(e).__name__}, Message: {str(e)}")
                     await event.respond(f"❌ Ошибка: {str(e)[:100]}")
                     logger.error(f"Error uploading avatar for {phone}: {e}")
                 
