@@ -1,0 +1,78 @@
+[
+  {
+    "phone": "+13435909132",
+    "status": "reserve",
+    "bio": [
+      "FROZEN",
+      null,
+      "RPCError 420: FROZEN_METHOD_INVALID (caused by UpdateProfileRequest)"
+    ],
+    "name": [
+      "FROZEN",
+      null,
+      "RPCError 420: FROZEN_METHOD_INVALID (caused by UpdateProfileRequest)"
+    ],
+    "avatar": [
+      "FROZEN",
+      null,
+      "RPCError 420: FROZEN_METHOD_INVALID (caused by UploadProfilePhotoRequest)"
+    ]
+  },
+  {
+    "phone": "+15482373234",
+    "status": "reserve",
+    "bio": [
+      "FROZEN",
+      null,
+      "RPCError 420: FROZEN_METHOD_INVALID (caused by UpdateProfileRequest)"
+    ],
+    "name": [
+      "FROZEN",
+      null,
+      "RPCError 420: FROZEN_METHOD_INVALID (caused by UpdateProfileRequest)"
+    ],
+    "avatar": [
+      "FROZEN",
+      null,
+      "RPCError 420: FROZEN_METHOD_INVALID (caused by UploadProfilePhotoRequest)"
+    ]
+  },
+  {
+    "phone": "+13434919340",
+    "status": "active",
+    "bio": [
+      "OK",
+      "Test Bio 697",
+      "Test Bio 697"
+    ],
+    "name": [
+      "OK",
+      "Lisa Bot701",
+      "Lisa Bot701"
+    ],
+    "avatar": [
+      "OK",
+      "uploaded",
+      "Photo"
+    ]
+  },
+  {
+    "phone": "+18733178168",
+    "status": "active",
+    "bio": [
+      "NOT_AUTH",
+      null,
+      null
+    ],
+    "name": [
+      "NOT_AUTH",
+      null,
+      null
+    ],
+    "avatar": [
+      "NOT_AUTH",
+      null,
+      null
+    ]
+  }
+]

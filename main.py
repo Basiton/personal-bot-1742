@@ -26,6 +26,28 @@ API_HASH = '4c63aee24cbc1be5e593329370712e7f'
 BOT_TOKEN = '8544528676:AAGWL7WuTONeTo5Lse6AiATtg4nEcssKuWc'
 BOT_OWNER_ID = 6730216440
 
+# ============= PROFILE OPERATIONS PROTECTION =============
+# Список проверенных рабочих аккаунтов (обновляется по результатам тестов)
+WORKING_ACCOUNTS = [
+    '+13434919340'  # Проверено: BIO ✅, NAME ✅, AVATAR ✅
+]
+
+# Аккаунты с FROZEN блокировкой (не использовать для profile operations)
+FROZEN_ACCOUNTS = [
+    '+13435909132',  # FROZEN: все методы заблокированы
+    '+15482373234'   # FROZEN: все методы заблокированы
+]
+
+# Лог операций с профилем для rate limiting
+profile_operations_log = {}  # {f"{phone}:{operation}": datetime}
+
+# Лимиты операций (защита от блокировки)
+PROFILE_OPERATION_LIMITS = {
+    'bio': timedelta(hours=1),      # BIO: макс 1 раз в час
+    'name': timedelta(hours=1),     # NAME: макс 1 раз в час
+    'avatar': timedelta(hours=24)   # AVATAR: макс 1 раз в день
+}
+
 # ============= SUPER ADMINS =============
 # Two super admins who can see global stats and manage other admins
 SUPER_ADMINS = [6730216440, 5912533270]
@@ -295,6 +317,72 @@ class UltimateCommentBot:
         # Настройки лимитов скорости
         self.messages_per_hour = DEFAULT_MESSAGES_PER_HOUR  # Лимит сообщений в час на аккаунт
         self.rotation_interval = DEFAULT_ROTATION_INTERVAL  # Интервал ротации в секундах
+    
+    async def can_do_profile_operation(self, phone, operation_type):
+        """
+        Проверяет можно ли выполнить операцию с профилем (rate limiting)
+        
+        Args:
+            phone: Номер телефона аккаунта
+            operation_type: Тип операции ('bio', 'name', 'avatar')
+        
+        Returns:
+            (can_do: bool, wait_time: timedelta|None, reason: str)
+        """
+        now = datetime.now()
+        key = f"{phone}:{operation_type}"
+        
+        # Проверяем не заморожен ли аккаунт
+        if phone in FROZEN_ACCOUNTS:
+            logger.warning(f"PROFILE: Account {phone} is FROZEN, operation denied")
+            return False, None, f"Аккаунт {phone} заблокирован Telegram (FROZEN)"
+        
+        # Проверяем лимиты
+        if key in profile_operations_log:
+            last_op = profile_operations_log[key]
+            limit = PROFILE_OPERATION_LIMITS.get(operation_type, timedelta(hours=1))
+            
+            if now - last_op < limit:
+                wait_time = (last_op + limit) - now
+                logger.info(f"PROFILE: Rate limit for {phone}:{operation_type}, wait {wait_time}")
+                return False, wait_time, "Rate limit"
+        
+        # Операция разрешена
+        profile_operations_log[key] = now
+        logger.info(f"PROFILE: Operation {operation_type} allowed for {phone}")
+        return True, None, "OK"
+    
+    async def get_working_account_for_profile(self, preferred_phone=None):
+        """
+        Выбирает рабочий аккаунт для операций с профилем
+        
+        Args:
+            preferred_phone: Предпочтительный номер (если пользователь выбрал)
+        
+        Returns:
+            phone номер рабочего аккаунта или None
+        """
+        accounts = self.load_bot_data().get('accounts', {})
+        
+        # Если указан предпочтительный - проверяем его
+        if preferred_phone:
+            if preferred_phone in FROZEN_ACCOUNTS:
+                logger.warning(f"PROFILE: Preferred account {preferred_phone} is FROZEN")
+                return None
+            if preferred_phone in accounts:
+                return preferred_phone
+        
+        # Ищем рабочий аккаунт
+        for phone in WORKING_ACCOUNTS:
+            if phone in accounts:
+                status = accounts[phone].get('status')
+                if status in ['active', 'reserve']:
+                    logger.info(f"PROFILE: Selected working account {phone}")
+                    return phone
+        
+        logger.warning("PROFILE: No working accounts available!")
+        return None
+        
         
         # Отслеживание активности аккаунтов: {phone: {'messages': [(timestamp1, channel1), ...], 'status': 'active/reserve/broken'}}
         self.account_activity = {}
@@ -2615,7 +2703,8 @@ class UltimateCommentBot:
             text += f"📈 **Сегодня комментариев:** `{daily_comments}`\n\n"
             
             # 2. Статистика по аккаунтам (filtered)
-            if self.conn:
+            if sel
+            f.conn:
                 try:
                     cursor = self.conn.cursor()
                     
@@ -4330,6 +4419,35 @@ class UltimateCommentBot:
                     first_name = name_parts[0]
                     last_name = name_parts[1] if len(name_parts) > 1 else ""
                     
+                    # ⏰ ПРОВЕРКА RATE LIMITING
+                    can_do, wait_time, reason = await self.can_do_profile_operation(phone, 'name')
+                    if not can_do:
+                        if phone in FROZEN_ACCOUNTS:
+                            await event.respond(
+                                f"❌ **Аккаунт `{phone}` заблокирован Telegram**\n\n"
+                                f"⚠️ Этот аккаунт имеет FROZEN блокировку.\n"
+                                f"Изменение профиля невозможно.\n\n"
+                                f"💡 Рабочие аккаунты: {', '.join(WORKING_ACCOUNTS)}"
+                            )
+                        elif wait_time:
+                            wait_minutes = int(wait_time.total_seconds() / 60)
+                            wait_hours = wait_minutes // 60
+                            wait_mins_left = wait_minutes % 60
+                            
+                            if wait_hours > 0:
+                                time_str = f"{wait_hours}ч {wait_mins_left}м"
+                            else:
+                                time_str = f"{wait_minutes} минут"
+                            
+                            await event.respond(
+                                f"⏰ **Слишком частые операции!**\n\n"
+                                f"Аккаунт `{phone}` использовался недавно.\n"
+                                f"Подождите: **{time_str}**\n\n"
+                                f"⚠️ Это защищает аккаунт от блокировки Telegram."
+                            )
+                        await self.clear_user_state(event.sender_id)
+                        return
+                    
                     await event.respond("⏳ Обновляю имя...")
                     
                     # Log profile update details
@@ -4362,39 +4480,80 @@ class UltimateCommentBot:
                         # Get current name
                         logger.info(f"PROFILE UPDATE: Getting current profile for phone={phone}")
                         me = await client.get_me()
+                        logger.info(f"PROFILE UPDATE: Got user object - id={me.id}, username={me.username}, phone={me.phone}")
                         old_name = f"{me.first_name or ''} {me.last_name or ''}".strip()
-                        logger.info(f"PROFILE UPDATE: Current name for {phone}: '{old_name}'")
+                        logger.info(f"PROFILE UPDATE: Current name for {phone}: '{old_name}' (first_name='{me.first_name}', last_name='{me.last_name}')")
                         
                         # Update name
                         logger.info(f"PROFILE UPDATE: Calling UpdateProfileRequest for phone={phone}, "
                                    f"first_name='{first_name}', last_name='{last_name}'")
+                        logger.info(f"PROFILE UPDATE: About to call UpdateProfileRequest with params: {{first_name: '{first_name}', last_name: '{last_name}'}}")
                         
                         result = await client(UpdateProfileRequest(
                             first_name=first_name,
                             last_name=last_name
                         ))
                         
-                        logger.info(f"PROFILE UPDATE: UpdateProfileRequest result type: {type(result).__name__}")
-                        logger.info(f"PROFILE UPDATE: SUCCESS - Name updated for phone={phone} from '{old_name}' to '{new_name}'")
+                        logger.info(f"PROFILE UPDATE: UpdateProfileRequest completed. Result type: {type(result).__name__}")
+                        logger.info(f"PROFILE UPDATE: Result object: {result}")
                         
-                        # Log to DB
-                        await self.log_profile_change(phone, 'name', old_name, new_name, True)
+                        # ВЕРИФИКАЦИЯ: Проверяем что профиль реально изменился
+                        logger.info(f"PROFILE UPDATE: Verifying name change...")
+                        await asyncio.sleep(0.3)  # Пауза для синхронизации
+                        me_after = await client.get_me()
+                        logger.info(f"PROFILE UPDATE: After update - first_name='{me_after.first_name}', last_name='{me_after.last_name}'")
                         
-                        await event.respond(
-                            f"✅ **Имя обновлено для `{phone}`**\n\n"
-                            f"Старое: {old_name or '(не задано)'}\n"
-                            f"Новое: {first_name} {last_name}"
-                        )
+                        if me_after.first_name == first_name and me_after.last_name == last_name:
+                            logger.info(f"PROFILE UPDATE: ✅ VERIFIED - Name REALLY changed for phone={phone}")
+                            logger.info(f"PROFILE UPDATE: Old name: '{old_name}'")
+                            logger.info(f"PROFILE UPDATE: New name: '{first_name} {last_name}'")
+                            
+                            # Log to DB
+                            await self.log_profile_change(phone, 'name', old_name, new_name, True)
+                            
+                            await event.respond(
+                                f"✅ **Имя обновлено для `{phone}`**\n\n"
+                                f"Было: {old_name or '(не задано)'}\n"
+                                f"Стало: {first_name} {last_name}\n\n"
+                                f"✅ Изменение подтверждено в Telegram"
+                            )
+                        else:
+                            # API вернул success, но имя НЕ изменилось!
+                            logger.warning(f"PROFILE UPDATE: ⚠️ FALSE SUCCESS - API OK but name NOT changed!")
+                            logger.warning(f"PROFILE UPDATE: Expected: '{first_name} {last_name}'")
+                            logger.warning(f"PROFILE UPDATE: Actual: '{me_after.first_name} {me_after.last_name}'")
+                            
+                            await self.log_profile_change(phone, 'name', old_name, new_name, False)
+                            
+                            await event.respond(
+                                f"⚠️ **API вернул успех, но имя НЕ изменилось для `{phone}`**\n\n"
+                                f"Telegram принял запрос, но профиль остался без изменений.\n\n"
+                                f"Ожидали: {first_name} {last_name}\n"
+                                f"Получили: {me_after.first_name or ''} {me_after.last_name or ''}\n\n"
+                                f"💡 Возможно аккаунт имеет скрытые ограничения.\n"
+                                f"Попробуйте другой аккаунт."
+                            )
                         
                     except Exception as e:
                         await self.log_profile_change(phone, 'name', '', new_name, False)
+                        error_msg = str(e)
                         logger.error(f"PROFILE UPDATE: ERROR - Failed to update name for phone={phone}")
                         logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
-                        logger.error(f"PROFILE UPDATE: ERROR Message: {str(e)}")
+                        logger.error(f"PROFILE UPDATE: ERROR Message: {error_msg}")
                         import traceback
                         logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
-                        await event.respond(
-                            f"❌ **Ошибка при обновлении имени для `{phone}`**\n\n"
+                        
+                        # Специальная обработка FROZEN ошибки
+                        if "FROZEN" in error_msg or "420" in error_msg:
+                            await event.respond(
+                                f"❌ **Аккаунт `{phone}` не может изменять профиль**\n\n"
+                                f"Telegram заблокировал эту функцию для данного аккаунта (FROZEN_METHOD).\n\n"
+                                f"💡 Это означает что аккаунт имеет ограничения.\n"
+                                f"Попробуйте другой аккаунт или обратитесь к администратору."
+                            )
+                        else:
+                            await event.respond(
+                                f"❌ **Ошибка при обновлении имени для `{phone}`**\n\n"
                             f"Тип: {type(e).__name__}\n"
                             f"Сообщение: {str(e)[:200]}"
                         )
@@ -4413,6 +4572,39 @@ class UltimateCommentBot:
                     
                     if not new_bio:
                         await event.respond("❌ Описание не может быть пустым")
+                        return
+                    
+                    # ⏰ ПРОВЕРКА RATE LIMITING
+                    can_do, wait_time, reason = await self.can_do_profile_operation(phone, 'bio')
+                    if not can_do:
+                        if phone in FROZEN_ACCOUNTS:
+                            await event.respond(
+                                f"❌ **Аккаунт `{phone}` заблокирован Telegram**\n\n"
+                                f"⚠️ Этот аккаунт имеет FROZEN блокировку.\n"
+                                f"Изменение профиля невозможно.\n\n"
+                                f"💡 Рабочие аккаунты: {', '.join(WORKING_ACCOUNTS)}"
+                            )
+                        elif wait_time:
+                            wait_minutes = int(wait_time.total_seconds() / 60)
+                            wait_hours = wait_minutes // 60
+                            wait_mins_left = wait_minutes % 60
+                            
+                            if wait_hours > 0:
+                                time_str = f"{wait_hours}ч {wait_mins_left}м"
+                            else:
+                                time_str = f"{wait_minutes} минут"
+                            
+                            await event.respond(
+                                f"⏰ **Слишком частые операции!**\n\n"
+                                f"Аккаунт `{phone}` использовался недавно.\n"
+                                f"Подождите: **{time_str}**\n\n"
+                                f"⚠️ Это защищает аккаунт от блокировки Telegram.\n\n"
+                                f"Лимиты:\n"
+                                f"• BIO: не чаще 1 раза в час\n"
+                                f"• NAME: не чаще 1 раза в час\n"
+                                f"• AVATAR: не чаще 1 раза в день"
+                            )
+                        await self.clear_user_state(event.sender_id)
                         return
                     
                     await event.respond("⏳ Обновляю био...")
@@ -4458,28 +4650,68 @@ class UltimateCommentBot:
                         result = await client(UpdateProfileRequest(about=new_bio))
                         
                         logger.info(f"PROFILE UPDATE: UpdateProfileRequest result type: {type(result).__name__}")
-                        logger.info(f"PROFILE UPDATE: SUCCESS - Bio updated for phone={phone}")
                         
-                        # Log to DB
-                        await self.log_profile_change(phone, 'bio', old_bio, new_bio, True)
+                        # ВЕРИФИКАЦИЯ: проверяем что профиль реально изменился
+                        logger.info(f"PROFILE UPDATE: Verifying bio change...")
+                        await asyncio.sleep(0.3)  # Пауза для синхронизации
+                        full_after = await client(GetFullUserRequest(me))
+                        actual_bio = full_after.full_user.about or ''
                         
-                        await event.respond(
-                            f"✅ **Био обновлено для `{phone}`**\n\n"
-                            f"Новое био: {new_bio[:150]}"
-                        )
+                        if actual_bio == new_bio:
+                            logger.info(f"PROFILE UPDATE: SUCCESS - Bio VERIFIED changed for phone={phone}")
+                            logger.info(f"PROFILE UPDATE: Old bio: '{old_bio[:50]}...'")
+                            logger.info(f"PROFILE UPDATE: New bio: '{actual_bio[:50]}...'")
+                            
+                            # Log to DB
+                            await self.log_profile_change(phone, 'bio', old_bio, new_bio, True)
+                            
+                            await event.respond(
+                                f"✅ **Био обновлено для `{phone}`**\n\n"
+                                f"Было: {old_bio[:50]}...\n"
+                                f"Стало: {new_bio[:150]}\n\n"
+                                f"✅ Изменение подтверждено в Telegram"
+                            )
+                        else:
+                            # API вернул success, но профиль НЕ изменился!
+                            logger.warning(f"PROFILE UPDATE: FALSE SUCCESS - API OK but bio NOT changed!")
+                            logger.warning(f"PROFILE UPDATE: Expected: '{new_bio}'")
+                            logger.warning(f"PROFILE UPDATE: Actual: '{actual_bio}'")
+                            
+                            await self.log_profile_change(phone, 'bio', old_bio, new_bio, False)
+                            
+                            await event.respond(
+                                f"⚠️ **API вернул успех, но био НЕ изменилось для `{phone}`**\n\n"
+                                f"Telegram принял запрос, но профиль остался без изменений.\n\n"
+                                f"Ожидали: {new_bio[:100]}\n"
+                                f"Получили: {actual_bio[:100]}\n\n"
+                                f"💡 Возможно аккаунт имеет скрытые ограничения.\n"
+                                f"Попробуйте другой аккаунт."
+                            )
                         
                     except Exception as e:
                         await self.log_profile_change(phone, 'bio', '', new_bio, False)
+                        error_msg = str(e)
                         logger.error(f"PROFILE UPDATE: ERROR - Failed to update bio for phone={phone}")
                         logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
-                        logger.error(f"PROFILE UPDATE: ERROR Message: {str(e)}")
+                        logger.error(f"PROFILE UPDATE: ERROR Message: {error_msg}")
                         import traceback
                         logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
-                        await event.respond(
-                            f"❌ **Ошибка при обновлении био для `{phone}`**\n\n"
-                            f"Тип: {type(e).__name__}\n"
-                            f"Сообщение: {str(e)[:200]}"
-                        )
+                        
+                        # Специальная обработка FROZEN ошибки
+                        if "FROZEN" in error_msg or "420" in error_msg:
+                            await event.respond(
+                                f"❌ **Изменение БИО заблокировано для `{phone}`**\n\n"
+                                f"⚠️ Telegram ограничил UpdateProfileRequest(about) для этого аккаунта.\n\n"
+                                f"💡 Возможно работают другие операции:\n"
+                                f"• Попробуйте /setname (изменение имени)\n"
+                                f"• Или выберите другой аккаунт для /setbio"
+                            )
+                        else:
+                            await event.respond(
+                                f"❌ **Ошибка при обновлении био для `{phone}`**\n\n"
+                                f"Тип: {type(e).__name__}\n"
+                                f"Сообщение: {error_msg[:200]}"
+                            )
                     finally:
                         if client and client.is_connected():
                             logger.info(f"PROFILE UPDATE: Disconnecting client for phone={phone}")
@@ -4529,6 +4761,42 @@ class UltimateCommentBot:
                     return
                 
                 logger.info(f"PROFILE UPDATE: Photo downloaded to {photo_path} for phone={phone}")
+                
+                # ✅ ЗАЩИТА: Проверяем rate limiting перед загрузкой аватара
+                can_do, wait_time, reason = await self.can_do_profile_operation(phone, 'avatar')
+                if not can_do:
+                    if phone in FROZEN_ACCOUNTS:
+                        await event.respond(
+                            f"❌ Аккаунт `{phone}` заблокирован Telegram для изменения аватара.\n\n"
+                            f"**Причина:** {reason}\n\n"
+                            f"🔧 **Что делать:**\n"
+                            f"1. Используйте другой аккаунт из списка\n"
+                            f"2. Или получите новый незаблокированный аккаунт"
+                        )
+                        # Clean up temp file
+                        try:
+                            os.remove(photo_path)
+                        except:
+                            pass
+                        await self.clear_user_state(event.sender_id)
+                        return
+                    elif wait_time:
+                        hours = int(wait_time.total_seconds() // 3600)
+                        minutes = int((wait_time.total_seconds() % 3600) // 60)
+                        wait_msg = f"{hours} ч {minutes} мин" if hours > 0 else f"{minutes} мин"
+                        await event.respond(
+                            f"⏰ Аккаунт `{phone}` можно использовать для аватара через {wait_msg}\n\n"
+                            f"**Причина:** {reason}\n\n"
+                            f"Лимит: 1 раз в 24 часа (защита от блокировки)"
+                        )
+                        # Clean up temp file
+                        try:
+                            os.remove(photo_path)
+                        except:
+                            pass
+                        await self.clear_user_state(event.sender_id)
+                        return
+                
                 await event.respond("⏳ Загружаю аватарку...")
                 
                 # Upload to selected account
@@ -4560,6 +4828,12 @@ class UltimateCommentBot:
                     
                     # Upload profile photo using upload_profile_photo method
                     logger.info(f"PROFILE UPDATE: Uploading photo file for phone={phone}")
+                    
+                    # Получаем количество фото ДО загрузки
+                    photos_before = await client.get_profile_photos('me')
+                    count_before = len(photos_before)
+                    logger.info(f"PROFILE UPDATE: Photos count BEFORE: {count_before}")
+                    
                     uploaded_file = await client.upload_file(photo_path)
                     logger.info(f"PROFILE UPDATE: File uploaded, type: {type(uploaded_file).__name__}")
                     
@@ -4567,25 +4841,66 @@ class UltimateCommentBot:
                     result = await client(UploadProfilePhotoRequest(file=uploaded_file))
                     
                     logger.info(f"PROFILE UPDATE: UploadProfilePhotoRequest result type: {type(result).__name__}")
-                    logger.info(f"PROFILE UPDATE: SUCCESS - Avatar uploaded for phone={phone}")
                     
-                    # Log to DB
-                    await self.log_profile_change(phone, 'avatar', '', 'uploaded', True)
+                    # ВЕРИФИКАЦИЯ: Проверяем что фото реально добавилось
+                    logger.info(f"PROFILE UPDATE: Verifying avatar upload...")
+                    await asyncio.sleep(0.5)  # Пауза для синхронизации
+                    photos_after = await client.get_profile_photos('me')
+                    count_after = len(photos_after)
+                    logger.info(f"PROFILE UPDATE: Photos count AFTER: {count_after}")
                     
-                    await event.respond(f"✅ **Аватарка загружена для `{phone}`**")
+                    if count_after > count_before:
+                        logger.info(f"PROFILE UPDATE: ✅ VERIFIED - Avatar REALLY uploaded for phone={phone}")
+                        logger.info(f"PROFILE UPDATE: Photos before: {count_before}, after: {count_after}")
+                        
+                        # Log to DB
+                        await self.log_profile_change(phone, 'avatar', '', 'uploaded', True)
+                        
+                        await event.respond(
+                            f"✅ **Аватарка загружена для `{phone}`**\n\n"
+                            f"Было фото: {count_before}\n"
+                            f"Стало фото: {count_after}\n\n"
+                            f"✅ Загрузка подтверждена в Telegram"
+                        )
+                    else:
+                        # API вернул success, но фото НЕ добавилось!
+                        logger.warning(f"PROFILE UPDATE: ⚠️ FALSE SUCCESS - API OK but avatar NOT uploaded!")
+                        logger.warning(f"PROFILE UPDATE: Photos before: {count_before}, after: {count_after}")
+                        
+                        await self.log_profile_change(phone, 'avatar', '', '', False)
+                        
+                        await event.respond(
+                            f"⚠️ **API вернул успех, но аватарка НЕ загружена для `{phone}`**\n\n"
+                            f"Telegram принял запрос, но фото не появилось в профиле.\n\n"
+                            f"Количество фото: до={count_before}, после={count_after}\n\n"
+                            f"💡 Возможно аккаунт имеет скрытые ограничения.\n"
+                            f"Попробуйте другой аккаунт."
+                        )
                     
                 except Exception as e:
                     await self.log_profile_change(phone, 'avatar', '', '', False)
+                    error_msg = str(e)
                     logger.error(f"PROFILE UPDATE: ERROR - Failed to upload avatar for phone={phone}")
                     logger.error(f"PROFILE UPDATE: ERROR Type: {type(e).__name__}")
-                    logger.error(f"PROFILE UPDATE: ERROR Message: {str(e)}")
+                    logger.error(f"PROFILE UPDATE: ERROR Message: {error_msg}")
                     import traceback
                     logger.error(f"PROFILE UPDATE: ERROR Traceback:\n{traceback.format_exc()}")
-                    await event.respond(
-                        f"❌ **Ошибка при загрузке аватарки для `{phone}`**\n\n"
-                        f"Тип: {type(e).__name__}\n"
-                        f"Сообщение: {str(e)[:200]}"
-                    )
+                    
+                    # Специальная обработка FROZEN ошибки
+                    if "FROZEN" in error_msg or "420" in error_msg:
+                        await event.respond(
+                            f"❌ **Загрузка АВАТАРА заблокирована для `{phone}`**\n\n"
+                            f"⚠️ Telegram ограничил UploadProfilePhotoRequest для этого аккаунта.\n\n"
+                            f"💡 Возможно работают другие операции:\n"
+                            f"• Попробуйте /setname или /setbio\n"
+                            f"• Или выберите другой аккаунт для /setavatar"
+                        )
+                    else:
+                        await event.respond(
+                            f"❌ **Ошибка при загрузке аватарки для `{phone}`**\n\n"
+                            f"Тип: {type(e).__name__}\n"
+                            f"Сообщение: {error_msg[:200]}"
+                        )
                 finally:
                     if client and client.is_connected():
                         logger.info(f"PROFILE UPDATE: Disconnecting client for phone={phone}")

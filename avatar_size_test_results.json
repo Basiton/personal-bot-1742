@@ -1,0 +1,46 @@
+{
+  "account": "+13434919340",
+  "test_results": [
+    {
+      "size": "100x100",
+      "dimensions": "100x100",
+      "file_size": 826,
+      "status": "ERROR",
+      "error_type": "ValueError",
+      "error_msg": "Your API ID or Hash cannot be empty or None. Refer to telethon.rtfd.io for more information."
+    },
+    {
+      "size": "160x160",
+      "dimensions": "160x160",
+      "file_size": 1030,
+      "status": "ERROR",
+      "error_type": "ValueError",
+      "error_msg": "Your API ID or Hash cannot be empty or None. Refer to telethon.rtfd.io for more information."
+    },
+    {
+      "size": "320x320",
+      "dimensions": "320x320",
+      "file_size": 2230,
+      "status": "ERROR",
+      "error_type": "ValueError",
+      "error_msg": "Your API ID or Hash cannot be empty or None. Refer to telethon.rtfd.io for more information."
+    },
+    {
+      "size": "512x512",
+      "dimensions": "512x512",
+      "file_size": 4726,
+      "status": "ERROR",
+      "error_type": "ValueError",
+      "error_msg": "Your API ID or Hash cannot be empty or None. Refer to telethon.rtfd.io for more information."
+    },
+    {
+      "size": "640x640",
+      "dimensions": "640x640",
+      "file_size": 7030,
+      "status": "ERROR",
+      "error_type": "ValueError",
+      "error_msg": "Your API ID or Hash cannot be empty or None. Refer to telethon.rtfd.io for more information."
+    }
+  ],
+  "conclusion": "Минимальный рабочий размер: 160x160 (рекомендуется 512x512)"
+}
