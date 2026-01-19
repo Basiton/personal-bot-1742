@@ -532,8 +532,7 @@ class UltimateCommentBot:
     
     def load_data(self):
         """
-        Загружает данные с защитой от повреждения.
-        Если основной файл повреждён, пытается восстановить из бэкапа.
+        Загружает данные.
         """
         try:
             with open(DB_NAME, 'r', encoding='utf-8') as f:
@@ -543,109 +542,26 @@ class UltimateCommentBot:
                 self.templates = data.get('templates', self.templates)
                 self.bio_links = data.get('bio_links', [])
                 self.admins = data.get('admins', [])
-                logger.info(f"✅ Loaded {len(self.accounts_data)} accounts from {DB_NAME}")
+                logger.info(f"✅ Loaded {len(self.accounts_data)} accounts, {len(self.channels)} channels, {len(self.templates)} templates")
         except FileNotFoundError:
             logger.warning(f"⚠️ {DB_NAME} not found, creating new")
             self.save_data()
         except json.JSONDecodeError as e:
             logger.error(f"❌ {DB_NAME} corrupted: {e}")
-            # Пытаемся восстановить из бэкапа
-            if self.restore_from_backup():
-                logger.info("✅ Successfully restored from backup")
-            else:
-                logger.error("❌ Failed to restore from backup, creating new file")
-                self.save_data()
+            logger.error("❌ Use /restore to restore from safe backup (data only, not sessions)")
+            # Не пытаемся автоматически восстанавливать - может быть опасно
+            self.save_data()
         except Exception as e:
             logger.error(f"❌ Error loading data: {e}")
             self.save_data()
     
-    def restore_from_backup(self):
-        """
-        Восстанавливает bot_data.json из резервной копии.
-        Возвращает True если восстановление успешно.
-        """
-        import shutil
-        
-        # Список файлов для попытки восстановления (в порядке приоритета)
-        backup_candidates = [
-            f'{DB_NAME}.bak',  # Последний .bak файл
-        ]
-        
-        # Добавляем timestamped бэкапы
-        try:
-            backup_files = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
-            backup_candidates.extend(backup_files[:3])  # Последние 3 timestamped бэкапа
-        except:
-            pass
-        
-        for backup_file in backup_candidates:
-            if not os.path.exists(backup_file):
-                continue
-            
-            try:
-                logger.info(f"🔄 Attempting restore from {backup_file}")
-                # Проверяем что бэкап валидный
-                with open(backup_file, 'r', encoding='utf-8') as f:
-                    test_data = json.load(f)
-                    if 'accounts' not in test_data:
-                        logger.warning(f"⚠️ {backup_file} is not valid (no accounts key)")
-                        continue
-                
-                # Бэкап валидный, восстанавливаем
-                shutil.copy2(backup_file, DB_NAME)
-                
-                # Перезагружаем данные
-                with open(DB_NAME, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.accounts_data = data.get('accounts', {})
-                    self.channels = data.get('channels', [])
-                    self.templates = data.get('templates', self.templates)
-                    self.bio_links = data.get('bio_links', [])
-                    self.admins = data.get('admins', [])
-                
-                logger.info(f"✅ Successfully restored {len(self.accounts_data)} accounts from {backup_file}")
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to restore from {backup_file}: {e}")
-                continue
-        
-        logger.error("❌ No valid backup found")
-        return False
+
     
     def save_data(self):
         """
-        Сохраняет данные с автоматическим резервным копированием.
-        КРИТИЧНО: Всегда создаёт бэкап перед сохранением для защиты сессий.
+        Сохраняет данные с атомарной записью.
+        Автоматические бэкапы сессий ОТКЛЮЧЕНЫ для безопасности.
         """
-        # ============= ЗАЩИТА СЕССИЙ: Автоматический бэкап =============
-        # Создаём резервную копию ПЕРЕД сохранением
-        if os.path.exists(DB_NAME):
-            try:
-                import shutil
-                from datetime import datetime
-                
-                # Создаём timestamped backup
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                backup_name = f'{DB_NAME}.backup_{timestamp}'
-                shutil.copy2(DB_NAME, backup_name)
-                
-                # Также создаём .bak для быстрого восстановления
-                shutil.copy2(DB_NAME, f'{DB_NAME}.bak')
-                
-                # Очищаем старые бэкапы (храним последние 5)
-                backup_files = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
-                for old_backup in backup_files[5:]:
-                    try:
-                        os.remove(old_backup)
-                    except:
-                        pass
-                
-                logger.debug(f"Session backup created: {backup_name}")
-            except Exception as e:
-                logger.error(f"⚠️ Failed to create backup: {e}")
-        # ============= END ЗАЩИТА СЕССИЙ =============
-        
         data = {
             'accounts': self.accounts_data,
             'channels': self.channels,
@@ -654,7 +570,7 @@ class UltimateCommentBot:
             'admins': self.admins
         }
         
-        # Сохраняем во временный файл сначала
+        # Сохраняем во временный файл сначала (атомарная запись)
         temp_file = f'{DB_NAME}.tmp'
         try:
             with open(temp_file, 'w', encoding='utf-8') as f:
@@ -1736,46 +1652,59 @@ class UltimateCommentBot:
 **👑 АДМИНЫ:**
 `/addadmin 123456789` - новый админ
 
-**💾 ЗАЩИТА СЕССИЙ:**
-`/backup` - создать резервную копию сейчас
-`/listbackups` - список всех бэкапов
-`/restore` - восстановить из последнего бэкапа"""
+**💾 ЗАЩИТА ДАННЫХ (НЕ СЕССИЙ!):**
+`/backup` - сохранить каналы и шаблоны
+`/listbackups` - список всех безопасных бэкапов
+`/restore` - восстановить каналы/шаблоны
+
+⚠️ **ВАЖНО:** Бэкапы НЕ содержат сессий!
+Сессии всегда остаются нетронутыми."""
             await event.respond(text)
         
         # ============= SESSION PROTECTION COMMANDS =============
         @self.bot_client.on(events.NewMessage(pattern='/backup'))
         async def manual_backup(event):
-            """Создаёт резервную копию bot_data.json вручную"""
+            """
+            Создаёт резервную копию ДАННЫХ (каналы, шаблоны).
+            КРИТИЧНО: НИКОГДА не бэкапирует сессии аккаунтов!
+            """
             if not await self.is_admin(event.sender_id): return
             
             try:
-                import shutil
                 from datetime import datetime
                 
-                if not os.path.exists(DB_NAME):
-                    await event.respond("❌ Файл bot_data.json не найден")
-                    return
+                # ============= ЗАЩИТА: Бэкапируем ТОЛЬКО данные, НЕ сессии! =============
+                backup_data = {
+                    'channels': self.channels,
+                    'templates': self.templates,
+                    'bio_links': self.bio_links,
+                    'admins': self.admins,
+                    # ВАЖНО: НЕ включаем 'accounts' - там сессии!
+                }
                 
-                # Создаём timestamped backup
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                backup_name = f'{DB_NAME}.manual_backup_{timestamp}'
-                shutil.copy2(DB_NAME, backup_name)
+                backup_name = f'bot_data_safe.backup_{timestamp}.json'
                 
-                # Также обновляем .bak
-                shutil.copy2(DB_NAME, f'{DB_NAME}.bak')
+                # Сохраняем только данные (без сессий)
+                with open(backup_name, 'w', encoding='utf-8') as f:
+                    json.dump(backup_data, f, indent=2, ensure_ascii=False)
                 
-                # Подсчитываем количество аккаунтов
-                accounts_count = len(self.accounts_data)
+                # Также создаём быстрый бэкап
+                with open('bot_data_safe.bak.json', 'w', encoding='utf-8') as f:
+                    json.dump(backup_data, f, indent=2, ensure_ascii=False)
+                # ============= END ЗАЩИТА =============
                 
                 await event.respond(
-                    f"✅ **Резервная копия создана**\n\n"
+                    f"✅ **Безопасная резервная копия создана**\n\n"
                     f"📁 Файл: `{backup_name}`\n"
-                    f"👥 Аккаунтов сохранено: {accounts_count}\n"
                     f"📊 Каналов: {len(self.channels)}\n"
-                    f"💬 Шаблонов: {len(self.templates)}\n\n"
+                    f"💬 Шаблонов: {len(self.templates)}\n"
+                    f"🔗 Bio-ссылок: {len(self.bio_links)}\n"
+                    f"👑 Админов: {len(self.admins)}\n\n"
+                    f"🔒 **Сессии аккаунтов НЕ включены** (безопасно!)\n\n"
                     f"💡 Используйте `/listbackups` для просмотра всех бэкапов"
                 )
-                logger.info(f"Manual backup created by user {event.sender_id}: {backup_name}")
+                logger.info(f"Safe backup created by user {event.sender_id}: {backup_name} (NO SESSIONS)")
                 
             except Exception as e:
                 await event.respond(f"❌ Ошибка создания бэкапа: {str(e)}")
@@ -1783,27 +1712,27 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/listbackups'))
         async def list_backups(event):
-            """Показывает список всех доступных бэкапов"""
+            """Показывает список всех доступных безопасных бэкапов (без сессий)"""
             if not await self.is_admin(event.sender_id): return
             
             try:
-                # Ищем все файлы бэкапов
-                backup_files = []
-                
-                # Автоматические бэкапы
-                auto_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
-                
-                # Ручные бэкапы
-                manual_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.manual_backup_')], reverse=True)
+                # Ищем безопасные бэкапы (без сессий)
+                safe_backups = sorted([f for f in os.listdir('.') if f.startswith('bot_data_safe.backup_')], reverse=True)
                 
                 # .bak файл
-                bak_file = f'{DB_NAME}.bak' if os.path.exists(f'{DB_NAME}.bak') else None
+                bak_file = 'bot_data_safe.bak.json' if os.path.exists('bot_data_safe.bak.json') else None
                 
-                if not auto_backups and not manual_backups and not bak_file:
-                    await event.respond("❌ Бэкапы не найдены")
+                if not safe_backups and not bak_file:
+                    await event.respond(
+                        "❌ Безопасные бэкапы не найдены\n\n"
+                        "💡 Создайте первый бэкап: `/backup`\n\n"
+                        "🔒 Новые бэкапы НЕ содержат сессий (безопасно!)"
+                    )
                     return
                 
-                text = "💾 **РЕЗЕРВНЫЕ КОПИИ**\n\n"
+                text = "💾 **БЕЗОПАСНЫЕ РЕЗЕРВНЫЕ КОПИИ**\n"
+                text += "🔒 Содержат только данные (каналы, шаблоны)\n"
+                text += "✅ Сессии аккаунтов НЕ включены\n\n"
                 
                 if bak_file:
                     file_size = os.path.getsize(bak_file) / 1024  # KB
@@ -1813,33 +1742,24 @@ class UltimateCommentBot:
                     text += f"   📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                     text += f"   💾 {file_size:.1f} KB\n\n"
                 
-                if manual_backups:
-                    text += f"🖐️ **Ручные бэкапы ({len(manual_backups)}):**\n"
-                    for backup in manual_backups[:5]:  # Показываем последние 5
+                if safe_backups:
+                    text += f"🖐️ **Все бэкапы ({len(safe_backups)}):**\n"
+                    for backup in safe_backups[:10]:  # Показываем последние 10
                         file_size = os.path.getsize(backup) / 1024
                         file_time = datetime.fromtimestamp(os.path.getmtime(backup))
-                        text += f"• `{backup[-24:]}`\n"  # Только дата из имени
+                        # Извлекаем timestamp из имени
+                        timestamp_part = backup.replace('bot_data_safe.backup_', '').replace('.json', '')
+                        text += f"• `{timestamp_part}`\n"
                         text += f"  📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                         text += f"  💾 {file_size:.1f} KB\n"
-                    if len(manual_backups) > 5:
-                        text += f"\n... и ещё {len(manual_backups) - 5} бэкапов\n"
-                    text += "\n"
-                
-                if auto_backups:
-                    text += f"🤖 **Автоматические бэкапы ({len(auto_backups)}):**\n"
-                    for backup in auto_backups[:5]:  # Показываем последние 5
-                        file_size = os.path.getsize(backup) / 1024
-                        file_time = datetime.fromtimestamp(os.path.getmtime(backup))
-                        text += f"• `{backup[-24:]}`\n"
-                        text += f"  📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        text += f"  💾 {file_size:.1f} KB\n"
-                    if len(auto_backups) > 5:
-                        text += f"\n... и ещё {len(auto_backups) - 5} бэкапов\n"
+                    if len(safe_backups) > 10:
+                        text += f"\n... и ещё {len(safe_backups) - 10} бэкапов\n"
                     text += "\n"
                 
                 text += "💡 **Команды:**\n"
-                text += "`/restore` - восстановить из последнего бэкапа\n"
-                text += "`/backup` - создать новый бэкап вручную"
+                text += "`/restore` - восстановить данные из последнего бэкапа\n"
+                text += "`/backup` - создать новый бэкап\n\n"
+                text += "⚠️ **Важно:** При восстановлении сессии НЕ затрагиваются!"
                 
                 await event.respond(text)
                 
@@ -1849,66 +1769,82 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/restore'))
         async def restore_backup(event):
-            """Восстанавливает данные из последнего бэкапа"""
+            """
+            Восстанавливает ТОЛЬКО данные (каналы, шаблоны) из бэкапа.
+            КРИТИЧНО: НИКОГДА не трогает сессии аккаунтов!
+            """
             if not await self.is_admin(event.sender_id): return
             
             try:
-                # Находим последний валидный бэкап
+                # Находим последний безопасный бэкап (без сессий)
                 backup_file = None
                 
                 # Проверяем .bak файл
-                if os.path.exists(f'{DB_NAME}.bak'):
-                    backup_file = f'{DB_NAME}.bak'
+                if os.path.exists('bot_data_safe.bak.json'):
+                    backup_file = 'bot_data_safe.bak.json'
                 
-                # Проверяем ручные бэкапы
+                # Проверяем безопасные бэкапы
                 if not backup_file:
-                    manual_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.manual_backup_')], reverse=True)
-                    if manual_backups:
-                        backup_file = manual_backups[0]
-                
-                # Проверяем автоматические бэкапы
-                if not backup_file:
-                    auto_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
-                    if auto_backups:
-                        backup_file = auto_backups[0]
+                    safe_backups = sorted([f for f in os.listdir('.') if f.startswith('bot_data_safe.backup_')], reverse=True)
+                    if safe_backups:
+                        backup_file = safe_backups[0]
                 
                 if not backup_file:
-                    await event.respond("❌ Бэкапы не найдены")
+                    await event.respond(
+                        "❌ Безопасные бэкапы не найдены\n\n"
+                        "💡 Создайте бэкап: `/backup`\n\n"
+                        "🔒 Новые бэкапы безопасны (без сессий)"
+                    )
                     return
                 
-                # Проверяем что бэкап валидный
+                # Загружаем данные из бэкапа
                 with open(backup_file, 'r', encoding='utf-8') as f:
-                    test_data = json.load(f)
-                    if 'accounts' not in test_data:
-                        await event.respond(f"❌ Файл `{backup_file}` не содержит данных аккаунтов")
-                        return
+                    backup_data = json.load(f)
                 
-                # Создаём бэкап текущего состояния перед восстановлением
-                import shutil
-                if os.path.exists(DB_NAME):
-                    pre_restore_backup = f'{DB_NAME}.before_restore_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-                    shutil.copy2(DB_NAME, pre_restore_backup)
+                # Проверяем структуру
+                if 'channels' not in backup_data and 'templates' not in backup_data:
+                    await event.respond(f"❌ Файл `{backup_file}` не содержит данных")
+                    return
                 
-                # Восстанавливаем
-                shutil.copy2(backup_file, DB_NAME)
+                # Сохраняем текущее состояние для сравнения
+                old_channels = len(self.channels)
+                old_templates = len(self.templates)
                 
-                # Перезагружаем данные
-                old_accounts = len(self.accounts_data)
-                self.load_data()
-                new_accounts = len(self.accounts_data)
+                # ============= ЗАЩИТА: Восстанавливаем ТОЛЬКО данные, НЕ трогаем accounts! =============
+                # Восстанавливаем каналы
+                if 'channels' in backup_data:
+                    self.channels = backup_data['channels']
+                
+                # Восстанавливаем шаблоны
+                if 'templates' in backup_data:
+                    self.templates = backup_data['templates']
+                
+                # Восстанавливаем bio_links
+                if 'bio_links' in backup_data:
+                    self.bio_links = backup_data['bio_links']
+                
+                # Восстанавливаем admins
+                if 'admins' in backup_data:
+                    self.admins = backup_data['admins']
+                
+                # ВАЖНО: self.accounts_data НЕ трогаем - сессии остаются нетронутыми!
+                # ============= END ЗАЩИТА =============
+                
+                # Сохраняем изменения (включая нетронутые accounts)
+                self.save_data()
                 
                 await event.respond(
                     f"✅ **Данные восстановлены**\n\n"
-                    f"📁 Из файла: `{backup_file}`\n"
-                    f"👥 Аккаунтов: {old_accounts} → {new_accounts}\n"
-                    f"📊 Каналов: {len(self.channels)}\n"
-                    f"💬 Шаблонов: {len(self.templates)}\n\n"
-                    f"💾 Резервная копия до восстановления:\n"
-                    f"   `{pre_restore_backup}`\n\n"
-                    f"⚠️ **ВАЖНО:** Перезапустите бота для применения изменений:\n"
-                    f"   `/stopmon` затем `/startmon`"
+                    f"📁 Из файла: `{backup_file}`\n\n"
+                    f"📊 Каналов: {old_channels} → {len(self.channels)}\n"
+                    f"💬 Шаблонов: {old_templates} → {len(self.templates)}\n"
+                    f"🔗 Bio-ссылок: {len(self.bio_links)}\n"
+                    f"👑 Админов: {len(self.admins)}\n\n"
+                    f"🔒 **Сессии аккаунтов НЕ затронуты!**\n"
+                    f"👥 Все аккаунты ({len(self.accounts_data)}) остались авторизованы\n\n"
+                    f"✅ Можно сразу продолжать работу или `/startmon`"
                 )
-                logger.info(f"Data restored from {backup_file} by user {event.sender_id}")
+                logger.info(f"Safe restore from {backup_file} by user {event.sender_id} (SESSIONS PRESERVED)")
                 
             except json.JSONDecodeError as e:
                 await event.respond(f"❌ Файл бэкапа повреждён: {str(e)}")
@@ -3596,7 +3532,8 @@ class UltimateCommentBot:
                         text += f"\n⚡ Лимит: `{self.test_mode_speed_limit}` комм/час\n"
                     
                     text += "\n📝 **Использование:**\n"
-                    text += "`/testmode on @channel1 @channel2` - включить\n"
+                    text += "`/testmode on` - включить (дефолтные каналы)\n"
+                    text += "`/testmode on @channel1 @channel2` - включить (свои каналы)\n"
                     text += "`/testmode off` - выключить\n"
                     text += "`/testmode speed 5` - установить скорость\n"
                     
@@ -3606,63 +3543,87 @@ class UltimateCommentBot:
                 action = parts[1].lower()
                 
                 if action == 'on':
-                    # Enable test mode with specified channels
-                    if len(parts) < 3:
-                        await event.respond(
-                            "❌ Укажите каналы:\n"
-                            "`/testmode on @channel1 @channel2`"
-                        )
-                        return
+                    # Enable test mode
+                    # Дефолтные тестовые каналы (если не указаны свои)
+                    DEFAULT_TEST_CHANNELS = [
+                        '@AIGIRLSARTS',
+                        '@testertesti',
+                        '@testtestista',
+                        '@testingmana',
+                        '@chiptesterchip'
+                    ]
                     
-                    # Parse channels
-                    channels = []
-                    for part in parts[2:]:
-                        ch = part.strip()
-                        if not ch.startswith('@'):
-                            ch = '@' + ch
-                        channels.append(ch)
+                    # Если указаны каналы - используем их, иначе дефолтные
+                    if len(parts) >= 3:
+                        # Parse указанные каналы
+                        channels = []
+                        for part in parts[2:]:
+                            ch = part.strip()
+                            if not ch.startswith('@'):
+                                ch = '@' + ch
+                            channels.append(ch)
+                        self.test_channels = channels
+                    else:
+                        # Используем дефолтные
+                        self.test_channels = DEFAULT_TEST_CHANNELS
                     
                     self.test_mode = True
-                    self.test_channels = channels
                     
-                    text = """🧪 **ТЕСТОВЫЙ РЕЖИМ ВКЛЮЧЕН**
+                    # Определяем, используются ли дефолтные каналы
+                    is_default = (len(parts) < 3)
+                    
+                    text = """✅ **TEST MODE: ON**
 
-✅ Бот будет комментировать ТОЛЬКО:
+🎯 Комменты идут ТОЛЬКО в:
 """
                     for ch in self.test_channels:
                         text += f"  • `{ch}`\n"
                     
-                    text += f"\n⚡ Лимит скорости: `{self.test_mode_speed_limit}` комм/час на аккаунт\n"
-                    text += "\n⚠️ **Все остальные каналы игнорируются!**\n"
-                    text += "\n💡 Для выключения: `/testmode off`"
+                    if is_default:
+                        text += "\n📌 Используются дефолтные тестовые каналы\n"
+                        text += "💡 Для своих каналов: `/testmode on @channel1 @channel2`\n"
+                    else:
+                        text += f"\n✅ Указано {len(self.test_channels)} своих каналов\n"
+                    
+                    text += f"\n⚡ Лимит скорости: `{self.test_mode_speed_limit}` комм/час\n"
+                    text += "\n⚠️ **ВСЕ остальные каналы ИГНОРИРУЮТСЯ!**\n"
+                    text += "\n💡 Для выхода: `/testmode off`"
                     
                     await event.respond(text)
                     
                     # Log
-                    logger.info(f"🧪 TEST MODE ENABLED: {channels}")
+                    logger.info("="*80)
+                    logger.info("🧪 TEST MODE: ENABLED")
+                    logger.info(f"🧪 Test channels: {self.test_channels}")
                     logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour")
+                    logger.info("="*80)
                     
                 elif action == 'off':
                     # Disable test mode
                     was_enabled = self.test_mode
+                    old_channels = self.test_channels.copy() if self.test_channels else []
+                    
                     self.test_mode = False
-                    old_channels = self.test_channels.copy()
                     self.test_channels = []
                     
                     if was_enabled:
-                        text = """🔴 **ТЕСТОВЫЙ РЕЖИМ ВЫКЛЮЧЕН**
+                        text = """✅ **TEST MODE: OFF**
 
-✅ Бот вернулся к обычной работе со всеми каналами
+🎯 Возвращаемся к боевым каналам
 """
                         if old_channels:
                             text += "\n📢 Были в тесте:\n"
                             for ch in old_channels:
                                 text += f"  • `{ch}`\n"
                     else:
-                        text = "ℹ️ Тестовый режим уже был выключен"
+                        text = "ℹ️ TEST MODE уже был выключен"
                     
                     await event.respond(text)
-                    logger.info("🔴 TEST MODE DISABLED")
+                    
+                    logger.info("="*80)
+                    logger.info("🔴 TEST MODE: DISABLED")
+                    logger.info("✅ Switching to LIVE channels")
+                    logger.info("="*80)
                     
                 elif action == 'speed':
                     # Set test mode speed limit
@@ -3701,7 +3662,8 @@ class UltimateCommentBot:
                     await event.respond(
                         "❌ Неверная команда. Используйте:\n"
                         "`/testmode` - статус\n"
-                        "`/testmode on @channel1 @channel2` - включить\n"
+                        "`/testmode on` - включить (дефолтные каналы)\n"
+                        "`/testmode on @channel1 @channel2` - включить (свои каналы)\n"
                         "`/testmode off` - выключить\n"
                         "`/testmode speed 10` - установить скорость"
                     )
@@ -5924,24 +5886,23 @@ class UltimateCommentBot:
                             comment_success = True
                             self.register_message_sent(phone, username)
                             
-                            # Logging
+                            # Logging with MODE indicator
                             short_comment = comment[:50] if len(comment) > 50 else comment
                             current_time = datetime.now().strftime('%H:%M:%S')
                             commented_channels.append(f"@{username}")
                             
-                            if self.test_mode:
-                                logger.info(f"TEST MODE SUCCESS:")
-                                logger.info(f"   Channel: @{username}")
-                                logger.info(f"   Account: {account_name} ({phone})")
-                                logger.info(f"   Comment: {short_comment}...")
-                                logger.info(f"   Time: {current_time}")
-                                logger.info(f"   Post ID: {reply_id}")
-                            else:
-                                logger.info(f"COMMENT: account={phone} -> channel=@{username}, cycle={cycle_number}, step={step}")
-                                logger.info(f"   Success at {current_time}")
-                                logger.info(f"   Phone: {phone}")
-                                logger.info(f"   Comment: {short_comment}...")
-                                logger.info(f"   Post ID: {reply_id}")
+                            # КРИТИЧНО: Явный индикатор режима в логах
+                            mode_indicator = "🧪 mode=TEST" if self.test_mode else "🚀 mode=LIVE"
+                            
+                            logger.info("="*80)
+                            logger.info(f"{mode_indicator} | COMMENT SENT")
+                            logger.info(f"   Channel: @{username}")
+                            logger.info(f"   Account: {account_name} ({phone[-10:]})")
+                            logger.info(f"   Time: {current_time}")
+                            logger.info(f"   Comment: {short_comment}...")
+                            if reply_id:
+                                logger.info(f"   Reply to: post #{reply_id}")
+                            logger.info("="*80)
                             
                             await self.add_comment_stat(phone, True, channel=username)
                             
@@ -6072,13 +6033,14 @@ class UltimateCommentBot:
             return
         
         # ============= TEST MODE: Filter channels =============
-        channels_to_use = self.channels
-        logger.info(f"🔍 Checking TEST MODE: enabled={self.test_mode}")
-        
         if self.test_mode and self.test_channels:
-            logger.info(f"🧪 TEST MODE IS ACTIVE!")
-            logger.info(f"🧪 Test channels defined: {self.test_channels}")
-            logger.info(f"🧪 Filtering from {len(self.channels)} total channels...")
+            # ТЕСТОВЫЙ РЕЖИМ АКТИВЕН
+            logger.info("="*80)
+            logger.info("🧪 MODE: TEST")
+            logger.info("="*80)
+            logger.info(f"🎯 Test channels: {self.test_channels}")
+            logger.info(f"📊 Total channels in system: {len(self.channels)}")
+            logger.info("🔍 Filtering channels...")
             
             # Нормализуем test_channels (добавляем @ если нет)
             normalized_test_channels = []
@@ -6088,9 +6050,7 @@ class UltimateCommentBot:
                 else:
                     normalized_test_channels.append(tc)
             
-            logger.info(f"🧪 Normalized test channels: {normalized_test_channels}")
-            
-            # В тестовом режиме используем только тестовые каналы
+            # В тестовом режиме используем ТОЛЬКО тестовые каналы
             channels_to_use = []
             for ch in self.channels:
                 ch_username = ch.get('username') if isinstance(ch, dict) else ch
@@ -6098,30 +6058,31 @@ class UltimateCommentBot:
                 if not ch_username.startswith('@'):
                     ch_username = '@' + ch_username
                 
-                logger.info(f"   Checking channel: {ch_username}")
-                
                 # Сравниваем case-insensitive
                 if ch_username.lower() in [tc.lower() for tc in normalized_test_channels]:
                     channels_to_use.append(ch)
-                    logger.info(f"   ✅ MATCH: {ch_username}")
-                else:
-                    logger.debug(f"   ❌ SKIP: {ch_username}")
+                    logger.info(f"   ✅ TEST channel: {ch_username}")
             
             if not channels_to_use:
-                logger.error(f"🧪 ❌ TEST MODE: None of test channels found!")
-                logger.error(f"🧪 Looking for: {normalized_test_channels}")
-                logger.error(f"🧪 Available channels: {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:20]]}")
-                logger.error("💡 Check that test channel usernames match (case-insensitive)")
-                logger.error("💡 Use /listchannels to see all available channels")
-                logger.error("💡 Use /addchannel to add missing test channels")
+                logger.error("="*80)
+                logger.error("🧪 ❌ ERROR: NO TEST CHANNELS FOUND!")
+                logger.error(f"🔍 Looking for: {normalized_test_channels}")
+                logger.error(f"📋 Available: {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:10]]}")
+                logger.error("💡 Use /addchannel to add test channels")
+                logger.error("="*80)
                 return
             
-            logger.info(f"🧪 TEST MODE ACTIVE: Using {len(channels_to_use)} test channels out of {len(self.channels)} total")
-            logger.info(f"🧪 Filtered channels: {[ch.get('username') if isinstance(ch, dict) else ch for ch in channels_to_use]}")
-            logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour per account")
-            logger.warning("🧪 ⚠️ ALL OTHER CHANNELS WILL BE IGNORED!")
+            logger.info(f"✅ Will use {len(channels_to_use)} TEST channels")
+            logger.info("⚠️  ALL other channels are IGNORED in TEST MODE")
+            logger.info("="*80)
         else:
-            logger.info(f"ℹ️ NORMAL MODE: Using all {len(self.channels)} channels")
+            # БОЕВОЙ РЕЖИМ
+            logger.info("="*80)
+            logger.info("🚀 MODE: LIVE")
+            logger.info("="*80)
+            logger.info(f"📊 Using all {len(self.channels)} channels")
+            logger.info("="*80)
+            channels_to_use = self.channels
         # ============= END TEST MODE =============
         
         # Use configured max parallel accounts
