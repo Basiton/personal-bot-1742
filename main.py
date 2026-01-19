@@ -531,6 +531,10 @@ class UltimateCommentBot:
             logger.error(f"Database init error: {e}")
     
     def load_data(self):
+        """
+        Загружает данные с защитой от повреждения.
+        Если основной файл повреждён, пытается восстановить из бэкапа.
+        """
         try:
             with open(DB_NAME, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -539,10 +543,109 @@ class UltimateCommentBot:
                 self.templates = data.get('templates', self.templates)
                 self.bio_links = data.get('bio_links', [])
                 self.admins = data.get('admins', [])
-        except:
+                logger.info(f"✅ Loaded {len(self.accounts_data)} accounts from {DB_NAME}")
+        except FileNotFoundError:
+            logger.warning(f"⚠️ {DB_NAME} not found, creating new")
+            self.save_data()
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ {DB_NAME} corrupted: {e}")
+            # Пытаемся восстановить из бэкапа
+            if self.restore_from_backup():
+                logger.info("✅ Successfully restored from backup")
+            else:
+                logger.error("❌ Failed to restore from backup, creating new file")
+                self.save_data()
+        except Exception as e:
+            logger.error(f"❌ Error loading data: {e}")
             self.save_data()
     
+    def restore_from_backup(self):
+        """
+        Восстанавливает bot_data.json из резервной копии.
+        Возвращает True если восстановление успешно.
+        """
+        import shutil
+        
+        # Список файлов для попытки восстановления (в порядке приоритета)
+        backup_candidates = [
+            f'{DB_NAME}.bak',  # Последний .bak файл
+        ]
+        
+        # Добавляем timestamped бэкапы
+        try:
+            backup_files = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
+            backup_candidates.extend(backup_files[:3])  # Последние 3 timestamped бэкапа
+        except:
+            pass
+        
+        for backup_file in backup_candidates:
+            if not os.path.exists(backup_file):
+                continue
+            
+            try:
+                logger.info(f"🔄 Attempting restore from {backup_file}")
+                # Проверяем что бэкап валидный
+                with open(backup_file, 'r', encoding='utf-8') as f:
+                    test_data = json.load(f)
+                    if 'accounts' not in test_data:
+                        logger.warning(f"⚠️ {backup_file} is not valid (no accounts key)")
+                        continue
+                
+                # Бэкап валидный, восстанавливаем
+                shutil.copy2(backup_file, DB_NAME)
+                
+                # Перезагружаем данные
+                with open(DB_NAME, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.accounts_data = data.get('accounts', {})
+                    self.channels = data.get('channels', [])
+                    self.templates = data.get('templates', self.templates)
+                    self.bio_links = data.get('bio_links', [])
+                    self.admins = data.get('admins', [])
+                
+                logger.info(f"✅ Successfully restored {len(self.accounts_data)} accounts from {backup_file}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Failed to restore from {backup_file}: {e}")
+                continue
+        
+        logger.error("❌ No valid backup found")
+        return False
+    
     def save_data(self):
+        """
+        Сохраняет данные с автоматическим резервным копированием.
+        КРИТИЧНО: Всегда создаёт бэкап перед сохранением для защиты сессий.
+        """
+        # ============= ЗАЩИТА СЕССИЙ: Автоматический бэкап =============
+        # Создаём резервную копию ПЕРЕД сохранением
+        if os.path.exists(DB_NAME):
+            try:
+                import shutil
+                from datetime import datetime
+                
+                # Создаём timestamped backup
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_name = f'{DB_NAME}.backup_{timestamp}'
+                shutil.copy2(DB_NAME, backup_name)
+                
+                # Также создаём .bak для быстрого восстановления
+                shutil.copy2(DB_NAME, f'{DB_NAME}.bak')
+                
+                # Очищаем старые бэкапы (храним последние 5)
+                backup_files = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
+                for old_backup in backup_files[5:]:
+                    try:
+                        os.remove(old_backup)
+                    except:
+                        pass
+                
+                logger.debug(f"Session backup created: {backup_name}")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to create backup: {e}")
+        # ============= END ЗАЩИТА СЕССИЙ =============
+        
         data = {
             'accounts': self.accounts_data,
             'channels': self.channels,
@@ -550,8 +653,26 @@ class UltimateCommentBot:
             'bio_links': self.bio_links,
             'admins': self.admins
         }
-        with open(DB_NAME, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        
+        # Сохраняем во временный файл сначала
+        temp_file = f'{DB_NAME}.tmp'
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            # Только после успешной записи перезаписываем основной файл
+            import shutil
+            shutil.move(temp_file, DB_NAME)
+            logger.debug("Data saved successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to save data: {e}")
+            # Удаляем временный файл при ошибке
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+            raise
     
     def load_stats(self):
         try:
@@ -1613,8 +1734,190 @@ class UltimateCommentBot:
 `/setbioall` - применить всем активным
 
 **👑 АДМИНЫ:**
-`/addadmin 123456789` - новый админ"""
+`/addadmin 123456789` - новый админ
+
+**💾 ЗАЩИТА СЕССИЙ:**
+`/backup` - создать резервную копию сейчас
+`/listbackups` - список всех бэкапов
+`/restore` - восстановить из последнего бэкапа"""
             await event.respond(text)
+        
+        # ============= SESSION PROTECTION COMMANDS =============
+        @self.bot_client.on(events.NewMessage(pattern='/backup'))
+        async def manual_backup(event):
+            """Создаёт резервную копию bot_data.json вручную"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                import shutil
+                from datetime import datetime
+                
+                if not os.path.exists(DB_NAME):
+                    await event.respond("❌ Файл bot_data.json не найден")
+                    return
+                
+                # Создаём timestamped backup
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_name = f'{DB_NAME}.manual_backup_{timestamp}'
+                shutil.copy2(DB_NAME, backup_name)
+                
+                # Также обновляем .bak
+                shutil.copy2(DB_NAME, f'{DB_NAME}.bak')
+                
+                # Подсчитываем количество аккаунтов
+                accounts_count = len(self.accounts_data)
+                
+                await event.respond(
+                    f"✅ **Резервная копия создана**\n\n"
+                    f"📁 Файл: `{backup_name}`\n"
+                    f"👥 Аккаунтов сохранено: {accounts_count}\n"
+                    f"📊 Каналов: {len(self.channels)}\n"
+                    f"💬 Шаблонов: {len(self.templates)}\n\n"
+                    f"💡 Используйте `/listbackups` для просмотра всех бэкапов"
+                )
+                logger.info(f"Manual backup created by user {event.sender_id}: {backup_name}")
+                
+            except Exception as e:
+                await event.respond(f"❌ Ошибка создания бэкапа: {str(e)}")
+                logger.error(f"Manual backup error: {e}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/listbackups'))
+        async def list_backups(event):
+            """Показывает список всех доступных бэкапов"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                # Ищем все файлы бэкапов
+                backup_files = []
+                
+                # Автоматические бэкапы
+                auto_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
+                
+                # Ручные бэкапы
+                manual_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.manual_backup_')], reverse=True)
+                
+                # .bak файл
+                bak_file = f'{DB_NAME}.bak' if os.path.exists(f'{DB_NAME}.bak') else None
+                
+                if not auto_backups and not manual_backups and not bak_file:
+                    await event.respond("❌ Бэкапы не найдены")
+                    return
+                
+                text = "💾 **РЕЗЕРВНЫЕ КОПИИ**\n\n"
+                
+                if bak_file:
+                    file_size = os.path.getsize(bak_file) / 1024  # KB
+                    file_time = datetime.fromtimestamp(os.path.getmtime(bak_file))
+                    text += f"📌 **Последний бэкап (.bak):**\n"
+                    text += f"   `{bak_file}`\n"
+                    text += f"   📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    text += f"   💾 {file_size:.1f} KB\n\n"
+                
+                if manual_backups:
+                    text += f"🖐️ **Ручные бэкапы ({len(manual_backups)}):**\n"
+                    for backup in manual_backups[:5]:  # Показываем последние 5
+                        file_size = os.path.getsize(backup) / 1024
+                        file_time = datetime.fromtimestamp(os.path.getmtime(backup))
+                        text += f"• `{backup[-24:]}`\n"  # Только дата из имени
+                        text += f"  📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        text += f"  💾 {file_size:.1f} KB\n"
+                    if len(manual_backups) > 5:
+                        text += f"\n... и ещё {len(manual_backups) - 5} бэкапов\n"
+                    text += "\n"
+                
+                if auto_backups:
+                    text += f"🤖 **Автоматические бэкапы ({len(auto_backups)}):**\n"
+                    for backup in auto_backups[:5]:  # Показываем последние 5
+                        file_size = os.path.getsize(backup) / 1024
+                        file_time = datetime.fromtimestamp(os.path.getmtime(backup))
+                        text += f"• `{backup[-24:]}`\n"
+                        text += f"  📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        text += f"  💾 {file_size:.1f} KB\n"
+                    if len(auto_backups) > 5:
+                        text += f"\n... и ещё {len(auto_backups) - 5} бэкапов\n"
+                    text += "\n"
+                
+                text += "💡 **Команды:**\n"
+                text += "`/restore` - восстановить из последнего бэкапа\n"
+                text += "`/backup` - создать новый бэкап вручную"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                await event.respond(f"❌ Ошибка: {str(e)}")
+                logger.error(f"List backups error: {e}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/restore'))
+        async def restore_backup(event):
+            """Восстанавливает данные из последнего бэкапа"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                # Находим последний валидный бэкап
+                backup_file = None
+                
+                # Проверяем .bak файл
+                if os.path.exists(f'{DB_NAME}.bak'):
+                    backup_file = f'{DB_NAME}.bak'
+                
+                # Проверяем ручные бэкапы
+                if not backup_file:
+                    manual_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.manual_backup_')], reverse=True)
+                    if manual_backups:
+                        backup_file = manual_backups[0]
+                
+                # Проверяем автоматические бэкапы
+                if not backup_file:
+                    auto_backups = sorted([f for f in os.listdir('.') if f.startswith(f'{DB_NAME}.backup_')], reverse=True)
+                    if auto_backups:
+                        backup_file = auto_backups[0]
+                
+                if not backup_file:
+                    await event.respond("❌ Бэкапы не найдены")
+                    return
+                
+                # Проверяем что бэкап валидный
+                with open(backup_file, 'r', encoding='utf-8') as f:
+                    test_data = json.load(f)
+                    if 'accounts' not in test_data:
+                        await event.respond(f"❌ Файл `{backup_file}` не содержит данных аккаунтов")
+                        return
+                
+                # Создаём бэкап текущего состояния перед восстановлением
+                import shutil
+                if os.path.exists(DB_NAME):
+                    pre_restore_backup = f'{DB_NAME}.before_restore_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+                    shutil.copy2(DB_NAME, pre_restore_backup)
+                
+                # Восстанавливаем
+                shutil.copy2(backup_file, DB_NAME)
+                
+                # Перезагружаем данные
+                old_accounts = len(self.accounts_data)
+                self.load_data()
+                new_accounts = len(self.accounts_data)
+                
+                await event.respond(
+                    f"✅ **Данные восстановлены**\n\n"
+                    f"📁 Из файла: `{backup_file}`\n"
+                    f"👥 Аккаунтов: {old_accounts} → {new_accounts}\n"
+                    f"📊 Каналов: {len(self.channels)}\n"
+                    f"💬 Шаблонов: {len(self.templates)}\n\n"
+                    f"💾 Резервная копия до восстановления:\n"
+                    f"   `{pre_restore_backup}`\n\n"
+                    f"⚠️ **ВАЖНО:** Перезапустите бота для применения изменений:\n"
+                    f"   `/stopmon` затем `/startmon`"
+                )
+                logger.info(f"Data restored from {backup_file} by user {event.sender_id}")
+                
+            except json.JSONDecodeError as e:
+                await event.respond(f"❌ Файл бэкапа повреждён: {str(e)}")
+                logger.error(f"Backup restore JSON error: {e}")
+            except Exception as e:
+                await event.respond(f"❌ Ошибка восстановления: {str(e)}")
+                logger.error(f"Backup restore error: {e}")
+        
+        # ============= END SESSION PROTECTION COMMANDS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/auth'))
         async def auth_account(event):
@@ -1816,17 +2119,78 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/delaccount'))
         async def del_account(event):
+            """
+            Удаляет аккаунт с подтверждением для защиты от случайного удаления сессий.
+            КРИТИЧНО: Требует явного подтверждения 'CONFIRM' для безопасности.
+            """
             if not await self.is_admin(event.sender_id): return
             try:
-                phone = event.text.split(maxsplit=1)[1]
+                parts = event.text.split(maxsplit=2)
+                if len(parts) < 2:
+                    await event.respond(
+                        "**❌ Неверный формат**\n\n"
+                        "**Использование:**\n"
+                        "`/delaccount +79123456789 CONFIRM`\n\n"
+                        "⚠️ **ВНИМАНИЕ:** Эта команда УДАЛИТ аккаунт и его сессию!\n"
+                        "Потребуется заново авторизоваться через `/auth`\n\n"
+                        "💡 Для отключения аккаунта без удаления используйте:\n"
+                        "`/toggleaccount +79123456789`"
+                    )
+                    return
+                
+                phone = parts[1]
+                
+                # Требуем явного подтверждения
+                if len(parts) < 3 or parts[2].upper() != 'CONFIRM':
+                    if phone in self.accounts_data:
+                        account_name = self.accounts_data[phone].get('name', phone)
+                        await event.respond(
+                            f"⚠️ **ПОДТВЕРДИТЕ УДАЛЕНИЕ**\n\n"
+                            f"Аккаунт: `{account_name}`\n"
+                            f"Телефон: `{phone}`\n\n"
+                            f"**Будет удалено:**\n"
+                            f"• Сессия аккаунта (потребуется переавторизация)\n"
+                            f"• Все настройки и статистика\n\n"
+                            f"**Для подтверждения отправьте:**\n"
+                            f"`/delaccount {phone} CONFIRM`\n\n"
+                            f"💡 **Альтернатива:** Используйте `/toggleaccount {phone}` чтобы просто отключить аккаунт"
+                        )
+                    else:
+                        await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Удаляем только после подтверждения
                 if phone in self.accounts_data:
+                    account_name = self.accounts_data[phone].get('name', phone)
+                    
+                    # ============= ЗАЩИТА: Создаём бэкап перед удалением =============
+                    import shutil
+                    from datetime import datetime
+                    backup_name = f'bot_data.json.before_delete_{phone.replace("+", "")}_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+                    shutil.copy2(DB_NAME, backup_name)
+                    logger.warning(f"🔴 DELETING ACCOUNT: {phone} ({account_name}) by user {event.sender_id}, backup: {backup_name}")
+                    # ============= END ЗАЩИТА =============
+                    
                     del self.accounts_data[phone]
                     self.save_data()
-                    await event.respond(f"Удален: `{phone}`")
+                    
+                    await event.respond(
+                        f"✅ **Аккаунт удалён**\n\n"
+                        f"Имя: `{account_name}`\n"
+                        f"Телефон: `{phone}`\n\n"
+                        f"💾 Резервная копия создана:\n"
+                        f"`{backup_name}`\n\n"
+                        f"⚠️ Для восстановления используйте `/restore`"
+                    )
                 else:
-                    await event.respond("Аккаунт не найден")
-            except:
-                await event.respond("Формат: `/delaccount +79123456789`")
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+            except Exception as e:
+                logger.error(f"Error in /delaccount: {e}")
+                await event.respond(
+                    f"❌ Ошибка: `{str(e)[:100]}`\n\n"
+                    "**Формат:**\n"
+                    "`/delaccount +79123456789 CONFIRM`"
+                )
         
         @self.bot_client.on(events.NewMessage(pattern='/toggleaccount'))
         async def toggle_account(event):
