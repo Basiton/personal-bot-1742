@@ -327,6 +327,30 @@ class UltimateCommentBot:
         # Worker tracking for automatic recovery
         self.active_worker_tasks = []  # Список активных воркеров
         self.worker_recovery_enabled = True  # Автоматическое восстановление воркеров
+        
+        # Отслеживание активности аккаунтов: {phone: {'messages': [(timestamp1, channel1), ...], 'status': 'active/reserve/broken'}}
+        self.account_activity = {}
+        
+        # Отслеживание последних комментариев в чатах: {channel_username: {'phone': phone, 'timestamp': timestamp}}
+        self.last_comment_per_channel = {}
+        
+        # Время последней ротации
+        self.last_rotation_time = None
+        
+        # Индекс для циклической ротации
+        self.rotation_index = 0
+        
+        # ============= TEST MODE =============
+        self.test_mode = False  # Флаг тестового режима
+        self.test_channels = []  # Список тестовых каналов
+        self.test_mode_speed_limit = 10  # Лимит в тестовом режиме (комм/час на аккаунт)
+        # ============= END TEST MODE =============
+        # ============= END NEW =============
+        
+        self.init_database()
+        self.load_stats()
+        self.load_data()
+        self.init_account_statuses()  # Инициализация статусов аккаунтов
     
     async def can_do_profile_operation(self, phone, operation_type):
         """
@@ -392,31 +416,6 @@ class UltimateCommentBot:
         
         logger.warning("PROFILE: No working accounts available!")
         return None
-        
-        
-        # Отслеживание активности аккаунтов: {phone: {'messages': [(timestamp1, channel1), ...], 'status': 'active/reserve/broken'}}
-        self.account_activity = {}
-        
-        # Отслеживание последних комментариев в чатах: {channel_username: {'phone': phone, 'timestamp': timestamp}}
-        self.last_comment_per_channel = {}
-        
-        # Время последней ротации
-        self.last_rotation_time = None
-        
-        # Индекс для циклической ротации
-        self.rotation_index = 0
-        
-        # ============= TEST MODE =============
-        self.test_mode = False  # Флаг тестового режима
-        self.test_channels = []  # Список тестовых каналов
-        self.test_mode_speed_limit = 10  # Лимит в тестовом режиме (комм/час на аккаунт)
-        # ============= END TEST MODE =============
-        # ============= END NEW =============
-        
-        self.init_database()
-        self.load_stats()
-        self.load_data()
-        self.init_account_statuses()  # Инициализация статусов аккаунтов
     
     def init_database(self):
         """Initialize SQLite database with required tables"""
@@ -549,7 +548,6 @@ class UltimateCommentBot:
         except json.JSONDecodeError as e:
             logger.error(f"❌ {DB_NAME} corrupted: {e}")
             logger.error("❌ Use /restore to restore from safe backup (data only, not sessions)")
-            # Не пытаемся автоматически восстанавливать - может быть опасно
             self.save_data()
         except Exception as e:
             logger.error(f"❌ Error loading data: {e}")
@@ -603,19 +601,96 @@ class UltimateCommentBot:
         with open('stats.json', 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
     
+    async def verify_account_auth(self, phone, session_string, proxy=None, timeout=10):
+        """
+        Проверяет валидность сессии аккаунта без полной переавторизации.
+        
+        Args:
+            phone: Номер телефона
+            session_string: Строка сессии из bot_data.json
+            proxy: Прокси (опционально)
+            timeout: Таймаут подключения
+        
+        Returns:
+            dict: {'authorized': bool, 'name': str, 'username': str} или None при ошибке
+        """
+        if not session_string or session_string.strip() == '':
+            logger.warning(f"❌ {phone}: пустая сессия")
+            return {'authorized': False, 'name': None, 'username': None, 'error': 'empty_session'}
+        
+        try:
+            client = TelegramClient(StringSession(session_string), API_ID, API_HASH, proxy=proxy)
+            await asyncio.wait_for(client.connect(), timeout=timeout)
+            
+            if await client.is_user_authorized():
+                try:
+                    me = await asyncio.wait_for(client.get_me(), timeout=timeout)
+                    result = {
+                        'authorized': True,
+                        'name': me.first_name or 'Без имени',
+                        'username': getattr(me, 'username', None)
+                    }
+                    logger.info(f"✅ {phone}: авторизован как {result['name']}")
+                    await client.disconnect()
+                    return result
+                except Exception as e:
+                    logger.error(f"❌ {phone}: ошибка get_me: {e}")
+                    await client.disconnect()
+                    return {'authorized': False, 'name': None, 'username': None, 'error': str(e)}
+            else:
+                logger.warning(f"❌ {phone}: сессия невалидна (not authorized)")
+                await client.disconnect()
+                return {'authorized': False, 'name': None, 'username': None, 'error': 'not_authorized'}
+                
+        except asyncio.TimeoutError:
+            logger.error(f"❌ {phone}: таймаут подключения ({timeout}s)")
+            try:
+                await client.disconnect()
+            except:
+                pass
+            return {'authorized': False, 'name': None, 'username': None, 'error': 'timeout'}
+        except Exception as e:
+            logger.error(f"❌ {phone}: ошибка проверки авторизации: {e}")
+            try:
+                await client.disconnect()
+            except:
+                pass
+            return {'authorized': False, 'name': None, 'username': None, 'error': str(e)}
+    
     def init_account_statuses(self):
-        """Инициализация статусов аккаунтов при запуске"""
+        """Инициализация статусов аккаунтов при запуске (синхронная часть)"""
         # Проверяем и устанавливаем статусы для всех аккаунтов
         active_count = 0
+        migrated_count = 0
+        
         for phone, data in self.accounts_data.items():
+            # Нормализация телефона (добавляем + если отсутствует)
+            if not phone.startswith('+'):
+                logger.info(f"🔧 Нормализация номера: {phone} → +{phone}")
+                # Создаём новую запись с правильным номером
+                new_phone = f"+{phone}"
+                if new_phone not in self.accounts_data:
+                    self.accounts_data[new_phone] = data
+                    data['phone'] = new_phone
+            
             # Если у аккаунта нет статуса, присваиваем его
             if 'status' not in data:
-                # Если у аккаунта есть старое поле 'active', используем его
-                if data.get('active', False) and active_count < self.max_parallel_accounts:
-                    data['status'] = ACCOUNT_STATUS_ACTIVE
-                    active_count += 1
-                else:
+                # МИГРАЦИЯ из старого формата (active: True/False)
+                old_active = data.get('active', False)
+                
+                if old_active and data.get('session') and active_count < self.max_parallel_accounts:
+                    # Если был active=True и есть сессия, делаем reserve (безопасно)
+                    # Пользователь сам активирует через /toggleaccount если нужно
                     data['status'] = ACCOUNT_STATUS_RESERVE
+                    migrated_count += 1
+                    logger.info(f"🔄 Миграция {data.get('name', phone)}: active=True → status=reserve")
+                elif data.get('session'):
+                    data['status'] = ACCOUNT_STATUS_RESERVE
+                    migrated_count += 1
+                else:
+                    data['status'] = ACCOUNT_STATUS_BROKEN
+                    logger.warning(f"⚠️ {phone}: нет сессии, помечен как broken")
+                
                 # Удаляем старое поле 'active' если оно есть
                 if 'active' in data:
                     del data['active']
@@ -623,6 +698,13 @@ class UltimateCommentBot:
                 active_count += 1
             
             # Инициализируем структуру отслеживания активности
+            if phone not in self.account_activity:
+                self.account_activity[phone] = {
+                    'messages': [],  # [(timestamp, channel), ...]
+                    'status': data.get('status', ACCOUNT_STATUS_RESERVE)
+                }
+        
+        # Если активных аккаунтов больше чем max_parallel_accounts, переводим лишние в резерв
             if phone not in self.account_activity:
                 self.account_activity[phone] = {
                     'messages': [],  # [(timestamp, channel), ...]
@@ -655,7 +737,84 @@ class UltimateCommentBot:
                     needed -= 1
         
         self.save_data()
+        
+        if migrated_count > 0:
+            logger.info(f"✅ Миграция завершена: {migrated_count} аккаунтов переведены в новый формат")
+        
         logger.info(f"✅ Account statuses initialized: {self.get_status_counts()}")
+        logger.info("💡 Используйте /verify_sessions для проверки авторизации")
+        logger.info("💡 Используйте /toggleaccount +номер для активации аккаунтов")
+    
+    async def verify_all_accounts(self):
+        """
+        Асинхронная проверка авторизации всех аккаунтов после запуска бота.
+        Вызывается автоматически из start() для валидации сессий.
+        """
+        logger.info("🔍 Начинается проверка авторизации всех аккаунтов...")
+        
+        if not self.accounts_data:
+            logger.warning("⚠️ Нет аккаунтов для проверки")
+            return
+        
+        verified_count = 0
+        failed_count = 0
+        broken_count = 0
+        
+        for phone, data in self.accounts_data.items():
+            session_str = data.get('session', '')
+            
+            if not session_str or session_str.strip() == '':
+                logger.warning(f"⚠️ {phone}: пустая сессия, помечаю как broken")
+                self.set_account_status(phone, ACCOUNT_STATUS_BROKEN, "пустая сессия")
+                broken_count += 1
+                continue
+            
+            # Проверяем авторизацию
+            result = await self.verify_account_auth(phone, session_str, data.get('proxy'))
+            
+            if result and result.get('authorized'):
+                # Обновляем данные аккаунта
+                if result.get('name'):
+                    data['name'] = result['name']
+                if result.get('username') is not None:
+                    data['username'] = result['username']
+                
+                # Если был broken, переводим в reserve
+                if data.get('status') == ACCOUNT_STATUS_BROKEN:
+                    self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "восстановлен")
+                    logger.info(f"✅ {phone}: восстановлен (был broken)")
+                
+                verified_count += 1
+                logger.info(f"✅ {phone}: авторизован ({verified_count}/{len(self.accounts_data)})")
+            else:
+                # Сессия невалидна
+                error = result.get('error', 'unknown') if result else 'unknown'
+                logger.error(f"❌ {phone}: невалидная сессия ({error})")
+                
+                # Помечаем как broken только если ещё не помечен
+                if data.get('status') != ACCOUNT_STATUS_BROKEN:
+                    self.set_account_status(phone, ACCOUNT_STATUS_BROKEN, f"невалидная сессия: {error}")
+                
+                failed_count += 1
+            
+            # Небольшая задержка между проверками
+            await asyncio.sleep(1)
+        
+        # Сохраняем обновлённые данные
+        self.save_data()
+        
+        # Итоговый отчёт
+        logger.info(f"✅ Проверка завершена: {verified_count} OK, {failed_count} невалидных, {broken_count} без сессии")
+        
+        if failed_count > 0:
+            logger.warning(f"⚠️ {failed_count} аккаунтов требуют переавторизации (/auth)")
+        
+        return {
+            'verified': verified_count,
+            'failed': failed_count,
+            'broken': broken_count,
+            'total': len(self.accounts_data)
+        }
     
     def get_status_counts(self):
         """Получить количество аккаунтов по статусам"""
@@ -1903,6 +2062,13 @@ class UltimateCommentBot:
         await self.bot_client.start(bot_token=BOT_TOKEN)
         self.setup_handlers()
         logger.info("@comapc_bot ULTIMATE ЗАПУЩЕН!")
+        
+        # НЕ запускаем автоматическую проверку при старте (слишком агрессивно)
+        # Используйте /verify_sessions для ручной проверки
+        if self.accounts_data:
+            logger.info(f"✅ Загружено {len(self.accounts_data)} аккаунтов. Используйте /verify_sessions для проверки авторизации.")
+        else:
+            logger.warning("⚠️ Нет аккаунтов для проверки. Используйте /auth для добавления.")
     
     def setup_handlers(self):
         @self.bot_client.on(events.NewMessage(pattern='/start'))
@@ -1930,6 +2096,7 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             text = """**📱 АККАУНТЫ:**
 `/auth +79123456789 [socks5:host:port:user:pass]` - авторизовать
+`/verify_sessions` - проверить авторизацию всех аккаунтов 🆕
 `/accounts` - управление профилями (аватар, имя, био) 🆕
 `/listaccounts` - все аккаунты (🟢 active / 🔵 reserve / 🔴 broken)
 `/activeaccounts` - только активные ✅
@@ -2528,6 +2695,45 @@ class UltimateCommentBot:
                     "🔵 RESERVE → ✅ ACTIVE\n"
                     "🔴 BROKEN → 🔵 RESERVE"
                 )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/verify_sessions'))
+        async def verify_sessions_handler(event):
+            """Ручная проверка авторизации всех аккаунтов"""
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.accounts_data:
+                await event.respond("❌ Нет аккаунтов для проверки")
+                return
+            
+            msg = await event.respond(f"🔍 Начинаю проверку {len(self.accounts_data)} аккаунтов...\nЭто может занять ~{len(self.accounts_data)} секунд")
+            
+            # Запускаем проверку
+            result = await self.verify_all_accounts()
+            
+            # Формируем отчёт
+            verified = result['verified']
+            failed = result['failed']
+            broken = result['broken']
+            total = result['total']
+            
+            status_text = f"""✅ **ПРОВЕРКА ЗАВЕРШЕНА**
+
+📊 **Результаты:**
+✅ Авторизованы: `{verified}`
+❌ Невалидные сессии: `{failed}`
+⚠️ Без сессий: `{broken}`
+📱 Всего: `{total}`
+
+📈 **Текущие статусы:**
+{self.get_status_counts()}"""
+            
+            if failed > 0:
+                status_text += f"\n\n⚠️ **{failed} аккаунтов требуют переавторизации**\nИспользуйте `/auth +номер` для каждого"
+            
+            if verified == total:
+                status_text += "\n\n🎉 **Все аккаунты авторизованы!**"
+            
+            await event.respond(status_text)
         
         @self.bot_client.on(events.NewMessage(pattern='/activeaccounts'))
         async def active_accounts(event):
