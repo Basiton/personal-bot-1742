@@ -1549,6 +1549,356 @@ class UltimateCommentBot:
     
     # ============= END PROFILE MANAGEMENT FUNCTIONS =============
     
+    # ============= PROFILE CHANNEL FUNCTIONS =============
+    
+    async def create_profile_channel(self, phone, title, about=''):
+        """
+        Создать новый канал от имени аккаунта.
+        
+        Returns: (success: bool, result: dict/str)
+            result может быть dict с информацией о канале или строкой с ошибкой
+        """
+        try:
+            account_data = self.accounts_data.get(phone)
+            if not account_data:
+                return False, f"❌ Аккаунт {phone} не найден"
+            
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
+            # Создаём канал через MTProto
+            from telethon.tl.functions.channels import CreateChannelRequest
+            from telethon.tl.types import Channel
+            
+            result = await client(CreateChannelRequest(
+                title=title,
+                about=about,
+                broadcast=True,  # broadcast channel (not megagroup)
+                megagroup=False
+            ))
+            
+            # Получаем информацию о созданном канале
+            created_channel = result.chats[0]
+            
+            if not isinstance(created_channel, Channel):
+                await client.disconnect()
+                return False, "❌ Не удалось создать канал"
+            
+            # Получаем username канала (может быть None)
+            channel_username = getattr(created_channel, 'username', None)
+            channel_id = created_channel.id
+            
+            channel_info = {
+                'id': channel_id,
+                'title': title,
+                'username': f"@{channel_username}" if channel_username else None,
+                'about': about,
+                'created': datetime.now().isoformat()
+            }
+            
+            # Сохраняем в аккаунте
+            account_data['profile_channel'] = channel_info
+            self.save_data()
+            
+            await client.disconnect()
+            
+            logger.info(f"✅ Profile channel created for {phone}: {channel_info}")
+            return True, channel_info
+            
+        except Exception as e:
+            logger.error(f"Error creating profile channel for {phone}: {e}")
+            return False, f"❌ Ошибка: {str(e)}"
+    
+    async def link_existing_channel(self, phone, channel_identifier):
+        """
+        Привязать существующий канал к профилю аккаунта.
+        Проверяет, что аккаунт является админом канала.
+        
+        channel_identifier: @username или ID канала
+        
+        Returns: (success: bool, result: dict/str)
+        """
+        try:
+            account_data = self.accounts_data.get(phone)
+            if not account_data:
+                return False, f"❌ Аккаунт {phone} не найден"
+            
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
+            # Получаем информацию о канале
+            from telethon.tl.types import Channel
+            
+            try:
+                entity = await client.get_entity(channel_identifier)
+            except Exception as e:
+                await client.disconnect()
+                return False, f"❌ Канал не найден: {str(e)}"
+            
+            if not isinstance(entity, Channel):
+                await client.disconnect()
+                return False, f"❌ {channel_identifier} не является каналом"
+            
+            # Проверяем права админа
+            from telethon.tl.functions.channels import GetParticipantRequest
+            from telethon.tl.types import ChannelParticipantCreator, ChannelParticipantAdmin
+            
+            try:
+                me = await client.get_me()
+                participant = await client(GetParticipantRequest(
+                    channel=entity,
+                    participant=me
+                ))
+                
+                # Проверяем, что пользователь - создатель или админ
+                is_admin = isinstance(participant.participant, (ChannelParticipantCreator, ChannelParticipantAdmin))
+                
+                if not is_admin:
+                    await client.disconnect()
+                    return False, f"❌ Вы не являетесь админом канала {channel_identifier}"
+                    
+            except Exception as e:
+                await client.disconnect()
+                return False, f"❌ Не удалось проверить права: {str(e)}"
+            
+            # Получаем полную информацию о канале
+            from telethon.tl.functions.channels import GetFullChannelRequest
+            full_channel = await client(GetFullChannelRequest(channel=entity))
+            
+            channel_username = getattr(entity, 'username', None)
+            channel_info = {
+                'id': entity.id,
+                'title': entity.title,
+                'username': f"@{channel_username}" if channel_username else None,
+                'about': full_channel.full_chat.about or '',
+                'linked': datetime.now().isoformat()
+            }
+            
+            # Сохраняем в аккаунте
+            account_data['profile_channel'] = channel_info
+            self.save_data()
+            
+            await client.disconnect()
+            
+            logger.info(f"✅ Profile channel linked for {phone}: {channel_info}")
+            return True, channel_info
+            
+        except Exception as e:
+            logger.error(f"Error linking profile channel for {phone}: {e}")
+            return False, f"❌ Ошибка: {str(e)}"
+    
+    async def set_profile_channel_avatar(self, phone, avatar_file):
+        """
+        Установить аватар для profile_channel.
+        
+        Returns: (success: bool, message: str)
+        """
+        try:
+            account_data = self.accounts_data.get(phone)
+            if not account_data:
+                return False, f"❌ Аккаунт {phone} не найден"
+            
+            profile_channel = account_data.get('profile_channel')
+            if not profile_channel:
+                return False, f"❌ У аккаунта {phone} нет привязанного канала"
+            
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
+            # Получаем канал
+            channel_id = profile_channel['id']
+            entity = await client.get_entity(channel_id)
+            
+            # Загружаем аватар
+            from telethon.tl.functions.channels import EditPhotoRequest
+            
+            uploaded_file = await client.upload_file(avatar_file)
+            await client(EditPhotoRequest(
+                channel=entity,
+                photo=uploaded_file
+            ))
+            
+            await client.disconnect()
+            
+            logger.info(f"✅ Avatar set for profile channel of {phone}")
+            return True, "✅ Аватар канала обновлён"
+            
+        except Exception as e:
+            logger.error(f"Error setting profile channel avatar for {phone}: {e}")
+            return False, f"❌ Ошибка: {str(e)}"
+    
+    async def create_profile_channel_post(self, phone, text, pin=False):
+        """
+        Создать пост в profile_channel.
+        
+        Args:
+            phone: номер телефона аккаунта
+            text: текст поста
+            pin: закрепить ли пост
+        
+        Returns: (success: bool, message: str, post_id: int)
+        """
+        try:
+            account_data = self.accounts_data.get(phone)
+            if not account_data:
+                return False, f"❌ Аккаунт {phone} не найден", None
+            
+            profile_channel = account_data.get('profile_channel')
+            if not profile_channel:
+                return False, f"❌ У аккаунта {phone} нет привязанного канала", None
+            
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован", None
+            
+            client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию", None
+            
+            # Получаем канал
+            channel_id = profile_channel['id']
+            entity = await client.get_entity(channel_id)
+            
+            # Отправляем пост
+            message = await client.send_message(entity, text)
+            post_id = message.id
+            
+            # Закрепляем если нужно
+            if pin:
+                from telethon.tl.functions.messages import UpdatePinnedMessageRequest
+                await client(UpdatePinnedMessageRequest(
+                    peer=entity,
+                    id=post_id,
+                    unpin=False,
+                    pm_oneside=False
+                ))
+            
+            await client.disconnect()
+            
+            logger.info(f"✅ Post created in profile channel of {phone}, post_id={post_id}, pinned={pin}")
+            return True, "✅ Пост создан" + (" и закреплён" if pin else ""), post_id
+            
+        except Exception as e:
+            logger.error(f"Error creating post in profile channel for {phone}: {e}")
+            return False, f"❌ Ошибка: {str(e)}", None
+    
+    async def update_profile_channel_info(self, phone, title=None, about=None):
+        """
+        Обновить название и/или описание profile_channel.
+        
+        Returns: (success: bool, message: str)
+        """
+        try:
+            account_data = self.accounts_data.get(phone)
+            if not account_data:
+                return False, f"❌ Аккаунт {phone} не найден"
+            
+            profile_channel = account_data.get('profile_channel')
+            if not profile_channel:
+                return False, f"❌ У аккаунта {phone} нет привязанного канала"
+            
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
+            # Получаем канал
+            channel_id = profile_channel['id']
+            entity = await client.get_entity(channel_id)
+            
+            # Обновляем информацию
+            from telethon.tl.functions.channels import EditTitleRequest, EditAboutRequest
+            
+            results = []
+            
+            if title is not None:
+                await client(EditTitleRequest(
+                    channel=entity,
+                    title=title
+                ))
+                profile_channel['title'] = title
+                results.append("✅ Название обновлено")
+            
+            if about is not None:
+                await client(EditAboutRequest(
+                    channel=entity,
+                    about=about
+                ))
+                profile_channel['about'] = about
+                results.append("✅ Описание обновлено")
+            
+            if results:
+                self.save_data()
+            
+            await client.disconnect()
+            
+            logger.info(f"✅ Profile channel info updated for {phone}")
+            return True, "\n".join(results)
+            
+        except Exception as e:
+            logger.error(f"Error updating profile channel info for {phone}: {e}")
+            return False, f"❌ Ошибка: {str(e)}"
+    
+    # ============= END PROFILE CHANNEL FUNCTIONS =============
+    
     async def start(self):
         await self.bot_client.start(bot_token=BOT_TOKEN)
         self.setup_handlers()
@@ -1618,7 +1968,17 @@ class UltimateCommentBot:
 `/searchchannels тема` - поиск по теме
 `/addparsed тема 10` - добавить найденные в работу
 
-**💬 КОММЕНТАРИИ:**
+**� КАНАЛЫ-ВИТРИНЫ:**
+`/create_profile_channel +1234 Название` - создать новый
+`/link_profile_channel +1234 @channel` - привязать существующий
+`/list_profile_channels` - список всех витрин
+`/set_profile_channel_avatar +1234` - установить аватар
+`/set_profile_channel_post +1234 Текст` - создать пост
+`/set_profile_channel_post +1234 pin Текст` - пост с закреплением
+`/update_profile_channel_info +1234 title:Новое|about:Описание`
+`/unlink_profile_channel +1234` - отвязать канал
+
+**�💬 КОММЕНТАРИИ:**
 `/listtemplates` - шаблоны
 `/addtemplate Текст!` - новый
 `/edittemplate 1 Текст` - изменить
@@ -4179,50 +4539,92 @@ class UltimateCommentBot:
                 return
             
             state = self.user_states[user_id]
-            if state.get('state') != 'waiting_avatar':
-                return
+            # Поддержка старого формата ('state') и нового ('action')
+            action = state.get('action') or state.get('state')
             
-            account_num = state['account_num']
-            
-            try:
-                await event.respond("⏳ Загрузка изображения...")
+            # Обработка аватара аккаунта
+            if action == 'waiting_avatar':
+                account_num = state['account_num']
                 
-                # Download photo
-                photo = await event.download_media()
-                
-                if not photo:
-                    await event.respond("❌ Ошибка загрузки фото")
-                    return
-                
-                # Save to temp
-                temp_file = await self.save_temp_avatar(user_id, photo)
-                
-                # Update state
-                self.user_states[user_id]['data']['temp_avatar'] = temp_file
-                
-                # Clean up original download
-                if os.path.exists(photo):
-                    try:
-                        os.remove(photo)
-                    except:
-                        pass
-                
-                # Show confirmation
-                await event.respond(
-                    f"✅ **Фото выбрано!**\n\n"
-                    f"Аккаунт: `{(await self.get_account_info(account_num))['phone']}`\n\n"
-                    f"Применить это фото как аватарку?",
-                    buttons=[
-                        [
-                            Button.inline("✅ Применить", f"apply_avatar_{account_num}".encode()),
-                            Button.inline("❌ Отменить", f"cancel_acc_{account_num}".encode())
+                try:
+                    await event.respond("⏳ Загрузка изображения...")
+                    
+                    # Download photo
+                    photo = await event.download_media()
+                    
+                    if not photo:
+                        await event.respond("❌ Ошибка загрузки фото")
+                        return
+                    
+                    # Save to temp
+                    temp_file = await self.save_temp_avatar(user_id, photo)
+                    
+                    # Update state
+                    self.user_states[user_id]['data']['temp_avatar'] = temp_file
+                    
+                    # Clean up original download
+                    if os.path.exists(photo):
+                        try:
+                            os.remove(photo)
+                        except:
+                            pass
+                    
+                    # Show confirmation
+                    await event.respond(
+                        f"✅ **Фото выбрано!**\n\n"
+                        f"Аккаунт: `{(await self.get_account_info(account_num))['phone']}`\n\n"
+                        f"Применить это фото как аватарку?",
+                        buttons=[
+                            [
+                                Button.inline("✅ Применить", f"apply_avatar_{account_num}".encode()),
+                                Button.inline("❌ Отменить", f"cancel_acc_{account_num}".encode())
+                            ]
                         ]
-                    ]
-                )
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Error handling photo upload: {e}")
+                    await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                    await self.clear_user_state(user_id)
+            
+            # Обработка аватара канала-витрины
+            elif action == 'waiting_profile_channel_avatar':
+                phone = state['phone']
                 
-            except Exception as e:
-                logger.error(f"Photo upload error: {e}")
-                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+                try:
+                    await event.respond("⏳ Загрузка изображения для канала...")
+                    
+                    # Download photo
+                    photo = await event.download_media()
+                    
+                    if not photo:
+                        await event.respond("❌ Ошибка загрузки фото")
+                        return
+                    
+                    await event.respond("⏳ Устанавливаю аватар канала...")
+                    
+                    # Set channel avatar
+                    success, message = await self.set_profile_channel_avatar(phone, photo)
+                    
+                    # Clean up downloaded photo
+                    if os.path.exists(photo):
+                        try:
+                            os.remove(photo)
+                        except:
+                            pass
+                    
+                    await event.respond(message)
+                    
+                    if success:
+                        logger.info(f"Profile channel avatar set by admin {user_id} for {phone}")
+                    
+                    # Clear state
+                    await self.clear_user_state(user_id)
+                    
+                except Exception as e:
+                    logger.error(f"Error setting profile channel avatar: {e}")
+                    await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+                    await self.clear_user_state(user_id)
         
         # Handler for text messages (name and bio)
         @self.bot_client.on(events.NewMessage(func=lambda e: e.text and not e.text.startswith('/')))
@@ -4444,6 +4846,482 @@ class UltimateCommentBot:
             
             # Just call the regular stats command (it already shows global for super admins)
             await show_stats(event)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/stats_admin'))
+        async def stats_admin_command(event):
+            """View stats for specific admin (super admins only)"""
+        
+        # ============= PROFILE CHANNEL COMMANDS =============
+        
+        @self.bot_client.on(events.NewMessage(pattern='/create_profile_channel'))
+        async def create_profile_channel_command(event):
+            """Создать канал-витрину для аккаунта"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split(maxsplit=2)
+                
+                if len(parts) < 3:
+                    await event.respond(
+                        "**🎨 СОЗДАНИЕ КАНАЛА-ВИТРИНЫ**\n\n"
+                        "Формат: `/create_profile_channel <phone> <название>`\n\n"
+                        "**Пример:**\n"
+                        "`/create_profile_channel +13434919340 Мой Магазин`\n\n"
+                        "Канал создаётся от имени указанного аккаунта."
+                    )
+                    return
+                
+                phone = parts[1]
+                title = parts[2]
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете создавать каналы только для своих аккаунтов")
+                        return
+                
+                # Проверяем, нет ли уже канала
+                if account_data.get('profile_channel'):
+                    existing = account_data['profile_channel']
+                    username = existing.get('username', 'без username')
+                    await event.respond(
+                        f"⚠️ У аккаунта уже есть канал-витрина:\n"
+                        f"• Название: `{existing.get('title')}`\n"
+                        f"• Username: `{username}`\n"
+                        f"• ID: `{existing.get('id')}`\n\n"
+                        f"Используйте `/unlink_profile_channel {phone}` чтобы отвязать"
+                    )
+                    return
+                
+                await event.respond(f"⏳ Создаю канал `{title}` для аккаунта `{phone}`...")
+                
+                # Создаём канал
+                success, result = await self.create_profile_channel(phone, title)
+                
+                if success:
+                    channel_info = result
+                    username = channel_info.get('username', 'пока нет username')
+                    
+                    text = f"""✅ **КАНАЛ-ВИТРИНА СОЗДАН**
+
+📱 Аккаунт: `{phone}`
+📺 Канал: `{channel_info['title']}`
+🆔 ID: `{channel_info['id']}`
+👤 Username: `{username}`
+
+🎨 **Следующие шаги:**
+1. `/set_profile_channel_avatar {phone}` - установить аватар
+2. `/set_profile_channel_post {phone}` - создать приветственный пост
+3. Вручную добавить канал в профиль через клиент
+
+💡 Пока у канала нет username, его нельзя найти через поиск."""
+                    
+                    await event.respond(text)
+                    logger.info(f"Profile channel created by admin {event.sender_id} for {phone}")
+                else:
+                    await event.respond(result)
+                    
+            except Exception as e:
+                logger.error(f"Create profile channel command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/link_profile_channel'))
+        async def link_profile_channel_command(event):
+            """Привязать существующий канал к профилю аккаунта"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split(maxsplit=2)
+                
+                if len(parts) < 3:
+                    await event.respond(
+                        "**🔗 ПРИВЯЗКА СУЩЕСТВУЮЩЕГО КАНАЛА**\n\n"
+                        "Формат: `/link_profile_channel <phone> <@channel>`\n\n"
+                        "**Пример:**\n"
+                        "`/link_profile_channel +13434919340 @myshowcase`\n\n"
+                        "⚠️ Аккаунт должен быть админом канала!"
+                    )
+                    return
+                
+                phone = parts[1]
+                channel_identifier = parts[2]
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете привязывать каналы только к своим аккаунтам")
+                        return
+                
+                # Проверяем, нет ли уже канала
+                if account_data.get('profile_channel'):
+                    existing = account_data['profile_channel']
+                    username = existing.get('username', 'без username')
+                    await event.respond(
+                        f"⚠️ У аккаунта уже есть канал-витрина:\n"
+                        f"• Название: `{existing.get('title')}`\n"
+                        f"• Username: `{username}`\n\n"
+                        f"Используйте `/unlink_profile_channel {phone}` чтобы отвязать"
+                    )
+                    return
+                
+                await event.respond(f"⏳ Привязываю канал `{channel_identifier}` к аккаунту `{phone}`...")
+                
+                # Привязываем канал
+                success, result = await self.link_existing_channel(phone, channel_identifier)
+                
+                if success:
+                    channel_info = result
+                    username = channel_info.get('username', 'без username')
+                    
+                    text = f"""✅ **КАНАЛ ПРИВЯЗАН К ПРОФИЛЮ**
+
+📱 Аккаунт: `{phone}`
+📺 Канал: `{channel_info['title']}`
+👤 Username: `{username}`
+🆔 ID: `{channel_info['id']}`
+📝 Описание: {channel_info.get('about', 'не задано')}
+
+🎨 **Управление:**
+• `/set_profile_channel_avatar {phone}` - изменить аватар
+• `/set_profile_channel_post {phone}` - создать пост
+• `/update_profile_channel_info {phone}` - обновить название/описание
+
+💡 Для отображения в профиле добавьте канал вручную через клиент"""
+                    
+                    await event.respond(text)
+                    logger.info(f"Profile channel linked by admin {event.sender_id} for {phone}")
+                else:
+                    await event.respond(result)
+                    
+            except Exception as e:
+                logger.error(f"Link profile channel command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/unlink_profile_channel'))
+        async def unlink_profile_channel_command(event):
+            """Отвязать канал-витрину от аккаунта"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split()
+                
+                if len(parts) < 2:
+                    await event.respond("Формат: `/unlink_profile_channel <phone>`")
+                    return
+                
+                phone = parts[1]
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете отвязывать каналы только у своих аккаунтов")
+                        return
+                
+                # Проверяем, есть ли канал
+                if not account_data.get('profile_channel'):
+                    await event.respond(f"❌ У аккаунта `{phone}` нет привязанного канала")
+                    return
+                
+                channel_info = account_data['profile_channel']
+                username = channel_info.get('username', 'без username')
+                
+                # Отвязываем
+                del account_data['profile_channel']
+                self.save_data()
+                
+                await event.respond(
+                    f"✅ Канал отвязан от аккаунта\n\n"
+                    f"📺 Канал: `{channel_info['title']}`\n"
+                    f"👤 Username: `{username}`\n\n"
+                    f"⚠️ Сам канал НЕ удалён, только отвязан от бота.\n"
+                    f"Вы можете привязать его снова или удалить через клиент."
+                )
+                logger.info(f"Profile channel unlinked by admin {event.sender_id} for {phone}")
+                
+            except Exception as e:
+                logger.error(f"Unlink profile channel command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/set_profile_channel_avatar'))
+        async def set_profile_channel_avatar_command(event):
+            """Установить аватар для канала-витрины"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split()
+                
+                if len(parts) < 2:
+                    await event.respond(
+                        "**🖼️ УСТАНОВКА АВАТАРА КАНАЛА**\n\n"
+                        "Формат:\n"
+                        "1. Отправьте команду: `/set_profile_channel_avatar <phone>`\n"
+                        "2. Затем отправьте изображение (reply на эту команду)\n\n"
+                        "**Пример:**\n"
+                        "`/set_profile_channel_avatar +13434919340`\n"
+                        "затем прикрепите фото"
+                    )
+                    return
+                
+                phone = parts[1]
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
+                        return
+                
+                # Проверяем, есть ли канал
+                if not account_data.get('profile_channel'):
+                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
+                    return
+                
+                # Ждём изображение
+                msg = await event.respond(f"📸 Отправьте изображение для аватара канала (reply на это сообщение)")
+                
+                # Сохраняем состояние ожидания
+                self.user_states[event.sender_id] = {
+                    'action': 'waiting_profile_channel_avatar',
+                    'phone': phone,
+                    'message_id': msg.id
+                }
+                
+            except Exception as e:
+                logger.error(f"Set profile channel avatar command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/set_profile_channel_post'))
+        async def set_profile_channel_post_command(event):
+            """Создать пост в канале-витрине"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split(maxsplit=2)
+                
+                if len(parts) < 3:
+                    await event.respond(
+                        "**📝 СОЗДАНИЕ ПОСТА В КАНАЛЕ**\n\n"
+                        "Формат: `/set_profile_channel_post <phone> <текст>`\n\n"
+                        "**Пример:**\n"
+                        "`/set_profile_channel_post +13434919340 Добро пожаловать! 🎉`\n\n"
+                        "Для закрепления поста добавьте `pin` в конец:\n"
+                        "`/set_profile_channel_post +13434919340 pin Закреплённое объявление`"
+                    )
+                    return
+                
+                phone = parts[1]
+                text_part = parts[2]
+                
+                # Проверяем наличие флага pin
+                pin = False
+                if text_part.startswith('pin '):
+                    pin = True
+                    post_text = text_part[4:]  # Убираем "pin "
+                else:
+                    post_text = text_part
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
+                        return
+                
+                # Проверяем, есть ли канал
+                profile_channel = account_data.get('profile_channel')
+                if not profile_channel:
+                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
+                    return
+                
+                await event.respond(f"⏳ Создаю пост в канале `{profile_channel['title']}`...")
+                
+                # Создаём пост
+                success, message, post_id = await self.create_profile_channel_post(phone, post_text, pin)
+                
+                if success:
+                    channel_username = profile_channel.get('username', 'без username')
+                    
+                    text = f"""✅ **ПОСТ СОЗДАН**
+
+📺 Канал: `{profile_channel['title']}`
+👤 Username: `{channel_username}`
+🆔 Post ID: `{post_id}`
+📌 Закреплён: {"Да" if pin else "Нет"}
+
+📝 Текст:
+{post_text[:100]}{"..." if len(post_text) > 100 else ""}"""
+                    
+                    await event.respond(text)
+                    logger.info(f"Post created by admin {event.sender_id} in profile channel of {phone}")
+                else:
+                    await event.respond(message)
+                    
+            except Exception as e:
+                logger.error(f"Set profile channel post command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/update_profile_channel_info'))
+        async def update_profile_channel_info_command(event):
+            """Обновить название и описание канала-витрины"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split(maxsplit=2)
+                
+                if len(parts) < 3:
+                    await event.respond(
+                        "**✏️ ОБНОВЛЕНИЕ ИНФОРМАЦИИ КАНАЛА**\n\n"
+                        "Формат: `/update_profile_channel_info <phone> title:<название>|about:<описание>`\n\n"
+                        "**Примеры:**\n"
+                        "`/update_profile_channel_info +1234 title:Новое Название`\n"
+                        "`/update_profile_channel_info +1234 about:Описание канала`\n"
+                        "`/update_profile_channel_info +1234 title:Магазин|about:Лучшие товары`"
+                    )
+                    return
+                
+                phone = parts[1]
+                params = parts[2]
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
+                        return
+                
+                # Проверяем, есть ли канал
+                if not account_data.get('profile_channel'):
+                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
+                    return
+                
+                # Парсим параметры
+                title = None
+                about = None
+                
+                for param in params.split('|'):
+                    param = param.strip()
+                    if param.startswith('title:'):
+                        title = param[6:]
+                    elif param.startswith('about:'):
+                        about = param[6:]
+                
+                if not title and not about:
+                    await event.respond("❌ Укажите хотя бы один параметр: title: или about:")
+                    return
+                
+                await event.respond("⏳ Обновляю информацию канала...")
+                
+                # Обновляем
+                success, message = await self.update_profile_channel_info(phone, title, about)
+                await event.respond(message)
+                
+                if success:
+                    logger.info(f"Profile channel info updated by admin {event.sender_id} for {phone}")
+                    
+            except Exception as e:
+                logger.error(f"Update profile channel info command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/list_profile_channels'))
+        async def list_profile_channels_command(event):
+            """Показать все каналы-витрины"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                # Фильтруем аккаунты по админу
+                admin_id = self.get_admin_id(event.sender_id)
+                
+                channels_list = []
+                for phone, account_data in self.accounts_data.items():
+                    # Проверяем права доступа
+                    if admin_id is not None and account_data.get('admin_id') != admin_id:
+                        continue
+                    
+                    profile_channel = account_data.get('profile_channel')
+                    if profile_channel:
+                        channels_list.append((phone, account_data, profile_channel))
+                
+                if not channels_list:
+                    await event.respond("📺 У ваших аккаунтов пока нет каналов-витрин")
+                    return
+                
+                text = f"**📺 КАНАЛЫ-ВИТРИНЫ ({len(channels_list)})**\n\n"
+                
+                for idx, (phone, account_data, channel) in enumerate(channels_list, 1):
+                    account_name = account_data.get('name', phone[-10:])
+                    channel_username = channel.get('username', 'без username')
+                    
+                    text += f"{idx}. **{account_name}** (`{phone}`)\n"
+                    text += f"   📺 `{channel['title']}`\n"
+                    text += f"   👤 {channel_username}\n"
+                    text += f"   🆔 ID: `{channel['id']}`\n\n"
+                
+                text += "💡 Команды управления: /help"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                logger.error(f"List profile channels command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        # ============= END PROFILE CHANNEL COMMANDS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/stats_admin'))
         async def stats_admin_command(event):
