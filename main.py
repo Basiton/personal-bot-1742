@@ -280,7 +280,12 @@ def humanize_comment(text: str) -> str:
 
 class UltimateCommentBot:
     def __init__(self):
+        # ============= ЗАЩИТА: Один клиент на один session-файл =============
+        logger.info("🔧 Создание основного бот-клиента (bot_session)...")
         self.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
+        self._bot_client_created = True  # Флаг для защиты от повторного создания
+        logger.info("✅ Бот-клиент создан (session: bot_session)")
+        # ============= END ЗАЩИТА =============
         self.accounts_data = {}
         self.channels = []
         self.max_parallel_accounts = DEFAULT_MAX_ACTIVE_ACCOUNTS  # Количество одновременно активных аккаунтов
@@ -634,7 +639,9 @@ class UltimateCommentBot:
             return {'authorized': False, 'name': None, 'username': None, 'error': 'empty_session'}
         
         try:
+            logger.debug(f"🔌 [{phone}] Создание временного клиента для проверки (StringSession)...")
             client = TelegramClient(StringSession(session_string), API_ID, API_HASH, proxy=proxy)
+            logger.debug(f"🔌 [{phone}] Подключение временного клиента...")
             await asyncio.wait_for(client.connect(), timeout=timeout)
             
             if await client.is_user_authorized():
@@ -646,30 +653,41 @@ class UltimateCommentBot:
                         'username': getattr(me, 'username', None)
                     }
                     logger.info(f"✅ {phone}: авторизован как {result['name']}")
+                    logger.debug(f"🔌 [{phone}] Отключение временного клиента (success)...")
                     await client.disconnect()
                     return result
                 except Exception as e:
                     logger.error(f"❌ {phone}: ошибка get_me: {e}")
-                    await client.disconnect()
+                    try:
+                        logger.debug(f"🔌 [{phone}] Отключение временного клиента (error)...")
+                        await client.disconnect()
+                    except Exception as disconnect_err:
+                        logger.warning(f"⚠️ [{phone}] Ошибка при отключении клиента: {disconnect_err}")
                     return {'authorized': False, 'name': None, 'username': None, 'error': str(e)}
             else:
                 logger.warning(f"❌ {phone}: сессия невалидна (not authorized)")
-                await client.disconnect()
+                try:
+                    logger.debug(f"🔌 [{phone}] Отключение временного клиента (not authorized)...")
+                    await client.disconnect()
+                except Exception as disconnect_err:
+                    logger.warning(f"⚠️ [{phone}] Ошибка при отключении клиента: {disconnect_err}")
                 return {'authorized': False, 'name': None, 'username': None, 'error': 'not_authorized'}
                 
         except asyncio.TimeoutError:
             logger.error(f"❌ {phone}: таймаут подключения ({timeout}s)")
             try:
+                logger.debug(f"🔌 [{phone}] Отключение временного клиента (timeout)...")
                 await client.disconnect()
-            except:
-                pass
+            except Exception as disconnect_err:
+                logger.warning(f"⚠️ [{phone}] Ошибка при отключении клиента: {disconnect_err}")
             return {'authorized': False, 'name': None, 'username': None, 'error': 'timeout'}
         except Exception as e:
             logger.error(f"❌ {phone}: ошибка проверки авторизации: {e}")
             try:
+                logger.debug(f"🔌 [{phone}] Отключение временного клиента (exception)...")
                 await client.disconnect()
-            except:
-                pass
+            except Exception as disconnect_err:
+                logger.warning(f"⚠️ [{phone}] Ошибка при отключении клиента: {disconnect_err}")
             return {'authorized': False, 'name': None, 'username': None, 'error': str(e)}
     
     def init_account_statuses(self):
@@ -2075,9 +2093,15 @@ class UltimateCommentBot:
     # ============= END PROFILE CHANNEL FUNCTIONS =============
     
     async def start(self):
+        # ============= ЗАЩИТА: Проверка единственности bot_client =============
+        if not hasattr(self, '_bot_client_created') or not self._bot_client_created:
+            logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: bot_client не был правильно создан!")
+            raise RuntimeError("Bot client not properly initialized")
+        logger.info("🚀 Подключение основного бот-клиента (bot_session)...")
+        # ============= END ЗАЩИТА =============
         await self.bot_client.start(bot_token=BOT_TOKEN)
         self.setup_handlers()
-        logger.info("@comapc_bot ULTIMATE ЗАПУЩЕН!")
+        logger.info("✅ @comapc_bot ULTIMATE ЗАПУЩЕН! (один клиент, один session-файл)")
         
         # НЕ запускаем автоматическую проверку при старте (слишком агрессивно)
         # Используйте /verify_sessions для ручной проверки
@@ -2617,7 +2641,10 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/listaccounts'))
         async def list_accounts(event):
+            """Вывод списка всех аккаунтов с их статусами (ОДИН ответ без противоречий)"""
             if not await self.is_admin(event.sender_id): return
+            
+            logger.info(f"📋 /listaccounts вызвана пользователем {event.sender_id}")
             
             # Determine admin_id for filtering
             admin_id = self.get_admin_id(event.sender_id)
@@ -2625,13 +2652,29 @@ class UltimateCommentBot:
             # Filter accounts by admin_id
             if admin_id is None:  # Super admin - show all
                 filtered_accounts = self.accounts_data
+                logger.info(f"   Super admin - показываем все {len(self.accounts_data)} аккаунтов")
             else:  # Regular admin - show only their accounts
                 filtered_accounts = {phone: data for phone, data in self.accounts_data.items()
                                    if data.get('admin_id') == admin_id}
+                logger.info(f"   Админ {admin_id} - показываем {len(filtered_accounts)} аккаунтов")
             
             if not filtered_accounts:
-                await event.respond("Нет авторизованных аккаунтов")
+                logger.info("   Нет аккаунтов для отображения")
+                await event.respond("❌ Нет доступных аккаунтов\n\n💡 Используйте `/auth +номер` для добавления")
                 return
+            
+            # Подсчёт статусов для общей статистики
+            status_counts = {'active': 0, 'reserve': 0, 'broken': 0}
+            for data in filtered_accounts.values():
+                status_val = data.get('status', ACCOUNT_STATUS_RESERVE)
+                if status_val == ACCOUNT_STATUS_ACTIVE:
+                    status_counts['active'] += 1
+                elif status_val == ACCOUNT_STATUS_BROKEN:
+                    status_counts['broken'] += 1
+                else:
+                    status_counts['reserve'] += 1
+            
+            logger.info(f"   Статусы: ✅ {status_counts['active']} | 🔵 {status_counts['reserve']} | 🔴 {status_counts['broken']}")
             
             # Show all accounts, split into multiple messages if needed
             total = len(filtered_accounts)
@@ -2640,7 +2683,15 @@ class UltimateCommentBot:
             
             for batch_num in range(0, total, accounts_per_msg):
                 batch_accounts = accounts_list[batch_num:batch_num + accounts_per_msg]
-                text = f"АККАУНТЫ ({total}) - Часть {batch_num//accounts_per_msg + 1}:\n\n"
+                
+                # В первом сообщении добавляем общую статистику
+                if batch_num == 0:
+                    text = f"📱 **АККАУНТЫ** ({total}):\n"
+                    text += f"✅ Active: {status_counts['active']} | "
+                    text += f"🔵 Reserve: {status_counts['reserve']} | "
+                    text += f"🔴 Broken: {status_counts['broken']}\n\n"
+                else:
+                    text = f"АККАУНТЫ ({total}) - Часть {batch_num//accounts_per_msg + 1}:\n\n"
                 
                 for i, (phone, data) in enumerate(batch_accounts, batch_num + 1):
                     # NEW: Используем новые статусы
@@ -2657,9 +2708,12 @@ class UltimateCommentBot:
                     text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
                 
                 await event.respond(text)
+                logger.info(f"   Отправлена часть {batch_num//accounts_per_msg + 1}")
                 # Small delay between messages to avoid flood
                 if batch_num + accounts_per_msg < total:
                     await asyncio.sleep(0.5)
+            
+            logger.info("✅ /listaccounts завершена успешно")
         
         @self.bot_client.on(events.NewMessage(pattern='/delaccount'))
         async def del_account(event):
@@ -6790,13 +6844,14 @@ class UltimateCommentBot:
         # Create Telethon client once
         worker_client = None
         try:
-            logger.info(f"[{account_name}] Creating Telethon client...")
+            logger.info(f"🔌 [{account_name}] Создание worker-клиента (StringSession)...")
             worker_client = TelegramClient(
                 StringSession(account_data['session']), 
                 API_ID, 
                 API_HASH,
                 proxy=account_data.get('proxy')
             )
+            logger.info(f"🔌 [{account_name}] Подключение worker-клиента...")
             await worker_client.connect()
             
             if not await worker_client.is_user_authorized():
@@ -7154,12 +7209,16 @@ class UltimateCommentBot:
         finally:
             # Cleanup
             logger.info(f"[{account_name}] WORKER STOPPING")
-            if worker_client and worker_client.is_connected():
+            if worker_client:
                 try:
-                    await worker_client.disconnect()
-                    logger.info(f"[{account_name}] Client disconnected")
+                    if worker_client.is_connected():
+                        logger.info(f"🔌 [{account_name}] Отключение worker-клиента...")
+                        await worker_client.disconnect()
+                        logger.info(f"✅ [{account_name}] Worker-клиент отключён")
+                    else:
+                        logger.info(f"ℹ️ [{account_name}] Worker-клиент уже отключён")
                 except Exception as e:
-                    logger.error(f"[{account_name}] Disconnect error: {e}")
+                    logger.error(f"❌ [{account_name}] Ошибка отключения worker-клиента: {e}")
 
     async def pro_auto_comment(self):
         """Main commenting loop - runs accounts in parallel with rate limiting, rotation, and auto-replacement!"""
