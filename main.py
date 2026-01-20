@@ -663,15 +663,16 @@ class UltimateCommentBot:
         active_count = 0
         migrated_count = 0
         
-        for phone, data in self.accounts_data.items():
+        # ВАЖНО: используем list() чтобы избежать RuntimeError при изменении словаря во время итерации
+        accounts_to_normalize = {}  # {old_phone: new_phone}
+        
+        for phone, data in list(self.accounts_data.items()):
             # Нормализация телефона (добавляем + если отсутствует)
             if not phone.startswith('+'):
-                logger.info(f"🔧 Нормализация номера: {phone} → +{phone}")
-                # Создаём новую запись с правильным номером
                 new_phone = f"+{phone}"
-                if new_phone not in self.accounts_data:
-                    self.accounts_data[new_phone] = data
-                    data['phone'] = new_phone
+                logger.info(f"🔧 Нормализация номера: {phone} → {new_phone}")
+                accounts_to_normalize[phone] = new_phone
+                data['phone'] = new_phone
             
             # Если у аккаунта нет статуса, присваиваем его
             if 'status' not in data:
@@ -698,11 +699,18 @@ class UltimateCommentBot:
                 active_count += 1
             
             # Инициализируем структуру отслеживания активности
-            if phone not in self.account_activity:
-                self.account_activity[phone] = {
+            current_phone = accounts_to_normalize.get(phone, phone)
+            if current_phone not in self.account_activity:
+                self.account_activity[current_phone] = {
                     'messages': [],  # [(timestamp, channel), ...]
                     'status': data.get('status', ACCOUNT_STATUS_RESERVE)
                 }
+        
+        # Применяем нормализацию номеров (переименовываем ключи в словаре)
+        for old_phone, new_phone in accounts_to_normalize.items():
+            if new_phone not in self.accounts_data:
+                self.accounts_data[new_phone] = self.accounts_data[old_phone]
+            del self.accounts_data[old_phone]
         
         # Если активных аккаунтов больше чем max_parallel_accounts, переводим лишние в резерв
             if phone not in self.account_activity:
