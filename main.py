@@ -728,17 +728,10 @@ class UltimateCommentBot:
             del self.accounts_data[old_phone]
         
         # Если активных аккаунтов больше чем max_parallel_accounts, переводим лишние в резерв
-            if phone not in self.account_activity:
-                self.account_activity[phone] = {
-                    'messages': [],  # [(timestamp, channel), ...]
-                    'status': data.get('status', ACCOUNT_STATUS_RESERVE)
-                }
-        
-        # Если активных аккаунтов больше чем max_parallel_accounts, переводим лишние в резерв
         if active_count > self.max_parallel_accounts:
             logger.warning(f"⚠️ Found {active_count} active accounts, but max is {self.max_parallel_accounts}. Moving extras to reserve.")
             count = 0
-            for phone, data in self.accounts_data.items():
+            for phone, data in list(self.accounts_data.items()):
                 if data.get('status') == ACCOUNT_STATUS_ACTIVE:
                     count += 1
                     if count > self.max_parallel_accounts:
@@ -750,7 +743,7 @@ class UltimateCommentBot:
         elif active_count < self.max_parallel_accounts:
             needed = self.max_parallel_accounts - active_count
             logger.info(f"📊 Only {active_count} active accounts, activating {needed} more from reserve")
-            for phone, data in self.accounts_data.items():
+            for phone, data in list(self.accounts_data.items()):
                 if needed <= 0:
                     break
                 if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session'):
