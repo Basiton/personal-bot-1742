@@ -3356,7 +3356,7 @@ class UltimateCommentBot:
                         break
                 
                 if not user_account:
-                    await event.respond("❌ Нет авторизованных аккаунтов для поиска")
+                    await event.respond("❌ Нет аккаунтов с активной сессией для поиска\n\n💡 Используйте `/auth +номер` для добавления")
                     return
                 
                 phone, account_data = user_account
@@ -5918,7 +5918,7 @@ class UltimateCommentBot:
                                 if data.get('session')]
                 
                 if not all_accounts:
-                    await event.respond("❌ Нет авторизованных аккаунтов")
+                    await event.respond("❌ Нет аккаунтов с активной сессией\n\n💡 Используйте `/auth +номер` для авторизации")
                     return
                 
                 # Build accounts list with status indicators
@@ -5974,7 +5974,7 @@ class UltimateCommentBot:
                                 if data.get('session')]
                 
                 if not all_accounts:
-                    await event.respond("❌ Нет авторизованных аккаунтов")
+                    await event.respond("❌ Нет аккаунтов с активной сессией\n\n💡 Используйте `/auth +номер` для авторизации")
                     return
                 
                 # Build accounts list with status indicators
@@ -6030,7 +6030,7 @@ class UltimateCommentBot:
                                 if data.get('session')]
                 
                 if not all_accounts:
-                    await event.respond("❌ Нет авторизованных аккаунтов")
+                    await event.respond("❌ Нет аккаунтов с активной сессией\n\n💡 Используйте `/auth +номер` для авторизации")
                     return
                 
                 # Build accounts list with status indicators

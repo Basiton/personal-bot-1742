@@ -39,3 +39,6 @@ stats.json.bak*
 # OS
 .DS_Store
 Thumbs.db
+bot_logs.txt
+main.py.backup
+bot_data.json.autobak
