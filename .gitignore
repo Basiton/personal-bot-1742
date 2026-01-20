@@ -12,8 +12,12 @@ __pycache__/
 *.session
 *.session-journal
 
-# Bot data and backups
+# Bot data and backups - КРИТИЧНО: не коммитить в Git!
+bot_data.json
 bot_data.json.bak*
+bot_data.json.tmp
+bot_data_*.json
+stats.json
 stats.json.bak*
 *.pid
 

@@ -531,7 +531,7 @@ class UltimateCommentBot:
     
     def load_data(self):
         """
-        Загружает данные.
+        Загружает данные БЕЗОПАСНО - не перезаписывает при ошибках.
         """
         try:
             with open(DB_NAME, 'r', encoding='utf-8') as f:
@@ -543,22 +543,27 @@ class UltimateCommentBot:
                 self.admins = data.get('admins', [])
                 logger.info(f"✅ Loaded {len(self.accounts_data)} accounts, {len(self.channels)} channels, {len(self.templates)} templates")
         except FileNotFoundError:
-            logger.warning(f"⚠️ {DB_NAME} not found, creating new")
-            self.save_data()
+            logger.warning(f"⚠️ {DB_NAME} not found - starting with empty data")
+            logger.warning(f"⚠️ If this is a production server, restore from backup!")
+            # НЕ создаём новый файл автоматически - это может быть ошибка
+            # Пользователь должен явно восстановить из бэкапа или авторизовать аккаунты
         except json.JSONDecodeError as e:
             logger.error(f"❌ {DB_NAME} corrupted: {e}")
-            logger.error("❌ Use /restore to restore from safe backup (data only, not sessions)")
-            self.save_data()
+            logger.error(f"❌ CRITICAL: Data file is corrupted!")
+            logger.error(f"❌ Restore from backup: bot_data.json.autobak or bot_data.json.manual_backup_*")
+            # НЕ перезаписываем испорченный файл - можем потерять данные!
+            raise  # Останавливаем бота - требуется вмешательство
         except Exception as e:
             logger.error(f"❌ Error loading data: {e}")
-            self.save_data()
+            logger.error(f"❌ Check file permissions and integrity")
+            raise  # Останавливаем бота
     
 
     
     def save_data(self):
         """
-        Сохраняет данные с атомарной записью.
-        Автоматические бэкапы сессий ОТКЛЮЧЕНЫ для безопасности.
+        Сохраняет данные с атомарной записью и автоматическим бэкапом.
+        БЕЗОПАСНО: создаёт бэкап перед каждым сохранением.
         """
         data = {
             'accounts': self.accounts_data,
@@ -567,6 +572,16 @@ class UltimateCommentBot:
             'bio_links': self.bio_links,
             'admins': self.admins
         }
+        
+        # Создаём бэкап текущего файла (если существует)
+        if os.path.exists(DB_NAME):
+            try:
+                backup_name = f'{DB_NAME}.autobak'
+                import shutil
+                shutil.copy2(DB_NAME, backup_name)
+                logger.debug(f"Created automatic backup: {backup_name}")
+            except Exception as e:
+                logger.warning(f"Failed to create backup: {e}")
         
         # Сохраняем во временный файл сначала (атомарная запись)
         temp_file = f'{DB_NAME}.tmp'
