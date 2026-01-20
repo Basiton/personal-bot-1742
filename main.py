@@ -2202,12 +2202,13 @@ class UltimateCommentBot:
 **👑 АДМИНЫ:**
 `/addadmin 123456789` - новый админ
 
-**💾 ЗАЩИТА ДАННЫХ (НЕ СЕССИЙ!):**
-`/backup` - сохранить каналы и шаблоны
-`/listbackups` - список всех безопасных бэкапов
+**💾 ЗАЩИТА ДАННЫХ:**
+`/backup` - ручной бэкап (каналы/шаблоны)
+`/listbackups` - список ручных бэкапов
+`/autobackups` - автоматические бэкапы (каждые 30 мин) 🆕
 `/restore` - восстановить каналы/шаблоны
 
-⚠️ **ВАЖНО:** Бэкапы НЕ содержат сессий!
+⚠️ **ВАЖНО:** Сессии восстанавливаются из bot_data.json!
 Сессии всегда остаются нетронутыми."""
             await event.respond(text)
         
@@ -2308,7 +2309,8 @@ class UltimateCommentBot:
                 
                 text += "💡 **Команды:**\n"
                 text += "`/restore` - восстановить данные из последнего бэкапа\n"
-                text += "`/backup` - создать новый бэкап\n\n"
+                text += "`/backup` - создать новый бэкап\n"
+                text += "`/autobackups` - показать автоматические бэкапы 🆕\n\n"
                 text += "⚠️ **Важно:** При восстановлении сессии НЕ затрагиваются!"
                 
                 await event.respond(text)
@@ -2316,6 +2318,69 @@ class UltimateCommentBot:
             except Exception as e:
                 await event.respond(f"❌ Ошибка: {str(e)}")
                 logger.error(f"List backups error: {e}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/autobackups'))
+        async def list_auto_backups(event):
+            """Показывает список автоматических timestamped бэкапов"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                BACKUP_DIR = 'backups'
+                
+                if not os.path.exists(BACKUP_DIR):
+                    await event.respond(
+                        f"📁 Папка `{BACKUP_DIR}/` ещё не создана\n\n"
+                        f"Автоматические бэкапы будут создаваться каждые 30 минут после запуска бота."
+                    )
+                    return
+                
+                # Список всех автобэкапов
+                auto_backups = sorted([
+                    f for f in os.listdir(BACKUP_DIR) 
+                    if f.startswith('bot_data_') and f.endswith('.json')
+                ], reverse=True)
+                
+                if not auto_backups:
+                    await event.respond(
+                        f"📁 Папка `{BACKUP_DIR}/` пуста\n\n"
+                        f"Первый автобэкап будет создан через ~30 минут"
+                    )
+                    return
+                
+                text = f"💾 **АВТОМАТИЧЕСКИЕ БЭКАПЫ** ({len(auto_backups)})\n"
+                text += f"📁 Папка: `{BACKUP_DIR}/`\n"
+                text += f"⏱️ Интервал: каждые 30 минут\n"
+                text += f"🗂️ Хранится: последние 48 бэкапов (24 часа)\n\n"
+                
+                # Показываем последние 15 бэкапов
+                for backup in auto_backups[:15]:
+                    backup_path = os.path.join(BACKUP_DIR, backup)
+                    file_stat = os.stat(backup_path)
+                    file_time = datetime.fromtimestamp(file_stat.st_mtime)
+                    file_size = file_stat.st_size / 1024  # KB
+                    
+                    # Извлекаем timestamp из имени (bot_data_YYYYMMDD_HHMMSS.json)
+                    timestamp_part = backup.replace('bot_data_', '').replace('.json', '')
+                    text += f"• `{timestamp_part}`\n"
+                    text += f"  📅 {file_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    text += f"  💾 {file_size:.1f} KB\n"
+                
+                if len(auto_backups) > 15:
+                    text += f"\n... и ещё {len(auto_backups) - 15} бэкапов\n"
+                
+                text += f"\n💡 **Восстановление:**\n"
+                text += f"```bash\n"
+                text += f"cd /root/bot\n"
+                text += f"cp backups/bot_data_TIMESTAMP.json bot_data.json\n"
+                text += f"pkill -f python3\n"
+                text += f"nohup python3 main.py > bot_logs.txt 2>&1 &\n"
+                text += f"```"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                await event.respond(f"❌ Ошибка: {str(e)}")
+                logger.error(f"List auto backups error: {e}")
         
         @self.bot_client.on(events.NewMessage(pattern='/restore'))
         async def restore_backup(event):
@@ -7335,8 +7400,69 @@ class UltimateCommentBot:
         
         logger.info("🔄 Rotation worker stopped")
     
+    async def periodic_backup_worker(self):
+        """
+        Воркер для создания периодических timestamped бэкапов.
+        Создаёт бэкапы каждые BACKUP_INTERVAL_MINUTES минут.
+        """
+        BACKUP_INTERVAL_MINUTES = 30  # Интервал между бэкапами
+        BACKUP_DIR = 'backups'  # Папка для бэкапов
+        MAX_BACKUPS = 48  # Хранить последние 48 бэкапов (24 часа при интервале 30 мин)
+        
+        # Создаём папку для бэкапов
+        if not os.path.exists(BACKUP_DIR):
+            os.makedirs(BACKUP_DIR)
+            logger.info(f"📁 Created backup directory: {BACKUP_DIR}")
+        
+        logger.info(f"💾 Periodic backup worker started (every {BACKUP_INTERVAL_MINUTES} min)")
+        
+        while True:
+            try:
+                await asyncio.sleep(BACKUP_INTERVAL_MINUTES * 60)  # Ждём интервал
+                
+                # Проверяем, что файл данных существует
+                if not os.path.exists(DB_NAME):
+                    logger.warning(f"⚠️ {DB_NAME} not found, skipping backup")
+                    continue
+                
+                # Создаём timestamped бэкап
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_name = os.path.join(BACKUP_DIR, f'bot_data_{timestamp}.json')
+                
+                import shutil
+                shutil.copy2(DB_NAME, backup_name)
+                
+                file_size = os.path.getsize(backup_name)
+                logger.info(f"💾 Auto-backup created: {backup_name} ({file_size} bytes)")
+                
+                # Очистка старых бэкапов (оставляем только последние MAX_BACKUPS)
+                backups = sorted([
+                    os.path.join(BACKUP_DIR, f) 
+                    for f in os.listdir(BACKUP_DIR) 
+                    if f.startswith('bot_data_') and f.endswith('.json')
+                ])
+                
+                if len(backups) > MAX_BACKUPS:
+                    to_delete = backups[:-MAX_BACKUPS]
+                    for old_backup in to_delete:
+                        try:
+                            os.remove(old_backup)
+                            logger.debug(f"🗑️  Removed old backup: {old_backup}")
+                        except Exception as e:
+                            logger.warning(f"Failed to remove old backup {old_backup}: {e}")
+                    
+                    logger.info(f"🗑️  Cleaned up {len(to_delete)} old backups, keeping {MAX_BACKUPS} most recent")
+                
+            except Exception as e:
+                logger.error(f"Error in periodic backup worker: {e}")
+                await asyncio.sleep(60)  # Пауза перед повтором при ошибке
+    
     async def run(self):
         await self.start()
+        
+        # Запускаем воркер периодических бэкапов
+        asyncio.create_task(self.periodic_backup_worker())
+        
         await self.bot_client.run_until_disconnected()
 
 if __name__ == '__main__':
