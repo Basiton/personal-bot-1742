@@ -2641,10 +2641,16 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/listaccounts'))
         async def list_accounts(event):
-            """Вывод списка всех аккаунтов с их статусами (ОДИН ответ без противоречий)"""
+            """Вывод списка всех аккаунтов с их статусами (ОДИН ответ без противоречий)
+            
+            ⚠️ ВАЖНО: Эта команда НЕ ДОЛЖНА выводить 'Нет авторизованных аккаунтов'!
+            Она просто показывает структуру из bot_data.json со статусами.
+            """
             if not await self.is_admin(event.sender_id): return
             
-            logger.info(f"📋 /listaccounts вызвана пользователем {event.sender_id}")
+            logger.info("="*80)
+            logger.info(f"📋 /listaccounts НАЧАЛО | Пользователь: {event.sender_id}")
+            logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
             
             # Determine admin_id for filtering
             admin_id = self.get_admin_id(event.sender_id)
@@ -2659,9 +2665,13 @@ class UltimateCommentBot:
                 logger.info(f"   Админ {admin_id} - показываем {len(filtered_accounts)} аккаунтов")
             
             if not filtered_accounts:
-                logger.info("   Нет аккаунтов для отображения")
+                logger.info("   ❌ Нет аккаунтов для отображения (filtered_accounts пустой)")
+                logger.info("   Отправляю сообщение: 'Нет доступных аккаунтов'")
                 await event.respond("❌ Нет доступных аккаунтов\n\n💡 Используйте `/auth +номер` для добавления")
+                logger.info("="*80)
                 return
+            
+            logger.info(f"   ✅ Найдено аккаунтов для отображения: {len(filtered_accounts)}")
             
             # Подсчёт статусов для общей статистики
             status_counts = {'active': 0, 'reserve': 0, 'broken': 0}
@@ -2708,12 +2718,13 @@ class UltimateCommentBot:
                     text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
                 
                 await event.respond(text)
-                logger.info(f"   Отправлена часть {batch_num//accounts_per_msg + 1}")
+                logger.info(f"   📤 Отправлена часть {batch_num//accounts_per_msg + 1} (аккаунтов в части: {len(batch_accounts)})")
                 # Small delay between messages to avoid flood
                 if batch_num + accounts_per_msg < total:
                     await asyncio.sleep(0.5)
             
-            logger.info("✅ /listaccounts завершена успешно")
+            logger.info("✅ /listaccounts ЗАВЕРШЕНА УСПЕШНО (без ошибок)")
+            logger.info("="*80)
         
         @self.bot_client.on(events.NewMessage(pattern='/delaccount'))
         async def del_account(event):
