@@ -2665,13 +2665,15 @@ class UltimateCommentBot:
                 logger.info(f"   Админ {admin_id} - показываем {len(filtered_accounts)} аккаунтов")
             
             if not filtered_accounts:
-                logger.info("   ❌ Нет аккаунтов для отображения (filtered_accounts пустой)")
-                logger.info("   Отправляю сообщение: 'Нет доступных аккаунтов'")
-                await event.respond("❌ Нет доступных аккаунтов\n\n💡 Используйте `/auth +номер` для добавления")
+                logger.info("   ℹ️ У данного админа нет аккаунтов (filtered_accounts пустой)")
+                logger.info("   Отправляю сообщение: 'У вас нет аккаунтов'")
+                await event.respond("ℹ️ У вас пока нет аккаунтов в системе\n\n💡 Используйте `/auth +номер` для добавления")
                 logger.info("="*80)
                 return
             
             logger.info(f"   ✅ Найдено аккаунтов для отображения: {len(filtered_accounts)}")
+            logger.info(f"   ⚠️ ВАЖНО: /listaccounts НЕ проверяет реальную авторизацию через Telethon!")
+            logger.info(f"   ⚠️ Показываются данные из bot_data.json, для проверки сессий используйте /verify_sessions")
             
             # Подсчёт статусов для общей статистики
             status_counts = {'active': 0, 'reserve': 0, 'broken': 0}
@@ -2848,8 +2850,11 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             
             if not self.accounts_data:
-                await event.respond("❌ Нет аккаунтов для проверки")
+                logger.info("⚠️ /verify_sessions: нет аккаунтов в базе")
+                await event.respond("ℹ️ В системе нет аккаунтов для проверки\n\n💡 Используйте `/auth +номер` для добавления")
                 return
+            
+            logger.info(f"🔍 /verify_sessions: начинаю проверку {len(self.accounts_data)} аккаунтов через Telethon...")
             
             msg = await event.respond(f"🔍 Начинаю проверку {len(self.accounts_data)} аккаунтов...\nЭто может занять ~{len(self.accounts_data)} секунд")
             
@@ -3360,14 +3365,22 @@ class UltimateCommentBot:
                 await event.respond(f"🔍 Ищу каналы по '{query}'...")
                 
                 # Use user account instead of bot (bots can't search)
+                logger.info(f"🔍 /searchchannels: ищем аккаунт с сессией для поиска...")
                 user_account = None
                 for phone, data in self.accounts_data.items():
                     if data.get('session'):
                         user_account = (phone, data)
+                        logger.info(f"   ✅ Найден аккаунт с сессией: {phone}")
                         break
                 
                 if not user_account:
-                    await event.respond("❌ Нет аккаунтов с активной сессией для поиска\n\n💡 Используйте `/auth +номер` для добавления")
+                    logger.warning("   ⚠️ Нет аккаунтов с сохранённой session-строкой")
+                    await event.respond(
+                        "ℹ️ Для поиска каналов нужен хотя бы один аккаунт с активной сессией\n\n"
+                        f"📊 Всего аккаунтов: {len(self.accounts_data)}\n"
+                        "❌ С сессиями: 0\n\n"
+                        "💡 Используйте `/auth +номер` для авторизации аккаунта"
+                    )
                     return
                 
                 phone, account_data = user_account
@@ -3769,7 +3782,23 @@ class UltimateCommentBot:
                 await event.respond("Уже запущен!")
                 return
             if not self.accounts_data:
-                await event.respond("Сначала авторизуйте аккаунты! /auth")
+                logger.info("⚠️ /startmon: нет аккаунтов в базе")
+                await event.respond("ℹ️ В системе нет аккаунтов\n\n💡 Добавьте аккаунты через `/auth +номер`")
+                return
+            
+            # Проверяем наличие активных аккаунтов
+            active_accounts = {phone: data for phone, data in self.accounts_data.items()
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE}
+            
+            if not active_accounts:
+                logger.warning("⚠️ /startmon: нет ACTIVE аккаунтов (все reserve/broken)")
+                await event.respond(
+                    "⚠️ Нет активных аккаунтов для запуска мониторинга\n\n"
+                    f"📊 Всего аккаунтов: {len(self.accounts_data)}\n"
+                    "❌ Активных: 0\n\n"
+                    "💡 Используйте `/toggleaccount +номер` для активации аккаунтов\n"
+                    "💡 Или `/verify_sessions` для проверки авторизации"
+                )
                 return
             self.monitoring = True
             self.monitoring_start_time = datetime.now()
@@ -5929,9 +5958,16 @@ class UltimateCommentBot:
                                 if data.get('session')]
                 
                 if not all_accounts:
-                    await event.respond("❌ Нет аккаунтов с активной сессией\n\n💡 Используйте `/auth +номер` для авторизации")
+                    logger.warning(f"⚠️ /setname: у админа {admin_id or 'SUPER'} нет аккаунтов с сессией")
+                    await event.respond(
+                        "ℹ️ Нет аккаунтов с сохранённой сессией\n\n"
+                        f"📊 Всего ваших аккаунтов: {len(filtered_accounts)}\n"
+                        "❌ С сессиями: 0\n\n"
+                        "💡 Используйте `/auth +номер` для авторизации аккаунта"
+                    )
                     return
                 
+                logger.info(f"✅ /setname: найдено {len(all_accounts)} аккаунтов с сессией")
                 # Build accounts list with status indicators
                 text = "👤 **ИЗМЕНЕНИЕ ИМЕНИ**\n\n"
                 text += "Выберите номер аккаунта:\n\n"
@@ -5985,9 +6021,16 @@ class UltimateCommentBot:
                                 if data.get('session')]
                 
                 if not all_accounts:
-                    await event.respond("❌ Нет аккаунтов с активной сессией\n\n💡 Используйте `/auth +номер` для авторизации")
+                    logger.warning(f"⚠️ /setbio: у админа {admin_id or 'SUPER'} нет аккаунтов с сессией")
+                    await event.respond(
+                        "ℹ️ Нет аккаунтов с сохранённой сессией\n\n"
+                        f"📊 Всего ваших аккаунтов: {len(filtered_accounts)}\n"
+                        "❌ С сессиями: 0\n\n"
+                        "💡 Используйте `/auth +номер` для авторизации аккаунта"
+                    )
                     return
                 
+                logger.info(f"✅ /setbio: найдено {len(all_accounts)} аккаунтов с сессией")
                 # Build accounts list with status indicators
                 text = "📝 **ИЗМЕНЕНИЕ БИО**\n\n"
                 text += "Выберите номер аккаунта:\n\n"
@@ -6041,9 +6084,16 @@ class UltimateCommentBot:
                                 if data.get('session')]
                 
                 if not all_accounts:
-                    await event.respond("❌ Нет аккаунтов с активной сессией\n\n💡 Используйте `/auth +номер` для авторизации")
+                    logger.warning(f"⚠️ /setavatar: у админа {admin_id or 'SUPER'} нет аккаунтов с сессией")
+                    await event.respond(
+                        "ℹ️ Нет аккаунтов с сохранённой сессией\n\n"
+                        f"📊 Всего ваших аккаунтов: {len(filtered_accounts)}\n"
+                        "❌ С сессиями: 0\n\n"
+                        "💡 Используйте `/auth +номер` для авторизации аккаунта"
+                    )
                     return
                 
+                logger.info(f"✅ /setavatar: найдено {len(all_accounts)} аккаунтов с сессией")
                 # Build accounts list with status indicators
                 text = "📷 **ЗАГРУЗКА АВАТАРКИ**\n\n"
                 text += "Выберите номер аккаунта:\n\n"
