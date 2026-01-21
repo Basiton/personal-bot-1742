@@ -2649,8 +2649,11 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             
             logger.info("="*80)
-            logger.info(f"📋 /listaccounts НАЧАЛО | Пользователь: {event.sender_id}")
-            logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
+            logger.info("📋 /listaccounts HANDLER STARTED")
+            logger.info(f"📋 Пользователь: {event.sender_id}")
+            logger.info(f"📋 Всего аккаунтов в системе: {len(self.accounts_data)}")
+            logger.info("📋 ⚠️ ВНИМАНИЕ: Этот обработчик НЕ должен вызывать другие функции проверки!")
+            logger.info("📋 ⚠️ ВНИМАНИЕ: Этот обработчик НЕ должен отправлять 'Нет авторизованных аккаунтов'!")
             
             # Determine admin_id for filtering
             admin_id = self.get_admin_id(event.sender_id)
@@ -2665,15 +2668,16 @@ class UltimateCommentBot:
                 logger.info(f"   Админ {admin_id} - показываем {len(filtered_accounts)} аккаунтов")
             
             if not filtered_accounts:
-                logger.info("   ℹ️ У данного админа нет аккаунтов (filtered_accounts пустой)")
-                logger.info("   Отправляю сообщение: 'У вас нет аккаунтов'")
+                logger.info("📋 ℹ️ У данного админа нет аккаунтов (filtered_accounts пустой)")
+                logger.info("📋 Отправляю сообщение: 'У вас нет аккаунтов'")
                 await event.respond("ℹ️ У вас пока нет аккаунтов в системе\n\n💡 Используйте `/auth +номер` для добавления")
+                logger.info("📋 /listaccounts HANDLER FINISHED (empty accounts)")
                 logger.info("="*80)
                 return
             
-            logger.info(f"   ✅ Найдено аккаунтов для отображения: {len(filtered_accounts)}")
-            logger.info(f"   ⚠️ ВАЖНО: /listaccounts НЕ проверяет реальную авторизацию через Telethon!")
-            logger.info(f"   ⚠️ Показываются данные из bot_data.json, для проверки сессий используйте /verify_sessions")
+            logger.info(f"📋 ✅ Найдено аккаунтов для отображения: {len(filtered_accounts)}")
+            logger.info(f"📋 ⚠️ ВАЖНО: /listaccounts НЕ проверяет реальную авторизацию через Telethon!")
+            logger.info(f"📋 ⚠️ Показываются данные из bot_data.json, для проверки сессий используйте /verify_sessions")
             
             # Подсчёт статусов для общей статистики
             status_counts = {'active': 0, 'reserve': 0, 'broken': 0}
@@ -2686,12 +2690,14 @@ class UltimateCommentBot:
                 else:
                     status_counts['reserve'] += 1
             
-            logger.info(f"   Статусы: ✅ {status_counts['active']} | 🔵 {status_counts['reserve']} | 🔴 {status_counts['broken']}")
+            logger.info(f"📋 Статусы: ✅ {status_counts['active']} | 🔵 {status_counts['reserve']} | 🔴 {status_counts['broken']}")
             
             # Show all accounts, split into multiple messages if needed
             total = len(filtered_accounts)
             accounts_per_msg = 20
             accounts_list = list(filtered_accounts.items())
+            
+            logger.info(f"📋 Начинаю отправку {total} аккаунтов...")
             
             for batch_num in range(0, total, accounts_per_msg):
                 batch_accounts = accounts_list[batch_num:batch_num + accounts_per_msg]
@@ -2720,12 +2726,12 @@ class UltimateCommentBot:
                     text += f"{i}. {status} `{name}` (@{username})\n`   {phone}`\n"
                 
                 await event.respond(text)
-                logger.info(f"   📤 Отправлена часть {batch_num//accounts_per_msg + 1} (аккаунтов в части: {len(batch_accounts)})")
+                logger.info(f"📋 📤 Отправлена часть {batch_num//accounts_per_msg + 1} (аккаунтов в части: {len(batch_accounts)})")
                 # Small delay between messages to avoid flood
                 if batch_num + accounts_per_msg < total:
                     await asyncio.sleep(0.5)
             
-            logger.info("✅ /listaccounts ЗАВЕРШЕНА УСПЕШНО (без ошибок)")
+            logger.info("📋 /listaccounts HANDLER FINISHED SUCCESSFULLY")
             logger.info("="*80)
         
         @self.bot_client.on(events.NewMessage(pattern='/delaccount'))
