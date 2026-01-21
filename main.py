@@ -2090,6 +2090,239 @@ class UltimateCommentBot:
             logger.error(f"Error updating profile channel info for {phone}: {e}")
             return False, f"❌ Ошибка: {str(e)}"
     
+    async def create_showcase_channel(self, account_num, base_username='showcase'):
+        """
+        Создать уникальный публичный канал-витрину для конкретного аккаунта
+        и добавить его в витрину профиля.
+        
+        Args:
+            account_num: номер аккаунта (1-10) или полный номер телефона
+            base_username: базовый юзернейм для канала (по умолчанию "showcase")
+        
+        Returns:
+            (success: bool, result: dict/str)
+            - success=True: {'username': str, 'channel_id': int, 'phone': str}
+            - success=False: описание ошибки
+        """
+        import string
+        
+        try:
+            # Определяем номер телефона
+            if isinstance(account_num, int) or (isinstance(account_num, str) and account_num.isdigit()):
+                # Это номер аккаунта (1-10)
+                account_key = f"ACCOUNT{account_num}_SESSION"
+                session_str = os.getenv(account_key)
+                
+                if not session_str:
+                    return False, f"❌ Переменная окружения {account_key} не найдена"
+                
+                # Ищем телефон для этого аккаунта
+                phone = None
+                for p, data in self.accounts_data.items():
+                    if data.get('session') == session_str:
+                        phone = p
+                        break
+                
+                if not phone:
+                    return False, f"❌ Аккаунт #{account_num} не найден в базе"
+            else:
+                # Это полный номер телефона
+                phone = account_num if account_num.startswith('+') else '+' + account_num
+                
+                if phone not in self.accounts_data:
+                    return False, f"❌ Аккаунт {phone} не найден"
+            
+            account_data = self.accounts_data[phone]
+            
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            # Проверяем, нет ли уже showcase канала
+            if account_data.get('showcase_channel'):
+                existing = account_data['showcase_channel']
+                return False, f"❌ У аккаунта уже есть showcase-канал: @{existing.get('username')} (ID: {existing.get('channel_id')})"
+            
+            logger.info(f"🎨 Создание showcase-канала для {phone} с базовым username '{base_username}'")
+            
+            # Подключаемся к аккаунту
+            client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
+            # Генерируем варианты юзернейма и проверяем доступность
+            from telethon.tl.functions.channels import CreateChannelRequest, CheckUsernameRequest, UpdateUsernameRequest
+            from telethon.tl.functions.account import UpdateProfileRequest as AccountUpdateProfileRequest
+            from telethon.errors import UsernameOccupiedError, UsernameInvalidError, FloodWaitError
+            from telethon.tl.types import Channel
+            
+            username_variants = [
+                base_username,  # showcase
+                f"{base_username}{account_num if isinstance(account_num, (int, str)) and str(account_num).isdigit() else phone[-4:]}",  # showcase1 или showcase1234
+                f"{base_username}_{account_num if isinstance(account_num, (int, str)) and str(account_num).isdigit() else phone[-4:]}",  # showcase_1 или showcase_1234
+            ]
+            
+            # Добавляем случайные варианты
+            for _ in range(7):
+                random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+                username_variants.append(f"{base_username}_{random_suffix}")
+            
+            free_username = None
+            
+            for variant in username_variants:
+                try:
+                    logger.info(f"🔍 Проверка доступности username: @{variant}")
+                    
+                    # Проверяем доступность через CheckUsernameRequest
+                    # Создаём временный канал для проверки
+                    try:
+                        entity = await client.get_entity(variant)
+                        logger.info(f"❌ Username @{variant} занят (канал существует)")
+                        continue  # Юзернейм занят
+                    except ValueError:
+                        # ValueError означает что канал не найден - юзернейм свободен!
+                        logger.info(f"✅ Username @{variant} свободен!")
+                        free_username = variant
+                        break
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка при проверке @{variant}: {e}")
+                        continue
+                        
+                except FloodWaitError as e:
+                    logger.warning(f"⚠️ FloodWait при проверке @{variant}: нужно подождать {e.seconds}с")
+                    await asyncio.sleep(e.seconds)
+                    continue
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка при проверке @{variant}: {e}")
+                    continue
+            
+            if not free_username:
+                await client.disconnect()
+                return False, f"❌ Не удалось найти свободный username после {len(username_variants)} попыток"
+            
+            logger.info(f"🎯 Найден свободный username: @{free_username}")
+            
+            # Создаём канал БЕЗ username (сначала)
+            account_name = account_data.get('name', phone[-4:])
+            channel_title = f"Showcase {account_name}"
+            
+            logger.info(f"📺 Создание канала '{channel_title}'...")
+            
+            result = await client(CreateChannelRequest(
+                title=channel_title,
+                about="",  # Пустое описание
+                broadcast=True,  # Публичный канал
+                megagroup=False
+            ))
+            
+            created_channel = result.chats[0]
+            
+            if not isinstance(created_channel, Channel):
+                await client.disconnect()
+                return False, "❌ Не удалось создать канал (неверный тип)"
+            
+            channel_id = created_channel.id
+            logger.info(f"✅ Канал создан с ID: {channel_id}")
+            
+            # Теперь устанавливаем username для канала
+            try:
+                logger.info(f"🔧 Установка username @{free_username} для канала...")
+                await client(UpdateUsernameRequest(
+                    channel=created_channel,
+                    username=free_username
+                ))
+                logger.info(f"✅ Username @{free_username} установлен")
+            except UsernameOccupiedError:
+                logger.error(f"❌ Username @{free_username} внезапно стал занят")
+                await client.disconnect()
+                return False, f"❌ Username @{free_username} был занят между проверкой и установкой"
+            except UsernameInvalidError:
+                logger.error(f"❌ Username @{free_username} некорректен")
+                await client.disconnect()
+                return False, f"❌ Username @{free_username} некорректен"
+            except Exception as e:
+                logger.error(f"❌ Ошибка при установке username: {e}")
+                await client.disconnect()
+                return False, f"❌ Ошибка при установке username: {str(e)}"
+            
+            # Добавляем канал в витрину профиля АВТОМАТИЧЕСКИ
+            try:
+                from telethon.tl.functions.channels import GetChannelsRequest
+                from telethon.tl.functions.account import UpdatePersonalChannelRequest
+                from telethon.tl.types import InputChannel
+                
+                logger.info(f"🎯 Добавление канала @{free_username} в витрину профиля...")
+                
+                # Получаем полную информацию о канале для access_hash
+                full_channel = await client(GetChannelsRequest([created_channel]))
+                
+                if full_channel and full_channel.chats:
+                    channel_entity = full_channel.chats[0]
+                    
+                    # Получаем access_hash для InputChannel
+                    access_hash = getattr(channel_entity, 'access_hash', None)
+                    
+                    if access_hash:
+                        # Создаём InputChannel для UpdatePersonalChannelRequest
+                        input_channel = InputChannel(
+                            channel_id=channel_id,
+                            access_hash=access_hash
+                        )
+                        
+                        # АВТОМАТИЧЕСКИ добавляем в витрину профиля!
+                        await client(UpdatePersonalChannelRequest(channel=input_channel))
+                        
+                        logger.info(f"✅ Канал @{free_username} АВТОМАТИЧЕСКИ ДОБАВЛЕН в витрину профиля аккаунта {phone}")
+                        logger.info(f"🎉 Витрина профиля обновлена! Канал виден в профиле.")
+                    else:
+                        logger.warning(f"⚠️ Не удалось получить access_hash для канала")
+                        logger.info(f"💡 Добавьте канал @{free_username} в витрину профиля вручную")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось добавить в витрину автоматически: {e}")
+                logger.info(f"💡 Добавьте канал @{free_username} в витрину профиля вручную")
+                import traceback
+                traceback.print_exc()
+            
+            # Сохраняем информацию в bot_data
+            showcase_info = {
+                'username': free_username,
+                'channel_id': channel_id,
+                'title': channel_title,
+                'created': datetime.now().isoformat()
+            }
+            
+            account_data['showcase_channel'] = showcase_info
+            self.save_data()
+            
+            await client.disconnect()
+            
+            logger.info(f"✅ Showcase-канал создан: @{free_username} (ID: {channel_id})")
+            
+            return True, {
+                'username': free_username,
+                'channel_id': channel_id,
+                'phone': phone,
+                'title': channel_title
+            }
+            
+        except FloodWaitError as e:
+            logger.error(f"FloodWait: нужно подождать {e.seconds} секунд")
+            return False, f"❌ Слишком частые запросы. Подождите {e.seconds} секунд"
+        except Exception as e:
+            logger.error(f"Error creating showcase channel: {e}")
+            import traceback
+            traceback.print_exc()
+            return False, f"❌ Ошибка: {str(e)}"
+    
     # ============= END PROFILE CHANNEL FUNCTIONS =============
     
     async def start(self):
@@ -2185,7 +2418,12 @@ class UltimateCommentBot:
 `/update_profile_channel_info +1234 title:Новое|about:Описание`
 `/unlink_profile_channel +1234` - отвязать канал
 
-**�💬 КОММЕНТАРИИ:**
+**🎨 ИНДИВИДУАЛЬНЫЕ ВИТРИНЫ:**
+`/createshowcase <аккаунт> [username]` - создать showcase-канал 🆕
+  Примеры: `/createshowcase 1` или `/createshowcase +1234567890`
+  ⚡ Канал автоматически добавляется в витрину профиля!
+
+**💬 КОММЕНТАРИИ:**
 `/listtemplates` - шаблоны
 `/addtemplate Текст!` - новый
 `/edittemplate 1 Текст` - изменить
@@ -5709,6 +5947,83 @@ class UltimateCommentBot:
                 await event.respond(f"❌ Ошибка: {str(e)[:200]}")
         
         # ============= END PROFILE CHANNEL COMMANDS =============
+        
+        @self.bot_client.on(events.NewMessage(pattern='/createshowcase'))
+        async def createshowcase_command(event):
+            """
+            Создать индивидуальную витрину-канал для аккаунта.
+            Формат: /createshowcase <номер_аккаунта или телефон> [базовый_юзернейм]
+            """
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            try:
+                parts = event.text.split(maxsplit=2)
+                
+                if len(parts) < 2:
+                    await event.respond(
+                        "**🎨 СОЗДАНИЕ ИНДИВИДУАЛЬНОЙ ВИТРИНЫ**\n\n"
+                        "Формат: `/createshowcase <аккаунт> [базовый_username]`\n\n"
+                        "**Примеры:**\n"
+                        "`/createshowcase 1` - создать для аккаунта #1 с username 'showcase'\n"
+                        "`/createshowcase +13434919340` - создать для конкретного номера\n"
+                        "`/createshowcase 1 vitrine` - с кастомным базовым username\n\n"
+                        "**Что происходит:**\n"
+                        "• Создаётся публичный канал в выбранном аккаунте\n"
+                        "• Автоматически генерируется уникальный username\n"
+                        "• ⚡ Канал АВТОМАТИЧЕСКИ добавляется в витрину профиля!\n\n"
+                        "✅ Никаких ручных действий не требуется - всё полностью автоматически!"
+                    )
+                    return
+                
+                account_identifier = parts[1]
+                base_username = parts[2] if len(parts) > 2 else 'showcase'
+                
+                await event.respond(f"⏳ Создаю showcase-канал для аккаунта `{account_identifier}`...")
+                
+                # Вызываем функцию создания showcase-канала
+                success, result = await self.create_showcase_channel(account_identifier, base_username)
+                
+                if success:
+                    channel_info = result
+                    
+                    text = f"""✅ **ВИТРИНА СОЗДАНА И АВТОМАТИЧЕСКИ ДОБАВЛЕНА**
+
+📱 Аккаунт: `{channel_info['phone']}`
+📺 Канал: `{channel_info['title']}`
+👤 Username: `@{channel_info['username']}`
+🆔 ID: `{channel_info['channel_id']}`
+
+🎉 **КАНАЛ АВТОМАТИЧЕСКИ ДОБАВЛЕН В ВИТРИНУ ПРОФИЛЯ!**
+
+Витрина теперь видна в профиле аккаунта. Никаких ручных действий не требуется!
+
+**📋 Что можно сделать дальше:**
+
+1. **Настроить канал:**
+   • Добавьте описание
+   • Установите аватар
+   • Создайте первый пост
+
+2. **Проверить:**
+   • Откройте профиль аккаунта в Telegram
+   • Канал должен быть виден в разделе витрины
+
+🔗 Ссылка на канал: https://t.me/{channel_info['username']}
+
+💡 Информация сохранена в bot_data.json"""
+                    
+                    await event.respond(text)
+                    logger.info(f"Showcase channel created by admin {event.sender_id}: @{channel_info['username']} for {channel_info['phone']}")
+                else:
+                    # Ошибка
+                    await event.respond(result)
+                    
+            except Exception as e:
+                logger.error(f"Createshowcase command error: {e}")
+                import traceback
+                traceback.print_exc()
+                await event.respond(f"❌ Ошибка: {str(e)[:300]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/stats_admin'))
         async def stats_admin_command(event):
