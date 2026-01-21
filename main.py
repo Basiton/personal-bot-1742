@@ -2408,20 +2408,22 @@ class UltimateCommentBot:
 `/searchchannels тема` - поиск по теме
 `/addparsed тема 10` - добавить найденные в работу
 
-**� КАНАЛЫ-ВИТРИНЫ:**
-`/create_profile_channel +1234 Название` - создать новый
-`/link_profile_channel +1234 @channel` - привязать существующий
-`/list_profile_channels` - список всех витрин
-`/set_profile_channel_avatar +1234` - установить аватар
-`/set_profile_channel_post +1234 Текст` - создать пост
-`/set_profile_channel_post +1234 pin Текст` - пост с закреплением
-`/update_profile_channel_info +1234 title:Новое|about:Описание`
-`/unlink_profile_channel +1234` - отвязать канал
+**📺 КАНАЛЫ-ВИТРИНЫ:**
+`/showcase create +1234 Название` - создать новый канал
+`/showcase link +1234 @channel` - привязать существующий
+`/showcase list` - список всех витрин
+`/showcase set avatar +1234` - установить аватар
+`/showcase set post +1234 Текст` - создать пост (+ pin для закрепления)
+`/showcase set info +1234 title:Новое|about:Описание` - обновить инфо
+`/showcase unlink +1234` - отвязать канал
+`/showcase info +1234` - информация о канале
 
 **🎨 ИНДИВИДУАЛЬНЫЕ ВИТРИНЫ:**
 `/createshowcase <аккаунт> [username]` - создать showcase-канал 🆕
   Примеры: `/createshowcase 1` или `/createshowcase +1234567890`
   ⚡ Канал автоматически добавляется в витрину профиля!
+  💡 Разница: /showcase create требует ручного добавления в профиль,
+      а /createshowcase делает это автоматически через API
 
 **💬 КОММЕНТАРИИ:**
 `/listtemplates` - шаблоны
@@ -5478,26 +5480,94 @@ class UltimateCommentBot:
         
         # ============= PROFILE CHANNEL COMMANDS =============
         
-        @self.bot_client.on(events.NewMessage(pattern='/create_profile_channel'))
-        async def create_profile_channel_command(event):
-            """Создать канал-витрину для аккаунта"""
-            if not await self.is_admin(event.sender_id): return
+        # ============= SHOWCASE (UNIFIED PROFILE CHANNEL) COMMANDS =============
+        # 
+        # ВАЖНО: Разница между /showcase create и /createshowcase:
+        # 
+        # /showcase create — создаёт обычный канал через create_profile_channel()
+        #   • НЕ добавляет автоматически в витрину профиля
+        #   • Требует ручного добавления через настройки Telegram
+        #   • Сохраняет в account_data['profile_channel']
+        #   • Подходит для гибкой настройки
+        # 
+        # /createshowcase — создаёт showcase-канал через create_showcase_channel()
+        #   • ✅ АВТОМАТИЧЕСКИ добавляет в витрину профиля через UpdatePersonalChannelRequest
+        #   • Генерирует уникальный username (10 вариантов)
+        #   • Сохраняет в account_data['showcase_channel']
+        #   • Полностью автоматизирован
+        # 
+        # Обе команды нужны для разных сценариев использования.
+        # ============================================================================
+        
+        @self.bot_client.on(events.NewMessage(pattern=r'^/showcase'))
+        async def showcase_command(event):
+            """Единая команда для управления витринами-каналами"""
+            if not await self.is_admin(event.sender_id):
+                return
             
             try:
-                parts = event.text.split(maxsplit=2)
+                parts = event.text.split(maxsplit=1)
                 
-                if len(parts) < 3:
+                if len(parts) < 2:
+                    await event.respond(
+                        "**🎨 УПРАВЛЕНИЕ ВИТРИНАМИ**\n\n"
+                        "**Создание и связывание:**\n"
+                        "`/showcase create <phone> <название>` - создать новую витрину\n"
+                        "`/showcase link <phone> @channel` - привязать существующий канал\n"
+                        "`/showcase unlink <phone>` - отвязать витрину\n\n"
+                        "**Просмотр:**\n"
+                        "`/showcase list` - список всех витрин\n"
+                        "`/showcase info <phone>` - информация о витрине\n\n"
+                        "**Настройка:**\n"
+                        "`/showcase set <phone> avatar` - установить аватар\n"
+                        "`/showcase set <phone> title \"Название\"` - изменить название\n"
+                        "`/showcase set <phone> about \"Описание\"` - изменить описание\n"
+                        "`/showcase set <phone> post \"Текст\"` - создать пост\n"
+                        "`/showcase set <phone> post_pin \"Текст\"` - пост с закреплением"
+                    )
+                    return
+                
+                args = parts[1].split(maxsplit=1)
+                action = args[0].lower()
+                
+                if action == "create":
+                    await self._showcase_create(event, args[1] if len(args) > 1 else "")
+                elif action == "link":
+                    await self._showcase_link(event, args[1] if len(args) > 1 else "")
+                elif action == "unlink":
+                    await self._showcase_unlink(event, args[1] if len(args) > 1 else "")
+                elif action == "list":
+                    await self._showcase_list(event)
+                elif action == "info":
+                    await self._showcase_info(event, args[1] if len(args) > 1 else "")
+                elif action == "set":
+                    await self._showcase_set(event, args[1] if len(args) > 1 else "")
+                else:
+                    await event.respond(f"❌ Неизвестная подкоманда: `{action}`\n\nИспользуйте `/showcase` для справки")
+                    
+            except Exception as e:
+                logger.error(f"Showcase command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        async def _showcase_create(self, event, args_str):
+            """Создать канал-витрину для аккаунта"""
+            logger.info(f"📺 /showcase create: инициирован admin {event.sender_id}")
+            
+            try:
+                parts = args_str.split(maxsplit=1)
+                
+                if len(parts) < 2:
                     await event.respond(
                         "**🎨 СОЗДАНИЕ КАНАЛА-ВИТРИНЫ**\n\n"
-                        "Формат: `/create_profile_channel <phone> <название>`\n\n"
+                        "Формат: `/showcase create <phone> <название>`\n\n"
                         "**Пример:**\n"
-                        "`/create_profile_channel +13434919340 Мой Магазин`\n\n"
+                        "`/showcase create +13434919340 Мой Магазин`\n\n"
                         "Канал создаётся от имени указанного аккаунта."
                     )
                     return
                 
-                phone = parts[1]
-                title = parts[2]
+                phone = parts[0]
+                title = parts[1]
                 
                 # Нормализация номера
                 if not phone.startswith('+'):
@@ -5524,7 +5594,7 @@ class UltimateCommentBot:
                         f"• Название: `{existing.get('title')}`\n"
                         f"• Username: `{username}`\n"
                         f"• ID: `{existing.get('id')}`\n\n"
-                        f"Используйте `/unlink_profile_channel {phone}` чтобы отвязать"
+                        f"Используйте `/showcase unlink {phone}` чтобы отвязать"
                     )
                     return
                 
@@ -5545,41 +5615,39 @@ class UltimateCommentBot:
 👤 Username: `{username}`
 
 🎨 **Следующие шаги:**
-1. `/set_profile_channel_avatar {phone}` - установить аватар
-2. `/set_profile_channel_post {phone}` - создать приветственный пост
-3. Вручную добавить канал в профиль через клиент
+• `/showcase set {phone} avatar` - установить аватар
+• `/showcase set {phone} post "Текст"` - создать пост
 
-💡 Пока у канала нет username, его нельзя найти через поиск."""
+💡 Используйте `/showcase info {phone}` для просмотра информации"""
                     
                     await event.respond(text)
-                    logger.info(f"Profile channel created by admin {event.sender_id} for {phone}")
+                    logger.info(f"📺 /showcase create: успешно создан канал для {phone} (admin {event.sender_id})")
                 else:
                     await event.respond(result)
                     
             except Exception as e:
-                logger.error(f"Create profile channel command error: {e}")
+                logger.error(f"Showcase create error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:200]}")
         
-        @self.bot_client.on(events.NewMessage(pattern='/link_profile_channel'))
-        async def link_profile_channel_command(event):
+        async def _showcase_link(self, event, args_str):
             """Привязать существующий канал к профилю аккаунта"""
-            if not await self.is_admin(event.sender_id): return
+            logger.info(f"📺 /showcase link: инициирован admin {event.sender_id}")
             
             try:
-                parts = event.text.split(maxsplit=2)
+                parts = args_str.split(maxsplit=1)
                 
-                if len(parts) < 3:
+                if len(parts) < 2:
                     await event.respond(
                         "**🔗 ПРИВЯЗКА СУЩЕСТВУЮЩЕГО КАНАЛА**\n\n"
-                        "Формат: `/link_profile_channel <phone> <@channel>`\n\n"
+                        "Формат: `/showcase link <phone> <@channel>`\n\n"
                         "**Пример:**\n"
-                        "`/link_profile_channel +13434919340 @myshowcase`\n\n"
+                        "`/showcase link +13434919340 @myshowcase`\n\n"
                         "⚠️ Аккаунт должен быть админом канала!"
                     )
                     return
                 
-                phone = parts[1]
-                channel_identifier = parts[2]
+                phone = parts[0]
+                channel_identifier = parts[1].lstrip('@')  # Убираем @ если есть
                 
                 # Нормализация номера
                 if not phone.startswith('+'):
@@ -5605,7 +5673,7 @@ class UltimateCommentBot:
                         f"⚠️ У аккаунта уже есть канал-витрина:\n"
                         f"• Название: `{existing.get('title')}`\n"
                         f"• Username: `{username}`\n\n"
-                        f"Используйте `/unlink_profile_channel {phone}` чтобы отвязать"
+                        f"Используйте `/showcase unlink {phone}` чтобы отвязать"
                     )
                     return
                 
@@ -5627,34 +5695,29 @@ class UltimateCommentBot:
 📝 Описание: {channel_info.get('about', 'не задано')}
 
 🎨 **Управление:**
-• `/set_profile_channel_avatar {phone}` - изменить аватар
-• `/set_profile_channel_post {phone}` - создать пост
-• `/update_profile_channel_info {phone}` - обновить название/описание
-
-💡 Для отображения в профиле добавьте канал вручную через клиент"""
+• `/showcase set {phone} avatar` - изменить аватар
+• `/showcase set {phone} post "Текст"` - создать пост
+• `/showcase set {phone} title "Новое"` - изменить название"""
                     
                     await event.respond(text)
-                    logger.info(f"Profile channel linked by admin {event.sender_id} for {phone}")
+                    logger.info(f"📺 /showcase link: успешно привязан {channel_identifier} к {phone} (admin {event.sender_id})")
                 else:
                     await event.respond(result)
                     
             except Exception as e:
-                logger.error(f"Link profile channel command error: {e}")
+                logger.error(f"Showcase link error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:200]}")
         
-        @self.bot_client.on(events.NewMessage(pattern='/unlink_profile_channel'))
-        async def unlink_profile_channel_command(event):
+        async def _showcase_unlink(self, event, args_str):
             """Отвязать канал-витрину от аккаунта"""
-            if not await self.is_admin(event.sender_id): return
+            logger.info(f"📺 /showcase unlink: инициирован admin {event.sender_id}")
             
             try:
-                parts = event.text.split()
+                phone = args_str.strip()
                 
-                if len(parts) < 2:
-                    await event.respond("Формат: `/unlink_profile_channel <phone>`")
+                if not phone:
+                    await event.respond("Формат: `/showcase unlink <phone>`")
                     return
-                
-                phone = parts[1]
                 
                 # Нормализация номера
                 if not phone.startswith('+'):
@@ -5686,228 +5749,20 @@ class UltimateCommentBot:
                 
                 await event.respond(
                     f"✅ Канал отвязан от аккаунта\n\n"
-                    f"📺 Канал: `{channel_info['title']}`\n"
-                    f"👤 Username: `{username}`\n\n"
-                    f"⚠️ Сам канал НЕ удалён, только отвязан от бота.\n"
-                    f"Вы можете привязать его снова или удалить через клиент."
+                    f"📺 Канал: `{channel_info.get('title')}`\n"
+                    f"👤 Username: `{username}`\n"
+                    f"🆔 ID: `{channel_info.get('id')}`\n\n"
+                    f"💡 Канал продолжает существовать, но больше не связан с аккаунтом в боте"
                 )
-                logger.info(f"Profile channel unlinked by admin {event.sender_id} for {phone}")
+                logger.info(f"📺 /showcase unlink: канал отвязан от {phone} (admin {event.sender_id})")
                 
             except Exception as e:
-                logger.error(f"Unlink profile channel command error: {e}")
+                logger.error(f"Showcase unlink error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:200]}")
         
-        @self.bot_client.on(events.NewMessage(pattern='/set_profile_channel_avatar'))
-        async def set_profile_channel_avatar_command(event):
-            """Установить аватар для канала-витрины"""
-            if not await self.is_admin(event.sender_id): return
-            
-            try:
-                parts = event.text.split()
-                
-                if len(parts) < 2:
-                    await event.respond(
-                        "**🖼️ УСТАНОВКА АВАТАРА КАНАЛА**\n\n"
-                        "Формат:\n"
-                        "1. Отправьте команду: `/set_profile_channel_avatar <phone>`\n"
-                        "2. Затем отправьте изображение (reply на эту команду)\n\n"
-                        "**Пример:**\n"
-                        "`/set_profile_channel_avatar +13434919340`\n"
-                        "затем прикрепите фото"
-                    )
-                    return
-                
-                phone = parts[1]
-                
-                # Нормализация номера
-                if not phone.startswith('+'):
-                    phone = '+' + phone
-                
-                # Проверяем что аккаунт принадлежит админу
-                account_data = self.accounts_data.get(phone)
-                if not account_data:
-                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
-                    return
-                
-                # Проверяем права доступа
-                if not self.is_super_admin(event.sender_id):
-                    if account_data.get('admin_id') != event.sender_id:
-                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
-                        return
-                
-                # Проверяем, есть ли канал
-                if not account_data.get('profile_channel'):
-                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
-                    return
-                
-                # Ждём изображение
-                msg = await event.respond(f"📸 Отправьте изображение для аватара канала (reply на это сообщение)")
-                
-                # Сохраняем состояние ожидания
-                self.user_states[event.sender_id] = {
-                    'action': 'waiting_profile_channel_avatar',
-                    'phone': phone,
-                    'message_id': msg.id
-                }
-                
-            except Exception as e:
-                logger.error(f"Set profile channel avatar command error: {e}")
-                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/set_profile_channel_post'))
-        async def set_profile_channel_post_command(event):
-            """Создать пост в канале-витрине"""
-            if not await self.is_admin(event.sender_id): return
-            
-            try:
-                parts = event.text.split(maxsplit=2)
-                
-                if len(parts) < 3:
-                    await event.respond(
-                        "**📝 СОЗДАНИЕ ПОСТА В КАНАЛЕ**\n\n"
-                        "Формат: `/set_profile_channel_post <phone> <текст>`\n\n"
-                        "**Пример:**\n"
-                        "`/set_profile_channel_post +13434919340 Добро пожаловать! 🎉`\n\n"
-                        "Для закрепления поста добавьте `pin` в конец:\n"
-                        "`/set_profile_channel_post +13434919340 pin Закреплённое объявление`"
-                    )
-                    return
-                
-                phone = parts[1]
-                text_part = parts[2]
-                
-                # Проверяем наличие флага pin
-                pin = False
-                if text_part.startswith('pin '):
-                    pin = True
-                    post_text = text_part[4:]  # Убираем "pin "
-                else:
-                    post_text = text_part
-                
-                # Нормализация номера
-                if not phone.startswith('+'):
-                    phone = '+' + phone
-                
-                # Проверяем что аккаунт принадлежит админу
-                account_data = self.accounts_data.get(phone)
-                if not account_data:
-                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
-                    return
-                
-                # Проверяем права доступа
-                if not self.is_super_admin(event.sender_id):
-                    if account_data.get('admin_id') != event.sender_id:
-                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
-                        return
-                
-                # Проверяем, есть ли канал
-                profile_channel = account_data.get('profile_channel')
-                if not profile_channel:
-                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
-                    return
-                
-                await event.respond(f"⏳ Создаю пост в канале `{profile_channel['title']}`...")
-                
-                # Создаём пост
-                success, message, post_id = await self.create_profile_channel_post(phone, post_text, pin)
-                
-                if success:
-                    channel_username = profile_channel.get('username', 'без username')
-                    
-                    text = f"""✅ **ПОСТ СОЗДАН**
-
-📺 Канал: `{profile_channel['title']}`
-👤 Username: `{channel_username}`
-🆔 Post ID: `{post_id}`
-📌 Закреплён: {"Да" if pin else "Нет"}
-
-📝 Текст:
-{post_text[:100]}{"..." if len(post_text) > 100 else ""}"""
-                    
-                    await event.respond(text)
-                    logger.info(f"Post created by admin {event.sender_id} in profile channel of {phone}")
-                else:
-                    await event.respond(message)
-                    
-            except Exception as e:
-                logger.error(f"Set profile channel post command error: {e}")
-                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/update_profile_channel_info'))
-        async def update_profile_channel_info_command(event):
-            """Обновить название и описание канала-витрины"""
-            if not await self.is_admin(event.sender_id): return
-            
-            try:
-                parts = event.text.split(maxsplit=2)
-                
-                if len(parts) < 3:
-                    await event.respond(
-                        "**✏️ ОБНОВЛЕНИЕ ИНФОРМАЦИИ КАНАЛА**\n\n"
-                        "Формат: `/update_profile_channel_info <phone> title:<название>|about:<описание>`\n\n"
-                        "**Примеры:**\n"
-                        "`/update_profile_channel_info +1234 title:Новое Название`\n"
-                        "`/update_profile_channel_info +1234 about:Описание канала`\n"
-                        "`/update_profile_channel_info +1234 title:Магазин|about:Лучшие товары`"
-                    )
-                    return
-                
-                phone = parts[1]
-                params = parts[2]
-                
-                # Нормализация номера
-                if not phone.startswith('+'):
-                    phone = '+' + phone
-                
-                # Проверяем что аккаунт принадлежит админу
-                account_data = self.accounts_data.get(phone)
-                if not account_data:
-                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
-                    return
-                
-                # Проверяем права доступа
-                if not self.is_super_admin(event.sender_id):
-                    if account_data.get('admin_id') != event.sender_id:
-                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
-                        return
-                
-                # Проверяем, есть ли канал
-                if not account_data.get('profile_channel'):
-                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
-                    return
-                
-                # Парсим параметры
-                title = None
-                about = None
-                
-                for param in params.split('|'):
-                    param = param.strip()
-                    if param.startswith('title:'):
-                        title = param[6:]
-                    elif param.startswith('about:'):
-                        about = param[6:]
-                
-                if not title and not about:
-                    await event.respond("❌ Укажите хотя бы один параметр: title: или about:")
-                    return
-                
-                await event.respond("⏳ Обновляю информацию канала...")
-                
-                # Обновляем
-                success, message = await self.update_profile_channel_info(phone, title, about)
-                await event.respond(message)
-                
-                if success:
-                    logger.info(f"Profile channel info updated by admin {event.sender_id} for {phone}")
-                    
-            except Exception as e:
-                logger.error(f"Update profile channel info command error: {e}")
-                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
-        
-        @self.bot_client.on(events.NewMessage(pattern='/list_profile_channels'))
-        async def list_profile_channels_command(event):
+        async def _showcase_list(self, event):
             """Показать все каналы-витрины"""
-            if not await self.is_admin(event.sender_id): return
+            logger.info(f"📺 /showcase list: запрошен admin {event.sender_id}")
             
             try:
                 # Фильтруем аккаунты по админу
@@ -5938,15 +5793,212 @@ class UltimateCommentBot:
                     text += f"   👤 {channel_username}\n"
                     text += f"   🆔 ID: `{channel['id']}`\n\n"
                 
-                text += "💡 Команды управления: /help"
+                text += "💡 Команды: `/showcase info <phone>` для подробностей"
                 
                 await event.respond(text)
                 
             except Exception as e:
-                logger.error(f"List profile channels command error: {e}")
+                logger.error(f"Showcase list error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:200]}")
         
-        # ============= END PROFILE CHANNEL COMMANDS =============
+        async def _showcase_info(self, event, args_str):
+            """Показать информацию о витрине конкретного аккаунта"""
+            logger.info(f"📺 /showcase info: запрошен admin {event.sender_id}")
+            
+            try:
+                phone = args_str.strip()
+                
+                if not phone:
+                    await event.respond("Формат: `/showcase info <phone>`")
+                    return
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                admin_id = self.get_admin_id(event.sender_id)
+                if admin_id is not None and account_data.get('admin_id') != admin_id:
+                    await event.respond("❌ У вас нет доступа к этому аккаунту")
+                    return
+                
+                # Проверяем, есть ли канал
+                profile_channel = account_data.get('profile_channel')
+                if not profile_channel:
+                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
+                    return
+                
+                account_name = account_data.get('name', phone[-10:])
+                channel_username = profile_channel.get('username', 'без username')
+                about = profile_channel.get('about', 'не задано')
+                
+                text = f"""**📺 ИНФОРМАЦИЯ О ВИТРИНЕ**
+
+👤 **Аккаунт:** {account_name} (`{phone}`)
+
+📺 **Канал:**
+• Название: `{profile_channel['title']}`
+• Username: `{channel_username}`
+• ID: `{profile_channel['id']}`
+• Описание: {about}
+• Создан: {profile_channel.get('created', 'неизвестно')}
+
+🎨 **Управление:**
+• `/showcase set {phone} avatar` - изменить аватар
+• `/showcase set {phone} title "Новое название"`
+• `/showcase set {phone} about "Новое описание"`
+• `/showcase set {phone} post "Текст поста"`
+• `/showcase unlink {phone}` - отвязать канал"""
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                logger.error(f"Showcase info error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        async def _showcase_set(self, event, args_str):
+            """Установить различные параметры витрины"""
+            logger.info(f"📺 /showcase set: инициирован admin {event.sender_id}")
+            
+            try:
+                parts = args_str.split(maxsplit=2)
+                
+                if len(parts) < 2:
+                    await event.respond(
+                        "**⚙️ НАСТРОЙКА ВИТРИНЫ**\n\n"
+                        "Формат: `/showcase set <phone> <параметр> [значение]`\n\n"
+                        "**Параметры:**\n"
+                        "`avatar` - установить аватар (затем отправьте фото)\n"
+                        "`title \"Название\"` - изменить название\n"
+                        "`about \"Описание\"` - изменить описание\n"
+                        "`post \"Текст\"` - создать пост\n"
+                        "`post_pin \"Текст\"` - создать закреплённый пост"
+                    )
+                    return
+                
+                phone = parts[0]
+                param = parts[1].lower()
+                value = parts[2] if len(parts) > 2 else ""
+                
+                # Нормализация номера
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                # Проверяем что аккаунт принадлежит админу
+                account_data = self.accounts_data.get(phone)
+                if not account_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                # Проверяем права доступа
+                if not self.is_super_admin(event.sender_id):
+                    if account_data.get('admin_id') != event.sender_id:
+                        await event.respond("❌ Вы можете управлять каналами только своих аккаунтов")
+                        return
+                
+                # Проверяем, есть ли канал
+                profile_channel = account_data.get('profile_channel')
+                if not profile_channel:
+                    await event.respond(f"❌ У аккаунта `{phone}` нет канала-витрины")
+                    return
+                
+                # Обработка разных параметров
+                if param == "avatar":
+                    # Ждём изображение
+                    msg = await event.respond(
+                        f"📸 **УСТАНОВКА АВАТАРА**\n\n"
+                        f"Отправьте изображение (reply на это сообщение)\n\n"
+                        f"⚠️ Ограничения:\n"
+                        f"• Максимум: 10 MB\n"
+                        f"• Форматы: JPG, PNG, WebP"
+                    )
+                    
+                    # Сохраняем состояние ожидания
+                    self.user_states[event.sender_id] = {
+                        'action': 'waiting_profile_channel_avatar',
+                        'phone': phone,
+                        'message_id': msg.id
+                    }
+                
+                elif param == "title":
+                    if not value:
+                        await event.respond("❌ Укажите новое название: `/showcase set <phone> title \"Новое название\"`")
+                        return
+                    
+                    if len(value) > 128:
+                        await event.respond(f"❌ Название слишком длинное!\n\nМаксимум: 128 символов\nУ вас: {len(value)} символов")
+                        return
+                    
+                    await event.respond("⏳ Обновляю название канала...")
+                    success, message = await self.update_profile_channel_info(phone, title=value, about=None)
+                    await event.respond(message)
+                    
+                    if success:
+                        logger.info(f"📺 /showcase set title: обновлено для {phone} (admin {event.sender_id})")
+                
+                elif param == "about":
+                    if not value:
+                        await event.respond("❌ Укажите описание: `/showcase set <phone> about \"Описание канала\"`")
+                        return
+                    
+                    if len(value) > 255:
+                        await event.respond(f"❌ Описание слишком длинное!\n\nМаксимум: 255 символов\nУ вас: {len(value)} символов")
+                        return
+                    
+                    await event.respond("⏳ Обновляю описание канала...")
+                    success, message = await self.update_profile_channel_info(phone, title=None, about=value)
+                    await event.respond(message)
+                    
+                    if success:
+                        logger.info(f"📺 /showcase set about: обновлено для {phone} (admin {event.sender_id})")
+                
+                elif param in ["post", "post_pin"]:
+                    if not value:
+                        await event.respond(f"❌ Укажите текст поста: `/showcase set <phone> {param} \"Текст\"`")
+                        return
+                    
+                    if len(value) > 4096:
+                        await event.respond(f"❌ Пост слишком длинный!\n\nМаксимум: 4096 символов\nУ вас: {len(value)} символов")
+                        return
+                    
+                    pin = (param == "post_pin")
+                    await event.respond(f"⏳ Создаю пост в канале `{profile_channel['title']}`...")
+                    
+                    # Создаём пост
+                    success, message, post_id = await self.create_profile_channel_post(phone, value, pin)
+                    
+                    if success:
+                        channel_username = profile_channel.get('username', 'без username')
+                        
+                        text = f"""✅ **ПОСТ СОЗДАН**
+
+📺 Канал: `{profile_channel['title']}`
+👤 Username: `{channel_username}`
+🆔 Post ID: `{post_id}`
+📌 Закреплён: {"Да" if pin else "Нет"}
+
+📝 Текст:
+{value[:100]}{"..." if len(value) > 100 else ""}"""
+                        
+                        await event.respond(text)
+                        logger.info(f"📺 /showcase set {param}: пост создан в {phone} (admin {event.sender_id})")
+                    else:
+                        await event.respond(message)
+                
+                else:
+                    await event.respond(f"❌ Неизвестный параметр: `{param}`\n\nИспользуйте `/showcase set` для справки")
+                    
+            except Exception as e:
+                logger.error(f"Showcase set error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        # ============= END SHOWCASE COMMANDS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/createshowcase'))
         async def createshowcase_command(event):
