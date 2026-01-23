@@ -278,6 +278,78 @@ def humanize_comment(text: str) -> str:
     
     return text
 
+def normalize_account_id(phone_or_id):
+    """
+    Преобразует любой формат телефона в короткий ID (код страны)
+    
+    Примеры:
+    +15178979270 → +1
+    +79261234567 → +7
+    +442071234567 → +44
+    +380991234567 → +380
+    +1 → +1 (уже короткий)
+    1 → +1
+    """
+    if not phone_or_id:
+        return None
+    
+    # Убираем пробелы
+    phone_or_id = str(phone_or_id).strip()
+    
+    # Если уже короткий формат (+1, +7, +44, +380)
+    if phone_or_id.startswith('+') and len(phone_or_id) <= 4:
+        return phone_or_id
+    
+    # Если просто цифры без + (1, 7, 44, 380)
+    if phone_or_id.isdigit() and len(phone_or_id) <= 3:
+        return f"+{phone_or_id}"
+    
+    # Если полный номер - извлекаем код страны
+    if phone_or_id.startswith('+'):
+        digits = phone_or_id[1:]  # Убираем +
+    else:
+        digits = phone_or_id
+    
+    # Определяем код страны по первым цифрам
+    # Проверяем в порядке: сначала более длинные коды (3 цифры), затем 2 цифры, затем 1 цифру
+    
+    # 3-цифровые коды
+    if digits.startswith('380'):  # Украина
+        return '+380'
+    elif digits.startswith('371'):  # Латвия
+        return '+371'
+    elif digits.startswith('370'):  # Литва
+        return '+370'
+    
+    # 2-цифровые коды
+    elif digits.startswith('86'):  # Китай
+        return '+86'
+    elif digits.startswith('44'):  # UK
+        return '+44'
+    elif digits.startswith('49'):  # Германия
+        return '+49'
+    
+    # 1-цифровые коды
+    elif digits.startswith('1'):  # США/Канада
+        return '+1'
+    elif digits.startswith(('7', '8')):  # Россия/Казахстан (8 старый формат)
+        return '+7'
+    # Добавляем другие коды стран по необходимости
+    else:
+        # Общая логика: если длина > 10, берём 1-3 первые цифры
+        if len(digits) >= 10:
+            # Пробуем 3 цифры
+            if digits[:3] in ['380', '371', '370']:
+                return f"+{digits[:3]}"
+            # Пробуем 2 цифры
+            elif digits[:2] in ['20', '30', '31', '32', '33', '34', '36', '39', '40', '41', '43', '44', '45', '46', '47', '48', '49']:
+                return f"+{digits[:2]}"
+            # По умолчанию 1 цифра
+            else:
+                return f"+{digits[0]}"
+        
+        return f"+{phone_or_id}"
+
 class UltimateCommentBot:
     def __init__(self):
         # ============= ЗАЩИТА: Один клиент на один session-файл =============
@@ -2109,12 +2181,13 @@ class UltimateCommentBot:
                 )
                 return
             
-            phone = parts[0]
+            raw_phone = parts[0]
             title = parts[1]
             
             # Нормализация номера
-            if not phone.startswith('+'):
-                phone = '+' + phone
+            phone = normalize_account_id(raw_phone)
+            if raw_phone != phone:
+                logger.info(f"📞 Normalized {raw_phone} → {phone}")
             
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(phone)
@@ -2189,12 +2262,13 @@ class UltimateCommentBot:
                 )
                 return
             
-            phone = parts[0]
+            raw_phone = parts[0]
             channel_identifier = parts[1].lstrip('@')  # Убираем @ если есть
             
             # Нормализация номера
-            if not phone.startswith('+'):
-                phone = '+' + phone
+            phone = normalize_account_id(raw_phone)
+            if raw_phone != phone:
+                logger.info(f"📞 Normalized {raw_phone} → {phone}")
             
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(phone)
@@ -2256,15 +2330,16 @@ class UltimateCommentBot:
         logger.info(f"📺 /showcase unlink: инициирован admin {event.sender_id}, args={args_str}")
         
         try:
-            phone = args_str.strip()
+            raw_phone = args_str.strip()
             
-            if not phone:
+            if not raw_phone:
                 await event.respond("Формат: `/showcase unlink <phone>`")
                 return
             
             # Нормализация номера
-            if not phone.startswith('+'):
-                phone = '+' + phone
+            phone = normalize_account_id(raw_phone)
+            if raw_phone != phone:
+                logger.info(f"📞 Normalized {raw_phone} → {phone}")
             
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(phone)
@@ -2349,15 +2424,16 @@ class UltimateCommentBot:
         logger.info(f"📺 /showcase info: запрошен admin {event.sender_id}, args={args_str}")
         
         try:
-            phone = args_str.strip()
+            raw_phone = args_str.strip()
             
-            if not phone:
+            if not raw_phone:
                 await event.respond("Формат: `/showcase info <phone>`")
                 return
             
             # Нормализация номера
-            if not phone.startswith('+'):
-                phone = '+' + phone
+            phone = normalize_account_id(raw_phone)
+            if raw_phone != phone:
+                logger.info(f"📞 Normalized {raw_phone} → {phone}")
             
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(phone)
@@ -2426,13 +2502,14 @@ class UltimateCommentBot:
                 )
                 return
             
-            phone = parts[0]
+            raw_phone = parts[0]
             param = parts[1].lower()
             value = parts[2] if len(parts) > 2 else ""
             
             # Нормализация номера
-            if not phone.startswith('+'):
-                phone = '+' + phone
+            phone = normalize_account_id(raw_phone)
+            if raw_phone != phone:
+                logger.info(f"📞 Normalized {raw_phone} → {phone}")
             
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(phone)
