@@ -2111,53 +2111,53 @@ class UltimateCommentBot:
     
     async def update_profile_channel_info(self, phone, title=None, about=None):
         """
-        Обновить название и/или описание profile_channel.
-        
-        Returns: (success: bool, message: str)
+        Обновляет информацию витрины (только сохраняет в bot_data)
+        НЕ пытается редактировать через Telegram API!
         """
         try:
-            account_data = self.accounts_data.get(phone)
-            if not account_data:
-                return False, f"❌ Аккаунт {phone} не найден"
-            
-            profile_channel = account_data.get('showcase_channel')
-            if not profile_channel:
-                return False, f"❌ У аккаунта {phone} нет привязанного канала"
-            
-            # Получаем канал
-            from telethon.tl.types import PeerChannel
-            
-            channel_id = profile_channel['channel_id']
-            # Явно используем PeerChannel чтобы избежать интерпретации как user_id
-            peer = PeerChannel(channel_id)
-            
-            results = []
-            
-            if title is not None:
-                await self.client.edit_entity(
-                    entity=peer,
-                    title=title
-                )
-                profile_channel['title'] = title
-                results.append("✅ Название обновлено")
-            
-            if about is not None:
-                await self.client.edit_entity(
-                    entity=peer,
-                    about=about
-                )
-                profile_channel['about'] = about
-                results.append("✅ Описание обновлено")
-            
-            if results:
-                self.save_data()
-            
-            logger.info(f"✅ Profile channel info updated for {phone}")
-            return True, "\n".join(results)
+            logger.info(f"📝 Обновляю информацию витрины для {phone}")
+
+            # Ищем аккаунт
+            account_key = None
+            if phone in self.accounts_data:
+                account_key = phone
+            else:
+                for key, acc_data in self.accounts_data.items():
+                    if acc_data.get('phone') == phone:
+                        account_key = key
+                        break
+
+            if not account_key:
+                logger.error(f"Аккаунт {phone} не найден")
+                return False
+
+            account_data = self.accounts_data[account_key]
+
+            # Проверяем витрину
+            showcase = account_data.get('showcase_channel')
+            if not showcase:
+                logger.error(f"У аккаунта {phone} нет витрины")
+                return False
+
+            # Обновляем ТОЛЬКО в памяти и в bot_data.json
+            if title:
+                logger.info(f"  Обновляю title: {showcase.get('title')} → {title}")
+                showcase['title'] = title
+
+            if about:
+                logger.info(f"  Обновляю about: {showcase.get('about', '')} → {about}")
+                showcase['about'] = about
+
+            # Сохраняем в bot_data
+            self.accounts_data[account_key]['showcase_channel'] = showcase
+            self.save_data()
+
+            logger.info("✅ Витрина обновлена в bot_data.json")
+            return True
             
         except Exception as e:
-            logger.error(f"Error updating profile channel info for {phone}: {e}")
-            return False, f"❌ Ошибка: {str(e)}"
+            logger.error(f"❌ Ошибка при обновлении витрины: {e}", exc_info=True)
+            return False
     
     # ============= SHOWCASE HELPER METHODS =============
 
@@ -2665,8 +2665,8 @@ class UltimateCommentBot:
                     return
                 
                 await event.respond("⏳ Обновляю название канала...")
-                success, message = await self.update_profile_channel_info(account_key, title=value, about=None)
-                await event.respond(message)
+                success = await self.update_profile_channel_info(account_key, title=value, about=None)
+                await event.respond("✅ Витрина обновлена!" if success else "❌ Ошибка при обновлении витрины")
                 
                 if success:
                     logger.info(f"📺 /showcase set title: обновлено для {display_phone} (admin {event.sender_id})")
@@ -2681,8 +2681,8 @@ class UltimateCommentBot:
                     return
                 
                 await event.respond("⏳ Обновляю описание канала...")
-                success, message = await self.update_profile_channel_info(account_key, title=None, about=value)
-                await event.respond(message)
+                success = await self.update_profile_channel_info(account_key, title=None, about=value)
+                await event.respond("✅ Витрина обновлена!" if success else "❌ Ошибка при обновлении витрины")
                 
                 if success:
                     logger.info(f"📺 /showcase set about: обновлено для {display_phone} (admin {event.sender_id})")
@@ -2733,7 +2733,7 @@ class UltimateCommentBot:
                     
                     logger.info(f"📺 Вызов update_profile_channel_info: phone={display_phone}, title={title}, about={about}")
                     
-                    success, message = await self.update_profile_channel_info(account_key, title=title, about=about)
+                    success = await self.update_profile_channel_info(account_key, title=title, about=about)
                     
                     if success:
                         response_text = "✅ **ИНФОРМАЦИЯ ОБНОВЛЕНА**\n\n"
@@ -2745,8 +2745,8 @@ class UltimateCommentBot:
                         await event.respond(response_text)
                         logger.info(f"📺 /showcase set info: успешно обновлено для {display_phone} (admin {event.sender_id})")
                     else:
-                        await event.respond(message)
-                        logger.error(f"📺 /showcase set info: ошибка для {display_phone}: {message}")
+                        await event.respond("❌ Ошибка при обновлении витрины")
+                        logger.error(f"📺 /showcase set info: ошибка для {display_phone}")
                         
                 except Exception as e:
                     logger.error(f"📺 Ошибка парсинга info параметров: {e}")
