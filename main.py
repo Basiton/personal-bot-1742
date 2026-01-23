@@ -5877,6 +5877,7 @@ class UltimateCommentBot:
                         "`avatar` - установить аватар (затем отправьте фото)\n"
                         "`title \"Название\"` - изменить название\n"
                         "`about \"Описание\"` - изменить описание\n"
+                        "`info title:Название|about:Описание` - обновить всё сразу\n"
                         "`post \"Текст\"` - создать пост\n"
                         "`post_pin \"Текст\"` - создать закреплённый пост"
                     )
@@ -5957,6 +5958,74 @@ class UltimateCommentBot:
                     
                     if success:
                         logger.info(f"📺 /showcase set about: обновлено для {phone} (admin {event.sender_id})")
+                
+                elif param == "info":
+                    # Обработка формата: title:Новое|about:Описание
+                    if not value:
+                        await event.respond("❌ Укажите параметры: `/showcase set <phone> info title:Название|about:Описание`")
+                        return
+                    
+                    logger.info(f"📺 Парсинг info параметров: {value}")
+                    
+                    # Парсим параметры
+                    info_params = {}
+                    try:
+                        # Разделяем по |
+                        pairs = value.split('|')
+                        logger.info(f"📺 Разделено на пары: {pairs}")
+                        
+                        for pair in pairs:
+                            if ':' in pair:
+                                key, val = pair.split(':', 1)
+                                key = key.strip().lower()
+                                val = val.strip()
+                                
+                                if key in ['title', 'about']:
+                                    info_params[key] = val
+                                    logger.info(f"📺 Извлечено: {key} = {val}")
+                        
+                        if not info_params:
+                            await event.respond("❌ Не удалось распарсить параметры!\n\nФормат: `title:Название|about:Описание`")
+                            return
+                        
+                        # Валидация
+                        if 'title' in info_params and len(info_params['title']) > 128:
+                            await event.respond(f"❌ Название слишком длинное!\n\nМаксимум: 128 символов\nУ вас: {len(info_params['title'])} символов")
+                            return
+                        
+                        if 'about' in info_params and len(info_params['about']) > 255:
+                            await event.respond(f"❌ Описание слишком длинное!\n\nМаксимум: 255 символов\nУ вас: {len(info_params['about'])} символов")
+                            return
+                        
+                        # Обновляем информацию о канале
+                        await event.respond("⏳ Обновляю информацию канала...")
+                        
+                        title = info_params.get('title')
+                        about = info_params.get('about')
+                        
+                        logger.info(f"📺 Вызов update_profile_channel_info: phone={phone}, title={title}, about={about}")
+                        
+                        success, message = await self.update_profile_channel_info(phone, title=title, about=about)
+                        
+                        if success:
+                            response_text = "✅ **ИНФОРМАЦИЯ ОБНОВЛЕНА**\n\n"
+                            if title:
+                                response_text += f"📝 Название: `{title}`\n"
+                            if about:
+                                response_text += f"📄 Описание: `{about}`\n"
+                            
+                            await event.respond(response_text)
+                            logger.info(f"📺 /showcase set info: успешно обновлено для {phone} (admin {event.sender_id})")
+                        else:
+                            await event.respond(message)
+                            logger.error(f"📺 /showcase set info: ошибка для {phone}: {message}")
+                            
+                    except Exception as e:
+                        logger.error(f"📺 Ошибка парсинга info параметров: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        await event.respond(f"❌ Ошибка парсинга параметров: {str(e)}\n\nФормат: `title:Название|about:Описание`")
+                        return
                 
                 elif param in ["post", "post_pin"]:
                     if not value:
