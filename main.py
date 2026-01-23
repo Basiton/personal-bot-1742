@@ -5499,11 +5499,13 @@ class UltimateCommentBot:
         # Обе команды нужны для разных сценариев использования.
         # ============================================================================
         
-        @self.bot_client.on(events.NewMessage(pattern=r'^/showcase'))
+        @self.bot_client.on(events.NewMessage(pattern=r'^/showcase(?:\s|$)'))
         async def showcase_command(event):
             """Единая команда для управления витринами-каналами"""
             if not await self.is_admin(event.sender_id):
                 return
+            
+            logger.info(f"🎨 /showcase команда получена от admin {event.sender_id}: {event.text}")
             
             try:
                 parts = event.text.split(maxsplit=1)
@@ -5530,6 +5532,8 @@ class UltimateCommentBot:
                 args = parts[1].split(maxsplit=1)
                 action = args[0].lower()
                 
+                logger.info(f"🎨 /showcase подкоманда: {action}")
+                
                 if action == "create":
                     await self._showcase_create(event, args[1] if len(args) > 1 else "")
                 elif action == "link":
@@ -5551,7 +5555,7 @@ class UltimateCommentBot:
         
         async def _showcase_create(self, event, args_str):
             """Создать канал-витрину для аккаунта"""
-            logger.info(f"📺 /showcase create: инициирован admin {event.sender_id}")
+            logger.info(f"📺 /showcase create: инициирован admin {event.sender_id}, args={args_str}")
             
             try:
                 parts = args_str.split(maxsplit=1)
@@ -5631,7 +5635,7 @@ class UltimateCommentBot:
         
         async def _showcase_link(self, event, args_str):
             """Привязать существующий канал к профилю аккаунта"""
-            logger.info(f"📺 /showcase link: инициирован admin {event.sender_id}")
+            logger.info(f"📺 /showcase link: инициирован admin {event.sender_id}, args={args_str}")
             
             try:
                 parts = args_str.split(maxsplit=1)
@@ -5710,7 +5714,7 @@ class UltimateCommentBot:
         
         async def _showcase_unlink(self, event, args_str):
             """Отвязать канал-витрину от аккаунта"""
-            logger.info(f"📺 /showcase unlink: инициирован admin {event.sender_id}")
+            logger.info(f"📺 /showcase unlink: инициирован admin {event.sender_id}, args={args_str}")
             
             try:
                 phone = args_str.strip()
@@ -5803,7 +5807,7 @@ class UltimateCommentBot:
         
         async def _showcase_info(self, event, args_str):
             """Показать информацию о витрине конкретного аккаунта"""
-            logger.info(f"📺 /showcase info: запрошен admin {event.sender_id}")
+            logger.info(f"📺 /showcase info: запрошен admin {event.sender_id}, args={args_str}")
             
             try:
                 phone = args_str.strip()
@@ -5864,7 +5868,7 @@ class UltimateCommentBot:
         
         async def _showcase_set(self, event, args_str):
             """Установить различные параметры витрины"""
-            logger.info(f"📺 /showcase set: инициирован admin {event.sender_id}")
+            logger.info(f"📺 /showcase set: инициирован admin {event.sender_id}, args={args_str}")
             
             try:
                 parts = args_str.split(maxsplit=2)
