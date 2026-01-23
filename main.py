@@ -1829,11 +1829,28 @@ class UltimateCommentBot:
             if not account_data:
                 return False, f"❌ Аккаунт {phone} не найден"
             
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            # Создаём USER-клиент для операции (bot не может создавать каналы!)
+            user_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await user_client.connect()
+            
+            if not await user_client.is_user_authorized():
+                await user_client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
             # Создаём канал через MTProto
             from telethon.tl.functions.channels import CreateChannelRequest
             from telethon.tl.types import Channel
             
-            result = await self.client(CreateChannelRequest(
+            result = await user_client(CreateChannelRequest(
                 title=title,
                 about=about,
                 broadcast=True,  # broadcast channel (not megagroup)
@@ -1844,6 +1861,7 @@ class UltimateCommentBot:
             created_channel = result.chats[0]
             
             if not isinstance(created_channel, Channel):
+                await user_client.disconnect()
                 return False, "❌ Не удалось создать канал"
             
             # Получаем username канала (может быть None)
@@ -1861,6 +1879,8 @@ class UltimateCommentBot:
             # Сохраняем в аккаунте
             account_data['showcase_channel'] = channel_info
             self.save_data()
+            
+            await user_client.disconnect()
             
             logger.info(f"✅ Profile channel created for {phone}: {channel_info}")
             return True, channel_info
@@ -1883,15 +1903,34 @@ class UltimateCommentBot:
             if not account_data:
                 return False, f"❌ Аккаунт {phone} не найден"
             
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            # Создаём USER-клиент (bot не имеет доступа к admin-правам каналов)
+            user_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await user_client.connect()
+            
+            if not await user_client.is_user_authorized():
+                await user_client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
             # Получаем информацию о канале
             from telethon.tl.types import Channel
             
             try:
-                entity = await self.client.get_entity(channel_identifier)
+                entity = await user_client.get_entity(channel_identifier)
             except Exception as e:
+                await user_client.disconnect()
                 return False, f"❌ Канал не найден: {str(e)}"
             
             if not isinstance(entity, Channel):
+                await user_client.disconnect()
                 return False, f"❌ {channel_identifier} не является каналом"
             
             # Проверяем права админа
@@ -1899,8 +1938,8 @@ class UltimateCommentBot:
             from telethon.tl.types import ChannelParticipantCreator, ChannelParticipantAdmin
             
             try:
-                me = await self.client.get_me()
-                participant = await self.client(GetParticipantRequest(
+                me = await user_client.get_me()
+                participant = await user_client(GetParticipantRequest(
                     channel=entity,
                     participant=me
                 ))
@@ -1909,14 +1948,16 @@ class UltimateCommentBot:
                 is_admin = isinstance(participant.participant, (ChannelParticipantCreator, ChannelParticipantAdmin))
                 
                 if not is_admin:
+                    await user_client.disconnect()
                     return False, f"❌ Вы не являетесь админом канала {channel_identifier}"
                     
             except Exception as e:
+                await user_client.disconnect()
                 return False, f"❌ Не удалось проверить права: {str(e)}"
             
             # Получаем полную информацию о канале
             from telethon.tl.functions.channels import GetFullChannelRequest
-            full_channel = await self.client(GetFullChannelRequest(channel=entity))
+            full_channel = await user_client(GetFullChannelRequest(channel=entity))
             
             channel_username = getattr(entity, 'username', None)
             channel_info = {
@@ -1930,6 +1971,8 @@ class UltimateCommentBot:
             # Сохраняем в аккаунте
             account_data['showcase_channel'] = channel_info
             self.save_data()
+            
+            await user_client.disconnect()
             
             logger.info(f"✅ Profile channel linked for {phone}: {channel_info}")
             return True, channel_info
@@ -1953,18 +1996,37 @@ class UltimateCommentBot:
             if not profile_channel:
                 return False, f"❌ У аккаунта {phone} нет привязанного канала"
             
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            # Создаём USER-клиент (bot не может редактировать каналы)
+            user_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await user_client.connect()
+            
+            if not await user_client.is_user_authorized():
+                await user_client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
             # Получаем канал
             channel_id = profile_channel['channel_id']
-            entity = await self.client.get_entity(channel_id)
+            entity = await user_client.get_entity(channel_id)
             
             # Загружаем аватар
             from telethon.tl.functions.channels import EditPhotoRequest
             
-            uploaded_file = await self.client.upload_file(avatar_file)
-            await self.client(EditPhotoRequest(
+            uploaded_file = await user_client.upload_file(avatar_file)
+            await user_client(EditPhotoRequest(
                 channel=entity,
                 photo=uploaded_file
             ))
+            
+            await user_client.disconnect()
             
             logger.info(f"✅ Avatar set for profile channel of {phone}")
             return True, "✅ Аватар канала обновлён"
@@ -1993,23 +2055,42 @@ class UltimateCommentBot:
             if not profile_channel:
                 return False, f"❌ У аккаунта {phone} нет привязанного канала", None
             
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован", None
+            
+            # Создаём USER-клиент (bot не может постить в каналы от имени user)
+            user_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await user_client.connect()
+            
+            if not await user_client.is_user_authorized():
+                await user_client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию", None
+            
             # Получаем канал
             channel_id = profile_channel['channel_id']
-            entity = await self.client.get_entity(channel_id)
+            entity = await user_client.get_entity(channel_id)
             
             # Отправляем пост
-            message = await self.client.send_message(entity, text)
+            message = await user_client.send_message(entity, text)
             post_id = message.id
             
             # Закрепляем если нужно
             if pin:
                 from telethon.tl.functions.messages import UpdatePinnedMessageRequest
-                await self.client(UpdatePinnedMessageRequest(
+                await user_client(UpdatePinnedMessageRequest(
                     peer=entity,
                     id=post_id,
                     unpin=False,
                     pm_oneside=False
                 ))
+            
+            await user_client.disconnect()
             
             logger.info(f"✅ Post created in profile channel of {phone}, post_id={post_id}, pinned={pin}")
             return True, "✅ Пост создан" + (" и закреплён" if pin else ""), post_id
@@ -2033,9 +2114,26 @@ class UltimateCommentBot:
             if not profile_channel:
                 return False, f"❌ У аккаунта {phone} нет привязанного канала"
             
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
+            # Создаём USER-клиент (bot не может редактировать каналы)
+            user_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await user_client.connect()
+            
+            if not await user_client.is_user_authorized():
+                await user_client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
+            
             # Получаем канал
             channel_id = profile_channel['channel_id']
-            entity = await self.client.get_entity(channel_id)
+            entity = await user_client.get_entity(channel_id)
             
             # Обновляем информацию
             from telethon.tl.functions.channels import EditTitleRequest, EditAboutRequest
@@ -2043,7 +2141,7 @@ class UltimateCommentBot:
             results = []
             
             if title is not None:
-                await self.client(EditTitleRequest(
+                await user_client(EditTitleRequest(
                     channel=entity,
                     title=title
                 ))
@@ -2051,7 +2149,7 @@ class UltimateCommentBot:
                 results.append("✅ Название обновлено")
             
             if about is not None:
-                await self.client(EditAboutRequest(
+                await user_client(EditAboutRequest(
                     channel=entity,
                     about=about
                 ))
@@ -2060,6 +2158,8 @@ class UltimateCommentBot:
             
             if results:
                 self.save_data()
+            
+            await user_client.disconnect()
             
             logger.info(f"✅ Profile channel info updated for {phone}")
             return True, "\n".join(results)
@@ -2733,12 +2833,29 @@ class UltimateCommentBot:
             
             account_data = self.accounts_data[phone]
             
+            if not account_data.get('session'):
+                return False, f"❌ Аккаунт {phone} не авторизован"
+            
             # Проверяем, нет ли уже showcase канала
             if account_data.get('showcase_channel'):
                 existing = account_data['showcase_channel']
                 return False, f"❌ У аккаунта уже есть showcase-канал: @{existing.get('username')} (ID: {existing.get('channel_id')})"
             
             logger.info(f"🎨 Создание showcase-канала для {phone} с базовым username '{base_username}'")
+            
+            # Создаём USER-клиент (bot НЕ МОЖЕТ создавать каналы!)
+            user_client = TelegramClient(
+                StringSession(account_data['session']), 
+                API_ID, 
+                API_HASH,
+                proxy=account_data.get('proxy')
+            )
+            
+            await user_client.connect()
+            
+            if not await user_client.is_user_authorized():
+                await user_client.disconnect()
+                return False, f"❌ Аккаунт {phone} потерял авторизацию"
             
             # Генерируем варианты юзернейма и проверяем доступность
             from telethon.tl.functions.channels import CreateChannelRequest, CheckUsernameRequest, UpdateUsernameRequest
@@ -2766,7 +2883,7 @@ class UltimateCommentBot:
                     # Проверяем доступность через CheckUsernameRequest
                     # Создаём временный канал для проверки
                     try:
-                        entity = await self.client.get_entity(variant)
+                        entity = await user_client.get_entity(variant)
                         logger.info(f"❌ Username @{variant} занят (канал существует)")
                         continue  # Юзернейм занят
                     except ValueError:
@@ -2787,6 +2904,7 @@ class UltimateCommentBot:
                     continue
             
             if not free_username:
+                await user_client.disconnect()
                 return False, f"❌ Не удалось найти свободный username после {len(username_variants)} попыток"
             
             logger.info(f"🎯 Найден свободный username: @{free_username}")
@@ -2797,7 +2915,7 @@ class UltimateCommentBot:
             
             logger.info(f"📺 Создание канала '{channel_title}'...")
             
-            result = await self.client(CreateChannelRequest(
+            result = await user_client(CreateChannelRequest(
                 title=channel_title,
                 about="",  # Пустое описание
                 broadcast=True,  # Публичный канал
@@ -2807,6 +2925,7 @@ class UltimateCommentBot:
             created_channel = result.chats[0]
             
             if not isinstance(created_channel, Channel):
+                await user_client.disconnect()
                 return False, "❌ Не удалось создать канал (неверный тип)"
             
             channel_id = created_channel.id
@@ -2815,19 +2934,22 @@ class UltimateCommentBot:
             # Теперь устанавливаем username для канала
             try:
                 logger.info(f"🔧 Установка username @{free_username} для канала...")
-                await self.client(UpdateUsernameRequest(
+                await user_client(UpdateUsernameRequest(
                     channel=created_channel,
                     username=free_username
                 ))
                 logger.info(f"✅ Username @{free_username} установлен")
             except UsernameOccupiedError:
                 logger.error(f"❌ Username @{free_username} внезапно стал занят")
+                await user_client.disconnect()
                 return False, f"❌ Username @{free_username} был занят между проверкой и установкой"
             except UsernameInvalidError:
                 logger.error(f"❌ Username @{free_username} некорректен")
+                await user_client.disconnect()
                 return False, f"❌ Username @{free_username} некорректен"
             except Exception as e:
                 logger.error(f"❌ Ошибка при установке username: {e}")
+                await user_client.disconnect()
                 return False, f"❌ Ошибка при установке username: {str(e)}"
             
             # Добавляем канал в витрину профиля АВТОМАТИЧЕСКИ
@@ -2839,7 +2961,7 @@ class UltimateCommentBot:
                 logger.info(f"🎯 Добавление канала @{free_username} в витрину профиля...")
                 
                 # Получаем полную информацию о канале для access_hash
-                full_channel = await self.client(GetChannelsRequest([created_channel]))
+                full_channel = await user_client(GetChannelsRequest([created_channel]))
                 
                 if full_channel and full_channel.chats:
                     channel_entity = full_channel.chats[0]
@@ -2855,7 +2977,7 @@ class UltimateCommentBot:
                         )
                         
                         # АВТОМАТИЧЕСКИ добавляем в витрину профиля!
-                        await self.client(UpdatePersonalChannelRequest(channel=input_channel))
+                        await user_client(UpdatePersonalChannelRequest(channel=input_channel))
                         
                         logger.info(f"✅ Канал @{free_username} АВТОМАТИЧЕСКИ ДОБАВЛЕН в витрину профиля аккаунта {phone}")
                         logger.info(f"🎉 Витрина профиля обновлена! Канал виден в профиле.")
@@ -2879,6 +3001,8 @@ class UltimateCommentBot:
             
             account_data['showcase_channel'] = showcase_info
             self.save_data()
+            
+            await user_client.disconnect()
             
             logger.info(f"✅ Showcase-канал создан: @{free_username} (ID: {channel_id})")
             
