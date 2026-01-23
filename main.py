@@ -2124,54 +2124,33 @@ class UltimateCommentBot:
             if not profile_channel:
                 return False, f"❌ У аккаунта {phone} нет привязанного канала"
             
-            if not account_data.get('session'):
-                return False, f"❌ Аккаунт {phone} не авторизован"
-            
-            # Создаём USER-клиент (bot не может редактировать каналы)
-            user_client = TelegramClient(
-                StringSession(account_data['session']), 
-                API_ID, 
-                API_HASH,
-                proxy=account_data.get('proxy')
-            )
-            
-            await user_client.connect()
-            
-            if not await user_client.is_user_authorized():
-                await user_client.disconnect()
-                return False, f"❌ Аккаунт {phone} потерял авторизацию"
-            
             # Получаем канал
             from telethon.tl.types import PeerChannel
-            from telethon.tl.functions.channels import EditTitleRequest, EditAboutRequest
             
             channel_id = profile_channel['channel_id']
             # Явно используем PeerChannel чтобы избежать интерпретации как user_id
             peer = PeerChannel(channel_id)
-            entity = await user_client.get_entity(peer)
             
             results = []
             
             if title is not None:
-                await user_client(EditTitleRequest(
-                    channel=entity,
+                await self.client.edit_entity(
+                    entity=peer,
                     title=title
-                ))
+                )
                 profile_channel['title'] = title
                 results.append("✅ Название обновлено")
             
             if about is not None:
-                await user_client(EditAboutRequest(
-                    channel=entity,
+                await self.client.edit_entity(
+                    entity=peer,
                     about=about
-                ))
+                )
                 profile_channel['about'] = about
                 results.append("✅ Описание обновлено")
             
             if results:
                 self.save_data()
-            
-            await user_client.disconnect()
             
             logger.info(f"✅ Profile channel info updated for {phone}")
             return True, "\n".join(results)
