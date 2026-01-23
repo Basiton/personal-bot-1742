@@ -2571,8 +2571,14 @@ class UltimateCommentBot:
             param = parts[1].lower()
             value = parts[2] if len(parts) > 2 else ""
             
+            # ЛОГИРОВАНИЕ 1
+            logger.info(f"🔍 _showcase_set: Ищем аккаунт {raw_phone}")
+            logger.info(f"📊 Доступные ключи (до reload): {list(self.accounts_data.keys())}")
+
             # Загружаем актуальные данные
             self.load_data()
+
+            logger.info(f"📊 Доступные ключи (после reload): {list(self.accounts_data.keys())}")
 
             account_key, search_id = self._resolve_account_key(raw_phone)
 
@@ -2590,6 +2596,8 @@ class UltimateCommentBot:
 
             display_phone = self._get_display_phone(account_key, account_data)
             logger.info(f"Account data: {account_data}")
+            logger.info(f"📋 Данные аккаунта: {list(account_data.keys())}")
+            logger.info(f"📺 showcase_channel: {account_data.get('showcase_channel')}")
             
             # Проверяем права доступа
             if not self.is_super_admin(event.sender_id):
@@ -2600,11 +2608,12 @@ class UltimateCommentBot:
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
             if not showcase or not showcase.get('channel_id'):
-                logger.error(f"No showcase for account {display_phone}")
-                await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
+                logger.error(f"❌ У аккаунта {display_phone} нет showcase_channel")
+                await event.respond(f"❌ У аккаунта `{display_phone}` нет привязанного канала")
                 return
 
             profile_channel = showcase
+            logger.info(f"🎯 Обновляю витрину: {showcase}")
             
             # Обработка разных параметров
             if param == "avatar":
