@@ -2143,7 +2143,7 @@ class UltimateCommentBot:
             
             # Получаем канал
             from telethon.tl.types import PeerChannel
-            from telethon.tl.functions.channels import EditTitleRequest, EditAboutRequest
+            from telethon.tl.functions.channels import EditTitleRequest, EditChannelRequest
             
             channel_id = profile_channel['channel_id']
             # Явно используем PeerChannel чтобы избежать интерпретации как user_id
@@ -2161,7 +2161,7 @@ class UltimateCommentBot:
                 results.append("✅ Название обновлено")
             
             if about is not None:
-                await user_client(EditAboutRequest(
+                await user_client(EditChannelRequest(
                     channel=entity,
                     about=about
                 ))
@@ -2581,7 +2581,7 @@ class UltimateCommentBot:
             if len(parts) < 2:
                 await event.respond(
                     "**⚙️ НАСТРОЙКА ВИТРИНЫ**\n\n"
-                    "Формат: `/showcase set <phone> <параметр> [значение]`\n\n"
+                    "Формат: `/showcase set <параметр> <phone> [значение]`\n\n"
                     "**Параметры:**\n"
                     "`avatar` - установить аватар (затем отправьте фото)\n"
                     "`title \"Название\"` - изменить название\n"
@@ -2592,8 +2592,8 @@ class UltimateCommentBot:
                 )
                 return
             
-            raw_phone = parts[0]
-            param = parts[1].lower()
+            param = parts[0].lower()
+            raw_phone = parts[1]
             value = parts[2] if len(parts) > 2 else ""
             
             # ЛОГИРОВАНИЕ 1
