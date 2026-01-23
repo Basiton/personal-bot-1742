@@ -2158,6 +2158,146 @@ class UltimateCommentBot:
         except Exception as e:
             logger.error(f"❌ Ошибка при обновлении витрины: {e}", exc_info=True)
             return False
+
+    async def edit_channel_in_telegram(self, phone, title=None, about=None, photo_path=None):
+        """
+        Редактирует канал в Telegram (название, описание, фото)
+        """
+        try:
+            logger.info(f"📝 Редактирую канал для {phone}")
+
+            # 1. Ищем аккаунт
+            account_key = None
+            if phone in self.accounts_data:
+                account_key = phone
+            else:
+                for key, acc_data in self.accounts_data.items():
+                    if acc_data.get('phone') == phone:
+                        account_key = key
+                        break
+
+            if not account_key:
+                logger.error(f"Аккаунт {phone} не найден")
+                return False
+
+            account_data = self.accounts_data[account_key]
+            showcase = account_data.get('showcase_channel')
+
+            if not showcase:
+                logger.error(f"У {phone} нет витрины")
+                return False
+
+            channel_username = showcase.get('username')
+            channel_id = showcase.get('channel_id')
+
+            if not channel_username and not channel_id:
+                logger.error("Нет username/id канала")
+                return False
+
+            # 2. Создаём клиент с сессией аккаунта
+            session_data = account_data.get('session')
+            if not session_data:
+                logger.error(f"Нет сессии для {phone}")
+                return False
+
+            from telethon.sessions import StringSession
+
+            proxy = account_data.get('proxy')
+
+            # Создаём временный клиент
+            temp_client = TelegramClient(
+                StringSession(session_data),
+                api_id=API_ID,
+                api_hash=API_HASH,
+                proxy=proxy
+            )
+
+            success = True
+
+            async with temp_client:
+                # Проверяем авторизацию
+                if not await temp_client.is_user_authorized():
+                    logger.error(f"Сессия {phone} не авторизована")
+                    return False
+
+                # Получаем entity канала
+                try:
+                    if channel_username:
+                        username = channel_username if channel_username.startswith('@') else f"@{channel_username}"
+                        entity = await temp_client.get_entity(username)
+                    else:
+                        from telethon.tl.types import PeerChannel
+                        entity = await temp_client.get_entity(PeerChannel(channel_id))
+                except Exception as e:
+                    logger.error(f"Не найден канал: {e}")
+                    return False
+
+                from telethon.tl.types import InputChannel
+
+                input_channel = InputChannel(
+                    channel_id=entity.id,
+                    access_hash=entity.access_hash
+                )
+
+                # Меняем title
+                if title:
+                    try:
+                        logger.info(f"  Меняю title на: {title}")
+                        from telethon.tl.functions.channels import EditTitleRequest
+
+                        await temp_client(EditTitleRequest(
+                            channel=input_channel,
+                            title=title
+                        ))
+                        logger.info("  ✅ Title изменён")
+                    except Exception as e:
+                        success = False
+                        logger.error(f"  ❌ Ошибка title: {e}")
+
+                # Меняем about
+                if about:
+                    try:
+                        logger.info(f"  Меняю about на: {about}")
+                        from telethon.tl.functions.messages import EditChatAboutRequest
+
+                        await temp_client(EditChatAboutRequest(
+                            peer=input_channel,
+                            about=about
+                        ))
+                        logger.info("  ✅ About изменён")
+                    except Exception as e:
+                        success = False
+                        logger.error(f"  ❌ Ошибка about: {e}")
+
+                # Меняем фото
+                if photo_path:
+                    try:
+                        logger.info(f"  Меняю фото: {photo_path}")
+                        from telethon.tl.functions.channels import EditPhotoRequest
+                        from telethon.tl.types import InputChatUploadedPhoto
+
+                        # Загружаем файл
+                        uploaded = await temp_client.upload_file(photo_path)
+
+                        await temp_client(EditPhotoRequest(
+                            channel=input_channel,
+                            photo=InputChatUploadedPhoto(uploaded)
+                        ))
+                        logger.info("  ✅ Фото изменено")
+                    except Exception as e:
+                        success = False
+                        logger.error(f"  ❌ Ошибка фото: {e}")
+
+            if success:
+                logger.info("✅ Канал обновлён в Telegram")
+            else:
+                logger.warning("⚠️ Канал обновлён в Telegram частично или с ошибками")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка редактирования канала: {e}", exc_info=True)
+            return False
     
     # ============= SHOWCASE HELPER METHODS =============
 
@@ -2665,10 +2805,21 @@ class UltimateCommentBot:
                     return
                 
                 await event.respond("⏳ Обновляю название канала...")
-                success = await self.update_profile_channel_info(account_key, title=value, about=None)
-                await event.respond("✅ Витрина обновлена!" if success else "❌ Ошибка при обновлении витрины")
-                
-                if success:
+                telegram_success = await self.edit_channel_in_telegram(
+                    phone=account_key,
+                    title=value,
+                    about=None
+                )
+                json_success = await self.update_profile_channel_info(account_key, title=value, about=None)
+
+                if telegram_success:
+                    await event.respond("✅ Канал обновлён в Telegram и bot_data!")
+                elif json_success:
+                    await event.respond("⚠️ Сохранено в bot_data, но Telegram не обновлён")
+                else:
+                    await event.respond("❌ Ошибка сохранения")
+
+                if json_success:
                     logger.info(f"📺 /showcase set title: обновлено для {display_phone} (admin {event.sender_id})")
             
             elif param == "about":
@@ -2681,10 +2832,21 @@ class UltimateCommentBot:
                     return
                 
                 await event.respond("⏳ Обновляю описание канала...")
-                success = await self.update_profile_channel_info(account_key, title=None, about=value)
-                await event.respond("✅ Витрина обновлена!" if success else "❌ Ошибка при обновлении витрины")
-                
-                if success:
+                telegram_success = await self.edit_channel_in_telegram(
+                    phone=account_key,
+                    title=None,
+                    about=value
+                )
+                json_success = await self.update_profile_channel_info(account_key, title=None, about=value)
+
+                if telegram_success:
+                    await event.respond("✅ Канал обновлён в Telegram и bot_data!")
+                elif json_success:
+                    await event.respond("⚠️ Сохранено в bot_data, но Telegram не обновлён")
+                else:
+                    await event.respond("❌ Ошибка сохранения")
+
+                if json_success:
                     logger.info(f"📺 /showcase set about: обновлено для {display_phone} (admin {event.sender_id})")
             
             elif param == "info":
@@ -2727,25 +2889,33 @@ class UltimateCommentBot:
                     
                     # Обновляем информацию о канале
                     await event.respond("⏳ Обновляю информацию канала...")
-                    
+
                     title = info_params.get('title')
                     about = info_params.get('about')
-                    
+
                     logger.info(f"📺 Вызов update_profile_channel_info: phone={display_phone}, title={title}, about={about}")
-                    
-                    success = await self.update_profile_channel_info(account_key, title=title, about=about)
-                    
-                    if success:
+
+                    telegram_success = await self.edit_channel_in_telegram(
+                        phone=account_key,
+                        title=title,
+                        about=about
+                    )
+                    json_success = await self.update_profile_channel_info(account_key, title=title, about=about)
+
+                    if telegram_success:
                         response_text = "✅ **ИНФОРМАЦИЯ ОБНОВЛЕНА**\n\n"
                         if title:
                             response_text += f"📝 Название: `{title}`\n"
                         if about:
                             response_text += f"📄 Описание: `{about}`\n"
-                        
+
                         await event.respond(response_text)
                         logger.info(f"📺 /showcase set info: успешно обновлено для {display_phone} (admin {event.sender_id})")
+                    elif json_success:
+                        await event.respond("⚠️ Сохранено в bot_data, но Telegram не обновлён")
+                        logger.warning(f"📺 /showcase set info: Telegram не обновлён для {display_phone}")
                     else:
-                        await event.respond("❌ Ошибка при обновлении витрины")
+                        await event.respond("❌ Ошибка сохранения")
                         logger.error(f"📺 /showcase set info: ошибка для {display_phone}")
                         
                 except Exception as e:
