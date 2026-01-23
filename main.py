@@ -2143,7 +2143,7 @@ class UltimateCommentBot:
             
             # Получаем канал
             from telethon.tl.types import PeerChannel
-            from telethon.tl.functions.channels import EditTitleRequest, EditChannelRequest
+            from telethon.tl.functions.channels import EditTitleRequest, EditAboutRequest
             
             channel_id = profile_channel['channel_id']
             # Явно используем PeerChannel чтобы избежать интерпретации как user_id
@@ -2161,7 +2161,7 @@ class UltimateCommentBot:
                 results.append("✅ Название обновлено")
             
             if about is not None:
-                await user_client(EditChannelRequest(
+                await user_client(EditAboutRequest(
                     channel=entity,
                     about=about
                 ))
@@ -2576,6 +2576,7 @@ class UltimateCommentBot:
         logger.info(f"📺 /showcase set: инициирован admin {event.sender_id}, args={args_str}")
         
         try:
+            logger.info(f"🔍 _showcase_set: args_str = {repr(args_str)}")
             parts = args_str.split(maxsplit=2)
             
             if len(parts) < 2:
@@ -2595,6 +2596,23 @@ class UltimateCommentBot:
             param = parts[0].lower()
             raw_phone = parts[1]
             value = parts[2] if len(parts) > 2 else ""
+
+            def _looks_like_phone(value_str: str) -> bool:
+                if not value_str:
+                    return False
+                value_str = value_str.strip()
+                return value_str.startswith('+') or value_str.isdigit()
+
+            known_params = {"avatar", "title", "about", "info", "post", "post_pin"}
+
+            # Поддерживаем оба формата: <param> <phone> и <phone> <param>
+            if param in known_params and not _looks_like_phone(raw_phone):
+                if raw_phone in known_params and _looks_like_phone(param):
+                    param, raw_phone = raw_phone, param
+            elif param not in known_params and raw_phone in known_params and _looks_like_phone(param):
+                param, raw_phone = raw_phone, param
+
+            logger.info(f"🔍 _showcase_set: param={param}, phone={raw_phone}, value={value}")
             
             # ЛОГИРОВАНИЕ 1
             logger.info(f"🔍 _showcase_set: Ищем аккаунт {raw_phone}")
@@ -6245,11 +6263,11 @@ class UltimateCommentBot:
                         "`/showcase list` - список всех витрин\n"
                         "`/showcase info <phone>` - информация о витрине\n\n"
                         "**Настройка:**\n"
-                        "`/showcase set <phone> avatar` - установить аватар\n"
-                        "`/showcase set <phone> title \"Название\"` - изменить название\n"
-                        "`/showcase set <phone> about \"Описание\"` - изменить описание\n"
-                        "`/showcase set <phone> post \"Текст\"` - создать пост\n"
-                        "`/showcase set <phone> post_pin \"Текст\"` - пост с закреплением"
+                        "`/showcase set avatar <phone>` - установить аватар\n"
+                        "`/showcase set title <phone> \"Название\"` - изменить название\n"
+                        "`/showcase set about <phone> \"Описание\"` - изменить описание\n"
+                        "`/showcase set post <phone> \"Текст\"` - создать пост\n"
+                        "`/showcase set post_pin <phone> \"Текст\"` - пост с закреплением"
                     )
                     return
                 
