@@ -2165,21 +2165,20 @@ class UltimateCommentBot:
     # ============= SHOWCASE HELPER METHODS =============
 
     def _resolve_account_key(self, raw_phone):
-        """Определяет ключ аккаунта в accounts_data по полному номеру или нормализованному."""
+        """Определяет ключ аккаунта в accounts_data по полному номеру или phone полю."""
         if not raw_phone:
             return None, None
 
         raw_phone = str(raw_phone).strip()
-        normalized = normalize_account_id(raw_phone)
 
         if raw_phone in self.accounts_data:
-            return raw_phone, normalized
+            return raw_phone, raw_phone
 
-        for key in self.accounts_data.keys():
-            if normalize_account_id(key) == normalized:
-                return key, normalized
+        for key, data in self.accounts_data.items():
+            if data.get('phone') == raw_phone:
+                return key, raw_phone
 
-        return None, normalized
+        return None, raw_phone
 
     def _get_display_phone(self, account_key, account_data):
         """Возвращает удобный для отображения номер аккаунта."""
@@ -2216,11 +2215,9 @@ class UltimateCommentBot:
             # Загружаем актуальные данные
             self.load_data()
 
-            account_key, normalized = self._resolve_account_key(raw_phone)
-            if raw_phone != normalized:
-                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+            account_key, search_id = self._resolve_account_key(raw_phone)
 
-            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Looking for account: {search_id} (raw={raw_phone})")
             logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
             logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
@@ -2228,7 +2225,7 @@ class UltimateCommentBot:
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
+                await event.respond(f"❌ Аккаунт `{raw_phone}` не найден")
                 return
 
             display_phone = self._get_display_phone(account_key, account_data)
@@ -2307,11 +2304,9 @@ class UltimateCommentBot:
             # Загружаем актуальные данные
             self.load_data()
 
-            account_key, normalized = self._resolve_account_key(raw_phone)
-            if raw_phone != normalized:
-                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+            account_key, search_id = self._resolve_account_key(raw_phone)
 
-            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Looking for account: {search_id} (raw={raw_phone})")
             logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
             logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
@@ -2319,7 +2314,7 @@ class UltimateCommentBot:
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
+                await event.respond(f"❌ Аккаунт `{raw_phone}` не найден")
                 return
 
             display_phone = self._get_display_phone(account_key, account_data)
@@ -2387,11 +2382,9 @@ class UltimateCommentBot:
             # Загружаем актуальные данные
             self.load_data()
 
-            account_key, normalized = self._resolve_account_key(raw_phone)
-            if raw_phone != normalized:
-                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+            account_key, search_id = self._resolve_account_key(raw_phone)
 
-            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Looking for account: {search_id} (raw={raw_phone})")
             logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
             logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
@@ -2399,7 +2392,7 @@ class UltimateCommentBot:
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
+                await event.respond(f"❌ Аккаунт `{raw_phone}` не найден")
                 return
 
             display_phone = self._get_display_phone(account_key, account_data)
@@ -2496,11 +2489,9 @@ class UltimateCommentBot:
             # Загружаем актуальные данные
             self.load_data()
 
-            account_key, normalized = self._resolve_account_key(raw_phone)
-            if raw_phone != normalized:
-                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+            account_key, search_id = self._resolve_account_key(raw_phone)
 
-            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Looking for account: {search_id} (raw={raw_phone})")
             logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
             logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
@@ -2508,7 +2499,7 @@ class UltimateCommentBot:
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
+                await event.respond(f"❌ Аккаунт `{raw_phone}` не найден")
                 return
 
             display_phone = self._get_display_phone(account_key, account_data)
@@ -2583,11 +2574,9 @@ class UltimateCommentBot:
             # Загружаем актуальные данные
             self.load_data()
 
-            account_key, normalized = self._resolve_account_key(raw_phone)
-            if raw_phone != normalized:
-                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+            account_key, search_id = self._resolve_account_key(raw_phone)
 
-            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Looking for account: {search_id} (raw={raw_phone})")
             logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
             logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
@@ -2595,8 +2584,8 @@ class UltimateCommentBot:
             # Проверяем что аккаунт принадлежит админу
             account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                logger.error(f"Account {normalized} not in accounts_data")
-                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
+                logger.error(f"Account {raw_phone} not in accounts_data")
+                await event.respond(f"❌ Аккаунт `{raw_phone}` не найден")
                 return
 
             display_phone = self._get_display_phone(account_key, account_data)
