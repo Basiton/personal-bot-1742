@@ -2165,20 +2165,18 @@ class UltimateCommentBot:
     # ============= SHOWCASE HELPER METHODS =============
 
     def _resolve_account_key(self, raw_phone):
-        """Определяет ключ аккаунта в accounts_data по сырому вводу."""
+        """Определяет ключ аккаунта в accounts_data по полному номеру или нормализованному."""
         if not raw_phone:
             return None, None
 
+        raw_phone = str(raw_phone).strip()
         normalized = normalize_account_id(raw_phone)
 
         if raw_phone in self.accounts_data:
             return raw_phone, normalized
 
-        if normalized in self.accounts_data:
-            return normalized, normalized
-
-        for key, data in self.accounts_data.items():
-            if data.get('phone') == raw_phone:
+        for key in self.accounts_data.keys():
+            if normalize_account_id(key) == normalized:
                 return key, normalized
 
         return None, normalized
@@ -2190,38 +2188,10 @@ class UltimateCommentBot:
         return account_key
 
     def _get_showcase_from_account(self, account_data):
-        """Возвращает данные витрины из аккаунта (поддержка разных ключей)."""
+        """Возвращает данные витрины из аккаунта (showcase_channel)."""
         if not account_data:
             return None
-        return account_data.get('showcase') or account_data.get('profile_channel')
-
-    def _ensure_profile_channel_alias(self, account_data):
-        """Создаёт alias profile_channel из showcase для совместимости операций."""
-        if not account_data or account_data.get('profile_channel'):
-            return
-
-        showcase = account_data.get('showcase')
-        if not showcase:
-            return
-
-        channel_id = showcase.get('channel_id') or showcase.get('id')
-        if not channel_id:
-            return
-
-        profile_channel = {
-            'id': channel_id,
-            'title': showcase.get('title'),
-            'username': showcase.get('channel_username') or showcase.get('username'),
-            'about': showcase.get('about', ''),
-            'created': showcase.get('created'),
-            'linked': showcase.get('linked')
-        }
-
-        if 'posts' in showcase:
-            profile_channel['posts'] = showcase.get('posts')
-
-        account_data['profile_channel'] = profile_channel
-        self.save_data()
+        return account_data.get('showcase_channel')
     
     async def _showcase_create(self, event, args_str):
         """Создать канал-витрину для аккаунта"""
@@ -2272,8 +2242,8 @@ class UltimateCommentBot:
             # Проверяем, нет ли уже канала
             existing = self._get_showcase_from_account(account_data)
             if existing:
-                username = existing.get('channel_username') or existing.get('username') or 'без username'
-                channel_id = existing.get('channel_id') or existing.get('id')
+                username = existing.get('username') or 'без username'
+                channel_id = existing.get('channel_id')
                 await event.respond(
                     f"⚠️ У аккаунта уже есть канал-витрина:\n"
                     f"• Название: `{existing.get('title')}`\n"
@@ -2363,7 +2333,7 @@ class UltimateCommentBot:
             # Проверяем, нет ли уже канала
             existing = self._get_showcase_from_account(account_data)
             if existing:
-                username = existing.get('channel_username') or existing.get('username') or 'без username'
+                username = existing.get('username') or 'без username'
                 await event.respond(
                     f"⚠️ У аккаунта уже есть канал-витрина:\n"
                     f"• Название: `{existing.get('title')}`\n"
@@ -2442,26 +2412,23 @@ class UltimateCommentBot:
             
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
-            if not showcase or not (showcase.get('channel_id') or showcase.get('id')):
+            if not showcase or not showcase.get('channel_id'):
                 await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
                 return
 
-            self._ensure_profile_channel_alias(account_data)
-            channel_info = account_data.get('profile_channel') or showcase
-            username = channel_info.get('channel_username') or channel_info.get('username') or 'без username'
+            channel_info = showcase
+            username = channel_info.get('username') or 'без username'
             
             # Отвязываем
-            if 'profile_channel' in account_data:
-                del account_data['profile_channel']
-            if 'showcase' in account_data:
-                del account_data['showcase']
+            if 'showcase_channel' in account_data:
+                del account_data['showcase_channel']
             self.save_data()
             
             await event.respond(
                 f"✅ Канал отвязан от аккаунта\n\n"
                 f"📺 Канал: `{channel_info.get('title')}`\n"
                 f"👤 Username: `{username}`\n"
-                f"🆔 ID: `{channel_info.get('channel_id') or channel_info.get('id')}`\n\n"
+                f"🆔 ID: `{channel_info.get('channel_id')}`\n\n"
                 f"💡 Канал продолжает существовать, но больше не связан с аккаунтом в боте"
             )
             logger.info(f"📺 /showcase unlink: канал отвязан от {display_phone} (admin {event.sender_id})")
@@ -2499,8 +2466,8 @@ class UltimateCommentBot:
             for idx, (phone, account_data, channel) in enumerate(channels_list, 1):
                 display_phone = self._get_display_phone(phone, account_data)
                 account_name = account_data.get('name', display_phone[-10:])
-                channel_username = channel.get('channel_username') or channel.get('username') or 'без username'
-                channel_id = channel.get('channel_id') or channel.get('id')
+                channel_username = channel.get('username') or 'без username'
+                channel_id = channel.get('channel_id')
                 
                 text += f"{idx}. **{account_name}** (`{display_phone}`)\n"
                 text += f"   📺 `{channel['title']}`\n"
@@ -2554,15 +2521,14 @@ class UltimateCommentBot:
             
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
-            if not showcase or not (showcase.get('channel_id') or showcase.get('id')):
+            if not showcase or not showcase.get('channel_id'):
                 await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
                 return
 
-            self._ensure_profile_channel_alias(account_data)
-            profile_channel = account_data.get('profile_channel') or showcase
+            profile_channel = showcase
             
             account_name = account_data.get('name', display_phone[-10:])
-            channel_username = profile_channel.get('channel_username') or profile_channel.get('username') or 'без username'
+            channel_username = profile_channel.get('username') or 'без username'
             about = profile_channel.get('about', 'не задано')
             
             text = f"""**📺 ИНФОРМАЦИЯ О ВИТРИНЕ**
@@ -2572,7 +2538,7 @@ class UltimateCommentBot:
 📺 **Канал:**
 • Название: `{profile_channel['title']}`
 • Username: `{channel_username}`
-• ID: `{profile_channel.get('channel_id') or profile_channel.get('id')}`
+• ID: `{profile_channel.get('channel_id')}`
 • Описание: {about}
 • Создан: {profile_channel.get('created', 'неизвестно')}
 
@@ -2644,13 +2610,12 @@ class UltimateCommentBot:
             
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
-            if not showcase or not (showcase.get('channel_id') or showcase.get('id')):
+            if not showcase or not showcase.get('channel_id'):
                 logger.error(f"No showcase for account {display_phone}")
                 await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
                 return
 
-            self._ensure_profile_channel_alias(account_data)
-            profile_channel = account_data.get('profile_channel') or showcase
+            profile_channel = showcase
             
             # Обработка разных параметров
             if param == "avatar":
@@ -3131,14 +3096,14 @@ class UltimateCommentBot:
 `/addparsed тема 10` - добавить найденные в работу
 
 **📺 КАНАЛЫ-ВИТРИНЫ:**
-`/showcase create +1234 Название` - создать новый канал
-`/showcase link +1234 @channel` - привязать существующий
+`/showcase create +1234 Название` - создать новый канал (полный номер или короткий код)
+`/showcase link +1234 @channel` - привязать существующий (полный номер или короткий код)
 `/showcase list` - список всех витрин
-`/showcase set avatar +1234` - установить аватар
+`/showcase set avatar +1234` - установить аватар (полный номер или короткий код)
 `/showcase set post +1234 Текст` - создать пост (+ pin для закрепления)
 `/showcase set info +1234 title:Новое|about:Описание` - обновить инфо
-`/showcase unlink +1234` - отвязать канал
-`/showcase info +1234` - информация о канале
+`/showcase unlink +1234` - отвязать канал (полный номер или короткий код)
+`/showcase info +1234` - информация о канале (полный номер или короткий код)
 
 **🎨 ИНДИВИДУАЛЬНЫЕ ВИТРИНЫ:**
 `/createshowcase <аккаунт> [username]` - создать showcase-канал 🆕
