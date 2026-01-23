@@ -1921,10 +1921,14 @@ class UltimateCommentBot:
                 return False, f"❌ Аккаунт {phone} потерял авторизацию"
             
             # Получаем информацию о канале
-            from telethon.tl.types import Channel
+            from telethon.tl.types import Channel, PeerChannel
             
             try:
-                entity = await user_client.get_entity(channel_identifier)
+                # Если channel_identifier - число, используем PeerChannel для корректной типизации
+                if isinstance(channel_identifier, int):
+                    entity = await user_client.get_entity(PeerChannel(channel_identifier))
+                else:
+                    entity = await user_client.get_entity(channel_identifier)
             except Exception as e:
                 await user_client.disconnect()
                 return False, f"❌ Канал не найден: {str(e)}"
@@ -2014,11 +2018,14 @@ class UltimateCommentBot:
                 return False, f"❌ Аккаунт {phone} потерял авторизацию"
             
             # Получаем канал
+            from telethon.tl.types import PeerChannel
+            from telethon.tl.functions.channels import EditPhotoRequest
+            
             channel_id = profile_channel['channel_id']
-            entity = await user_client.get_entity(channel_id)
+            peer = PeerChannel(channel_id)
+            entity = await user_client.get_entity(peer)
             
             # Загружаем аватар
-            from telethon.tl.functions.channels import EditPhotoRequest
             
             uploaded_file = await user_client.upload_file(avatar_file)
             await user_client(EditPhotoRequest(
@@ -2073,8 +2080,11 @@ class UltimateCommentBot:
                 return False, f"❌ Аккаунт {phone} потерял авторизацию", None
             
             # Получаем канал
+            from telethon.tl.types import PeerChannel
+            
             channel_id = profile_channel['channel_id']
-            entity = await user_client.get_entity(channel_id)
+            peer = PeerChannel(channel_id)
+            entity = await user_client.get_entity(peer)
             
             # Отправляем пост
             message = await user_client.send_message(entity, text)
@@ -2132,11 +2142,13 @@ class UltimateCommentBot:
                 return False, f"❌ Аккаунт {phone} потерял авторизацию"
             
             # Получаем канал
-            channel_id = profile_channel['channel_id']
-            entity = await user_client.get_entity(channel_id)
-            
-            # Обновляем информацию
+            from telethon.tl.types import PeerChannel
             from telethon.tl.functions.channels import EditTitleRequest, EditAboutRequest
+            
+            channel_id = profile_channel['channel_id']
+            # Явно используем PeerChannel чтобы избежать интерпретации как user_id
+            peer = PeerChannel(channel_id)
+            entity = await user_client.get_entity(peer)
             
             results = []
             
@@ -2874,9 +2886,21 @@ class UltimateCommentBot:
                 random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
                 username_variants.append(f"{base_username}_{random_suffix}")
             
+            # Валидация и очистка username-ов
+            valid_username_variants = []
+            for variant in username_variants:
+                # Удаляем недопустимые символы (только буквы, цифры и underscore)
+                cleaned = ''.join(c for c in variant if c.isalnum() or c == '_')
+                # Проверяем длину (5-32 символа для Telegram)
+                if 5 <= len(cleaned) <= 32:
+                    valid_username_variants.append(cleaned)
+                    logger.debug(f"✅ Username variant validated: {cleaned}")
+                else:
+                    logger.warning(f"⚠️ Username variant rejected (length {len(cleaned)}): {cleaned}")
+            
             free_username = None
             
-            for variant in username_variants:
+            for variant in valid_username_variants:
                 try:
                     logger.info(f"🔍 Проверка доступности username: @{variant}")
                     
@@ -2944,9 +2968,9 @@ class UltimateCommentBot:
                 await user_client.disconnect()
                 return False, f"❌ Username @{free_username} был занят между проверкой и установкой"
             except UsernameInvalidError:
-                logger.error(f"❌ Username @{free_username} некорректен")
+                logger.error(f"❌ Username [{free_username}] некорректен (length: {len(free_username)}, chars: {repr(free_username)})")
                 await user_client.disconnect()
-                return False, f"❌ Username @{free_username} некорректен"
+                return False, f"❌ Username [{free_username}] некорректен"
             except Exception as e:
                 logger.error(f"❌ Ошибка при установке username: {e}")
                 await user_client.disconnect()
