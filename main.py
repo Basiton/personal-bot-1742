@@ -2164,6 +2164,31 @@ class UltimateCommentBot:
     
     # ============= SHOWCASE HELPER METHODS =============
 
+    def _resolve_account_key(self, raw_phone):
+        """Определяет ключ аккаунта в accounts_data по сырому вводу."""
+        if not raw_phone:
+            return None, None
+
+        normalized = normalize_account_id(raw_phone)
+
+        if raw_phone in self.accounts_data:
+            return raw_phone, normalized
+
+        if normalized in self.accounts_data:
+            return normalized, normalized
+
+        for key, data in self.accounts_data.items():
+            if data.get('phone') == raw_phone:
+                return key, normalized
+
+        return None, normalized
+
+    def _get_display_phone(self, account_key, account_data):
+        """Возвращает удобный для отображения номер аккаунта."""
+        if account_data and account_data.get('phone'):
+            return account_data['phone']
+        return account_key
+
     def _get_showcase_from_account(self, account_data):
         """Возвращает данные витрины из аккаунта (поддержка разных ключей)."""
         if not account_data:
@@ -2218,23 +2243,25 @@ class UltimateCommentBot:
             raw_phone = parts[0]
             title = parts[1]
             
-            # Нормализация номера
-            phone = normalize_account_id(raw_phone)
-            if raw_phone != phone:
-                logger.info(f"📞 Normalized {raw_phone} → {phone}")
-
             # Загружаем актуальные данные
             self.load_data()
 
-            logger.info(f"Checking account: {phone}")
+            account_key, normalized = self._resolve_account_key(raw_phone)
+            if raw_phone != normalized:
+                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+
+            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
-            logger.info(f"Account data: {self.accounts_data.get(phone, {})}")
+            logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
             
             # Проверяем что аккаунт принадлежит админу
-            account_data = self.accounts_data.get(phone)
+            account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{phone}` не привязан")
+                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
                 return
+
+            display_phone = self._get_display_phone(account_key, account_data)
             
             # Проверяем права доступа
             if not self.is_super_admin(event.sender_id):
@@ -2252,14 +2279,14 @@ class UltimateCommentBot:
                     f"• Название: `{existing.get('title')}`\n"
                     f"• Username: `{username}`\n"
                     f"• ID: `{channel_id}`\n\n"
-                    f"Используйте `/showcase unlink {phone}` чтобы отвязать"
+                    f"Используйте `/showcase unlink {display_phone}` чтобы отвязать"
                 )
                 return
             
-            await event.respond(f"⏳ Создаю канал `{title}` для аккаунта `{phone}`...")
+            await event.respond(f"⏳ Создаю канал `{title}` для аккаунта `{display_phone}`...")
             
             # Создаём канал
-            success, result = await self.create_profile_channel(phone, title)
+            success, result = await self.create_profile_channel(account_key, title)
             
             if success:
                 channel_info = result
@@ -2267,19 +2294,19 @@ class UltimateCommentBot:
                 
                 text = f"""✅ **КАНАЛ-ВИТРИНА СОЗДАН**
 
-📱 Аккаунт: `{phone}`
+📱 Аккаунт: `{display_phone}`
 📺 Канал: `{channel_info['title']}`
 🆔 ID: `{channel_info['id']}`
 👤 Username: `{username}`
 
 🎨 **Следующие шаги:**
-• `/showcase set {phone} avatar` - установить аватар
-• `/showcase set {phone} post "Текст"` - создать пост
+• `/showcase set {display_phone} avatar` - установить аватар
+• `/showcase set {display_phone} post "Текст"` - создать пост
 
-💡 Используйте `/showcase info {phone}` для просмотра информации"""
+💡 Используйте `/showcase info {display_phone}` для просмотра информации"""
                 
                 await event.respond(text)
-                logger.info(f"📺 /showcase create: успешно создан канал для {phone} (admin {event.sender_id})")
+                logger.info(f"📺 /showcase create: успешно создан канал для {display_phone} (admin {event.sender_id})")
             else:
                 await event.respond(result)
                 
@@ -2307,23 +2334,25 @@ class UltimateCommentBot:
             raw_phone = parts[0]
             channel_identifier = parts[1].lstrip('@')  # Убираем @ если есть
             
-            # Нормализация номера
-            phone = normalize_account_id(raw_phone)
-            if raw_phone != phone:
-                logger.info(f"📞 Normalized {raw_phone} → {phone}")
-
             # Загружаем актуальные данные
             self.load_data()
 
-            logger.info(f"Checking account: {phone}")
+            account_key, normalized = self._resolve_account_key(raw_phone)
+            if raw_phone != normalized:
+                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+
+            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
-            logger.info(f"Account data: {self.accounts_data.get(phone, {})}")
+            logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
             
             # Проверяем что аккаунт принадлежит админу
-            account_data = self.accounts_data.get(phone)
+            account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{phone}` не привязан")
+                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
                 return
+
+            display_phone = self._get_display_phone(account_key, account_data)
             
             # Проверяем права доступа
             if not self.is_super_admin(event.sender_id):
@@ -2339,14 +2368,14 @@ class UltimateCommentBot:
                     f"⚠️ У аккаунта уже есть канал-витрина:\n"
                     f"• Название: `{existing.get('title')}`\n"
                     f"• Username: `{username}`\n\n"
-                    f"Используйте `/showcase unlink {phone}` чтобы отвязать"
+                    f"Используйте `/showcase unlink {display_phone}` чтобы отвязать"
                 )
                 return
             
-            await event.respond(f"⏳ Привязываю канал `{channel_identifier}` к аккаунту `{phone}`...")
+            await event.respond(f"⏳ Привязываю канал `{channel_identifier}` к аккаунту `{display_phone}`...")
             
             # Привязываем канал
-            success, result = await self.link_existing_channel(phone, channel_identifier)
+            success, result = await self.link_existing_channel(account_key, channel_identifier)
             
             if success:
                 channel_info = result
@@ -2354,19 +2383,19 @@ class UltimateCommentBot:
                 
                 text = f"""✅ **КАНАЛ ПРИВЯЗАН К ПРОФИЛЮ**
 
-📱 Аккаунт: `{phone}`
+📱 Аккаунт: `{display_phone}`
 📺 Канал: `{channel_info['title']}`
 👤 Username: `{username}`
 🆔 ID: `{channel_info['id']}`
 📝 Описание: {channel_info.get('about', 'не задано')}
 
 🎨 **Управление:**
-• `/showcase set {phone} avatar` - изменить аватар
-• `/showcase set {phone} post "Текст"` - создать пост
-• `/showcase set {phone} title "Новое"` - изменить название"""
+• `/showcase set {display_phone} avatar` - изменить аватар
+• `/showcase set {display_phone} post "Текст"` - создать пост
+• `/showcase set {display_phone} title "Новое"` - изменить название"""
                 
                 await event.respond(text)
-                logger.info(f"📺 /showcase link: успешно привязан {channel_identifier} к {phone} (admin {event.sender_id})")
+                logger.info(f"📺 /showcase link: успешно привязан {channel_identifier} к {display_phone} (admin {event.sender_id})")
             else:
                 await event.respond(result)
                 
@@ -2385,23 +2414,25 @@ class UltimateCommentBot:
                 await event.respond("Формат: `/showcase unlink <phone>`")
                 return
             
-            # Нормализация номера
-            phone = normalize_account_id(raw_phone)
-            if raw_phone != phone:
-                logger.info(f"📞 Normalized {raw_phone} → {phone}")
-
             # Загружаем актуальные данные
             self.load_data()
 
-            logger.info(f"Checking account: {phone}")
+            account_key, normalized = self._resolve_account_key(raw_phone)
+            if raw_phone != normalized:
+                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+
+            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
-            logger.info(f"Account data: {self.accounts_data.get(phone, {})}")
+            logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
             
             # Проверяем что аккаунт принадлежит админу
-            account_data = self.accounts_data.get(phone)
+            account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{phone}` не привязан")
+                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
                 return
+
+            display_phone = self._get_display_phone(account_key, account_data)
             
             # Проверяем права доступа
             if not self.is_super_admin(event.sender_id):
@@ -2412,7 +2443,7 @@ class UltimateCommentBot:
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
             if not showcase or not (showcase.get('channel_id') or showcase.get('id')):
-                await event.respond(f"❌ У аккаунта `{phone}` нет витрины")
+                await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
                 return
 
             self._ensure_profile_channel_alias(account_data)
@@ -2433,7 +2464,7 @@ class UltimateCommentBot:
                 f"🆔 ID: `{channel_info.get('channel_id') or channel_info.get('id')}`\n\n"
                 f"💡 Канал продолжает существовать, но больше не связан с аккаунтом в боте"
             )
-            logger.info(f"📺 /showcase unlink: канал отвязан от {phone} (admin {event.sender_id})")
+            logger.info(f"📺 /showcase unlink: канал отвязан от {display_phone} (admin {event.sender_id})")
             
         except Exception as e:
             logger.error(f"Showcase unlink error: {e}")
@@ -2466,11 +2497,12 @@ class UltimateCommentBot:
             text = f"**📺 КАНАЛЫ-ВИТРИНЫ ({len(channels_list)})**\n\n"
             
             for idx, (phone, account_data, channel) in enumerate(channels_list, 1):
-                account_name = account_data.get('name', phone[-10:])
+                display_phone = self._get_display_phone(phone, account_data)
+                account_name = account_data.get('name', display_phone[-10:])
                 channel_username = channel.get('channel_username') or channel.get('username') or 'без username'
                 channel_id = channel.get('channel_id') or channel.get('id')
                 
-                text += f"{idx}. **{account_name}** (`{phone}`)\n"
+                text += f"{idx}. **{account_name}** (`{display_phone}`)\n"
                 text += f"   📺 `{channel['title']}`\n"
                 text += f"   👤 {channel_username}\n"
                 text += f"   🆔 ID: `{channel_id}`\n\n"
@@ -2494,23 +2526,25 @@ class UltimateCommentBot:
                 await event.respond("Формат: `/showcase info <phone>`")
                 return
             
-            # Нормализация номера
-            phone = normalize_account_id(raw_phone)
-            if raw_phone != phone:
-                logger.info(f"📞 Normalized {raw_phone} → {phone}")
-
             # Загружаем актуальные данные
             self.load_data()
 
-            logger.info(f"Checking account: {phone}")
+            account_key, normalized = self._resolve_account_key(raw_phone)
+            if raw_phone != normalized:
+                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+
+            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
-            logger.info(f"Account data: {self.accounts_data.get(phone, {})}")
+            logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
             
             # Проверяем что аккаунт принадлежит админу
-            account_data = self.accounts_data.get(phone)
+            account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{phone}` не привязан")
+                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
                 return
+
+            display_phone = self._get_display_phone(account_key, account_data)
             
             # Проверяем права доступа
             admin_id = self.get_admin_id(event.sender_id)
@@ -2521,19 +2555,19 @@ class UltimateCommentBot:
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
             if not showcase or not (showcase.get('channel_id') or showcase.get('id')):
-                await event.respond(f"❌ У аккаунта `{phone}` нет витрины")
+                await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
                 return
 
             self._ensure_profile_channel_alias(account_data)
             profile_channel = account_data.get('profile_channel') or showcase
             
-            account_name = account_data.get('name', phone[-10:])
+            account_name = account_data.get('name', display_phone[-10:])
             channel_username = profile_channel.get('channel_username') or profile_channel.get('username') or 'без username'
             about = profile_channel.get('about', 'не задано')
             
             text = f"""**📺 ИНФОРМАЦИЯ О ВИТРИНЕ**
 
-👤 **Аккаунт:** {account_name} (`{phone}`)
+👤 **Аккаунт:** {account_name} (`{display_phone}`)
 
 📺 **Канал:**
 • Название: `{profile_channel['title']}`
@@ -2543,11 +2577,11 @@ class UltimateCommentBot:
 • Создан: {profile_channel.get('created', 'неизвестно')}
 
 🎨 **Управление:**
-• `/showcase set {phone} avatar` - изменить аватар
-• `/showcase set {phone} title "Новое название"`
-• `/showcase set {phone} about "Новое описание"`
-• `/showcase set {phone} post "Текст поста"`
-• `/showcase unlink {phone}` - отвязать канал"""
+• `/showcase set {display_phone} avatar` - изменить аватар
+• `/showcase set {display_phone} title "Новое название"`
+• `/showcase set {display_phone} about "Новое описание"`
+• `/showcase set {display_phone} post "Текст поста"`
+• `/showcase unlink {display_phone}` - отвязать канал"""
             
             await event.respond(text)
             
@@ -2580,23 +2614,27 @@ class UltimateCommentBot:
             param = parts[1].lower()
             value = parts[2] if len(parts) > 2 else ""
             
-            # Нормализация номера
-            phone = normalize_account_id(raw_phone)
-            if raw_phone != phone:
-                logger.info(f"📞 Normalized {raw_phone} → {phone}")
-
             # Загружаем актуальные данные
             self.load_data()
 
-            logger.info(f"Checking account: {phone}")
+            account_key, normalized = self._resolve_account_key(raw_phone)
+            if raw_phone != normalized:
+                logger.info(f"📞 Normalized {raw_phone} → {normalized}")
+
+            logger.info(f"Looking for account: {normalized} (raw={raw_phone})")
+            logger.info(f"Resolved account key: {account_key}")
             logger.info(f"Available accounts: {list(self.accounts_data.keys())}")
-            logger.info(f"Account data: {self.accounts_data.get(phone, {})}")
+            logger.info(f"Account data: {self.accounts_data.get(account_key, {})}")
             
             # Проверяем что аккаунт принадлежит админу
-            account_data = self.accounts_data.get(phone)
+            account_data = self.accounts_data.get(account_key) if account_key else None
             if not account_data:
-                await event.respond(f"❌ Аккаунт `{phone}` не привязан")
+                logger.error(f"Account {normalized} not in accounts_data")
+                await event.respond(f"❌ Аккаунт `{normalized}` не привязан")
                 return
+
+            display_phone = self._get_display_phone(account_key, account_data)
+            logger.info(f"Account data: {account_data}")
             
             # Проверяем права доступа
             if not self.is_super_admin(event.sender_id):
@@ -2607,7 +2645,8 @@ class UltimateCommentBot:
             # Проверяем, есть ли канал
             showcase = self._get_showcase_from_account(account_data)
             if not showcase or not (showcase.get('channel_id') or showcase.get('id')):
-                await event.respond(f"❌ У аккаунта `{phone}` нет витрины")
+                logger.error(f"No showcase for account {display_phone}")
+                await event.respond(f"❌ У аккаунта `{display_phone}` нет витрины")
                 return
 
             self._ensure_profile_channel_alias(account_data)
@@ -2627,7 +2666,7 @@ class UltimateCommentBot:
                 # Сохраняем состояние ожидания
                 self.user_states[event.sender_id] = {
                     'action': 'waiting_profile_channel_avatar',
-                    'phone': phone,
+                    'phone': account_key,
                     'message_id': msg.id
                 }
             
@@ -2641,11 +2680,11 @@ class UltimateCommentBot:
                     return
                 
                 await event.respond("⏳ Обновляю название канала...")
-                success, message = await self.update_profile_channel_info(phone, title=value, about=None)
+                success, message = await self.update_profile_channel_info(account_key, title=value, about=None)
                 await event.respond(message)
                 
                 if success:
-                    logger.info(f"📺 /showcase set title: обновлено для {phone} (admin {event.sender_id})")
+                    logger.info(f"📺 /showcase set title: обновлено для {display_phone} (admin {event.sender_id})")
             
             elif param == "about":
                 if not value:
@@ -2657,11 +2696,11 @@ class UltimateCommentBot:
                     return
                 
                 await event.respond("⏳ Обновляю описание канала...")
-                success, message = await self.update_profile_channel_info(phone, title=None, about=value)
+                success, message = await self.update_profile_channel_info(account_key, title=None, about=value)
                 await event.respond(message)
                 
                 if success:
-                    logger.info(f"📺 /showcase set about: обновлено для {phone} (admin {event.sender_id})")
+                    logger.info(f"📺 /showcase set about: обновлено для {display_phone} (admin {event.sender_id})")
             
             elif param == "info":
                 # Обработка формата: title:Новое|about:Описание
@@ -2707,9 +2746,9 @@ class UltimateCommentBot:
                     title = info_params.get('title')
                     about = info_params.get('about')
                     
-                    logger.info(f"📺 Вызов update_profile_channel_info: phone={phone}, title={title}, about={about}")
+                    logger.info(f"📺 Вызов update_profile_channel_info: phone={display_phone}, title={title}, about={about}")
                     
-                    success, message = await self.update_profile_channel_info(phone, title=title, about=about)
+                    success, message = await self.update_profile_channel_info(account_key, title=title, about=about)
                     
                     if success:
                         response_text = "✅ **ИНФОРМАЦИЯ ОБНОВЛЕНА**\n\n"
@@ -2719,10 +2758,10 @@ class UltimateCommentBot:
                             response_text += f"📄 Описание: `{about}`\n"
                         
                         await event.respond(response_text)
-                        logger.info(f"📺 /showcase set info: успешно обновлено для {phone} (admin {event.sender_id})")
+                        logger.info(f"📺 /showcase set info: успешно обновлено для {display_phone} (admin {event.sender_id})")
                     else:
                         await event.respond(message)
-                        logger.error(f"📺 /showcase set info: ошибка для {phone}: {message}")
+                        logger.error(f"📺 /showcase set info: ошибка для {display_phone}: {message}")
                         
                 except Exception as e:
                     logger.error(f"📺 Ошибка парсинга info параметров: {e}")
@@ -2744,7 +2783,7 @@ class UltimateCommentBot:
                 await event.respond(f"⏳ Создаю пост в канале `{profile_channel['title']}`...")
                 
                 # Создаём пост
-                success, message, post_id = await self.create_profile_channel_post(phone, value, pin)
+                success, message, post_id = await self.create_profile_channel_post(account_key, value, pin)
                 
                 if success:
                     channel_username = profile_channel.get('username', 'без username')
@@ -2760,7 +2799,7 @@ class UltimateCommentBot:
 {value[:100]}{"..." if len(value) > 100 else ""}"""
                     
                     await event.respond(text)
-                    logger.info(f"📺 /showcase set {param}: пост создан в {phone} (admin {event.sender_id})")
+                    logger.info(f"📺 /showcase set {param}: пост создан в {display_phone} (admin {event.sender_id})")
                 else:
                     await event.respond(message)
             
