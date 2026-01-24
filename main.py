@@ -2344,6 +2344,181 @@ class UltimateCommentBot:
         if not account_data:
             return None
         return account_data.get('showcase_channel')
+
+    def _normalize_channel_username(self, raw_username):
+        if not raw_username:
+            return None
+        name = str(raw_username).strip()
+        if not name:
+            return None
+        if name.startswith('@'):
+            name = name[1:]
+        return f"@{name}".lower()
+
+    def _find_channel_in_list(self, username_norm, entity_id=None):
+        """Ищет канал в self.channels по username или id. Возвращает (index, data) или (None, None)."""
+        if not self.channels:
+            return None, None
+
+        for idx, ch in enumerate(self.channels, 1):
+            if isinstance(ch, dict):
+                ch_username = ch.get('username') or ch.get('channel') or ch.get('name')
+                ch_id = ch.get('id') or ch.get('channel_id') or ch.get('chat_id')
+            else:
+                ch_username = ch
+                ch_id = None
+
+            ch_username_norm = self._normalize_channel_username(ch_username) if ch_username else None
+
+            if username_norm and ch_username_norm == username_norm:
+                return idx, ch
+
+            if entity_id and ch_id is not None:
+                try:
+                    if int(ch_id) == int(entity_id):
+                        return idx, ch
+                except (ValueError, TypeError):
+                    pass
+
+        return None, None
+
+    def _find_showcase_bindings(self, username_norm, entity_id=None):
+        """Возвращает список строк с аккаунтами, где канал привязан как витрина."""
+        bindings = []
+
+        for account_key, account_data in self.accounts_data.items():
+            showcase = self._get_showcase_from_account(account_data) or {}
+            sc_username = showcase.get('username')
+            sc_id = showcase.get('channel_id')
+
+            sc_username_norm = self._normalize_channel_username(sc_username) if sc_username else None
+            match_by_username = username_norm and sc_username_norm == username_norm
+            match_by_id = entity_id is not None and sc_id is not None and str(sc_id) == str(entity_id)
+
+            if match_by_username or match_by_id:
+                display_phone = self._get_display_phone(account_key, account_data)
+                account_username = account_data.get('username') or account_data.get('name')
+                if account_username:
+                    bindings.append(f"{display_phone} ({account_username})")
+                else:
+                    bindings.append(f"{display_phone}")
+
+        return bindings
+
+    async def test_mode_bulk_channels(self, event, usernames: list[str]):
+        """Массовая проверка каналов для /testmode on. Только чтение, без изменений."""
+        if not usernames:
+            await event.respond(
+                "❌ Укажите список каналов.\n\n"
+                "Пример:\n"
+                "`/testmode on @chan1 @chan2`\n"
+                "или\n"
+                "`/testmode on`\n"
+                "`@chan1 @chan2`"
+            )
+            return
+
+        normalized_usernames = []
+        seen = set()
+        for raw in usernames:
+            norm = self._normalize_channel_username(raw)
+            if not norm:
+                continue
+            if norm not in seen:
+                seen.add(norm)
+                normalized_usernames.append(norm)
+
+        if not normalized_usernames:
+            await event.respond(
+                "❌ Не удалось распознать список каналов.\n\n"
+                "Пример: `/testmode on @chan1 @chan2`"
+            )
+            return
+
+        reports = []
+
+        for username_norm in normalized_usernames:
+            found = False
+            entity_id = None
+            title = None
+            access_hash = None
+            entity_username = None
+            error_text = None
+
+            try:
+                entity = await self.client.get_entity(username_norm)
+                entity_id = getattr(entity, 'id', None)
+                title = getattr(entity, 'title', None)
+                access_hash = getattr(entity, 'access_hash', None)
+                entity_username = getattr(entity, 'username', None)
+                found = True
+            except Exception as e:
+                error_text = str(e)
+
+            index_in_list, channel_data = self._find_channel_in_list(username_norm, entity_id)
+            in_channels = index_in_list is not None
+
+            showcase_bindings = self._find_showcase_bindings(username_norm, entity_id)
+
+            ready_for_live = bool(found and in_channels)
+
+            if found:
+                found_text = "да"
+            else:
+                found_text = "нет"
+                if error_text:
+                    found_text += f" (ошибка: {error_text[:120]})"
+
+            if in_channels:
+                if isinstance(channel_data, dict):
+                    in_channels_text = f"да (индекс {index_in_list}, данные: {channel_data})"
+                else:
+                    in_channels_text = f"да (индекс {index_in_list})"
+            else:
+                in_channels_text = "нет"
+
+            if showcase_bindings:
+                showcase_text = "да: " + ", ".join(showcase_bindings)
+            else:
+                showcase_text = "нет"
+
+            display_username = f"@{entity_username}" if entity_username else username_norm
+
+            report = (
+                f"📌 Канал: `{display_username}`\n"
+                f"• Найден: {found_text}\n"
+                f"• Title: {title or '—'}\n"
+                f"• ID: {entity_id or '—'}\n"
+                f"• Access hash: {access_hash or '—'}\n"
+                f"• В self.channels: {in_channels_text}\n"
+                f"• Привязан как витрина: {showcase_text}\n"
+                f"• Готов к боевому режиму: {'да' if ready_for_live else 'нет'}"
+            )
+
+            reports.append(report)
+
+            log_showcase = ",".join(showcase_bindings) if showcase_bindings else "нет"
+            logger.info(
+                f"🔍 /testmode on: канал {username_norm} — "
+                f"{'найден' if found else 'не найден'}, "
+                f"id={entity_id}, showcase={log_showcase}, "
+                f"index_in_listchannels={index_in_list}"
+            )
+
+        header = f"🧪 **TESTMODE ON: массовая проверка каналов**\n\nКаналов: {len(normalized_usernames)}"
+        chunks = []
+        current = header
+        for report in reports:
+            if len(current) + len(report) + 2 > 3500:
+                chunks.append(current)
+                current = report
+            else:
+                current = f"{current}\n\n{report}"
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
+            await event.respond(chunk)
     
     async def _showcase_create(self, event, args_str):
         """Создать канал-витрину для аккаунта"""
@@ -3374,7 +3549,9 @@ class UltimateCommentBot:
 
 **🧪 ТЕСТОВЫЙ РЕЖИМ:**
 `/testmode` - статус тестового режима
-`/testmode on @channel1 @channel2` - включить с каналами
+`/testmode <selector>` - включить на один канал (номер или username)
+`/testmode on @channel1 @channel2` - массовый тест-режим
+`/testmode on` + новой строкой список каналов
 `/testmode off` - выключить
 `/testmode speed 10` - установить скорость (комм/час)
 
@@ -5421,7 +5598,7 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/testmode'))
         async def testmode_command(event):
-            """Управление тестовым режимом: /testmode on @channel1 @channel2 или /testmode off"""
+            """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
             if not await self.is_admin(event.sender_id):
                 await event.respond("❌ У вас нет доступа к этому боту.")
                 return
@@ -5446,8 +5623,9 @@ class UltimateCommentBot:
                         text += f"\n⚡ Лимит: `{self.test_mode_speed_limit}` комм/час\n"
                     
                     text += "\n📝 **Использование:**\n"
-                    text += "`/testmode on` - включить (дефолтные каналы)\n"
-                    text += "`/testmode on @channel1 @channel2` - включить (свои каналы)\n"
+                    text += "`/testmode <selector>` - включить на один канал (номер или username)\n"
+                    text += "`/testmode on @channel1 @channel2` - массовый тест-режим\n"
+                    text += "`/testmode on` + новой строкой список каналов\n"
                     text += "`/testmode off` - выключить\n"
                     text += "`/testmode speed 5` - установить скорость\n"
                     
@@ -5457,57 +5635,39 @@ class UltimateCommentBot:
                 action = parts[1].lower()
                 
                 if action == 'on':
-                    # Enable test mode
-                    # Дефолтные тестовые каналы (если не указаны свои)
-                    DEFAULT_TEST_CHANNELS = [
-                        '@AIGIRLSARTS',
-                        '@testertesti',
-                        '@testtestista',
-                        '@testingmana',
-                        '@chiptesterchip'
-                    ]
-                    
-                    # Если указаны каналы - используем их, иначе дефолтные
-                    if len(parts) >= 3:
-                        # Parse указанные каналы
-                        channels = []
-                        for part in parts[2:]:
-                            ch = part.strip()
-                            if not ch.startswith('@'):
-                                ch = '@' + ch
-                            channels.append(ch)
-                        self.test_channels = channels
-                    else:
-                        # Используем дефолтные
-                        self.test_channels = DEFAULT_TEST_CHANNELS
-                    
-                    self.test_mode = True
-                    
-                    # Определяем, используются ли дефолтные каналы
-                    is_default = (len(parts) < 3)
-                    
-                    text = """✅ **TEST MODE: ON**
+                    if len(parts) < 3:
+                        await event.respond(
+                            "❌ Укажите список каналов.\n\n"
+                            "Пример:\n"
+                            "`/testmode on @chan1 @chan2`\n"
+                            "или\n"
+                            "`/testmode on`\n"
+                            "`@chan1 @chan2`"
+                        )
+                        return
 
-🎯 Комменты идут ТОЛЬКО в:
-"""
-                    for ch in self.test_channels:
-                        text += f"  • `{ch}`\n"
-                    
-                    if is_default:
-                        text += "\n📌 Используются дефолтные тестовые каналы\n"
-                        text += "💡 Для своих каналов: `/testmode on @channel1 @channel2`\n"
-                    else:
-                        text += f"\n✅ Указано {len(self.test_channels)} своих каналов\n"
-                    
-                    text += f"\n⚡ Лимит скорости: `{self.test_mode_speed_limit}` комм/час\n"
-                    text += "\n⚠️ **ВСЕ остальные каналы ИГНОРИРУЮТСЯ!**\n"
-                    text += "\n💡 Для выхода: `/testmode off`"
-                    
-                    await event.respond(text)
-                    
-                    # Log
+                    raw_usernames = parts[2:]
+                    normalized = []
+                    seen = set()
+                    for raw in raw_usernames:
+                        norm = self._normalize_channel_username(raw)
+                        if not norm:
+                            continue
+                        if norm not in seen:
+                            seen.add(norm)
+                            normalized.append(norm)
+
+                    if not normalized:
+                        await event.respond("❌ Не удалось распознать список каналов")
+                        return
+
+                    self.test_mode = True
+                    self.test_channels = normalized
+
+                    await self.test_mode_bulk_channels(event, normalized)
+
                     logger.info("="*80)
-                    logger.info("🧪 TEST MODE: ENABLED")
+                    logger.info("🧪 TEST MODE: ENABLED (BULK)")
                     logger.info(f"🧪 Test channels: {self.test_channels}")
                     logger.info(f"🧪 Speed limit: {self.test_mode_speed_limit} msg/hour")
                     logger.info("="*80)
@@ -5573,14 +5733,51 @@ class UltimateCommentBot:
                         return
                 
                 else:
-                    await event.respond(
-                        "❌ Неверная команда. Используйте:\n"
-                        "`/testmode` - статус\n"
-                        "`/testmode on` - включить (дефолтные каналы)\n"
-                        "`/testmode on @channel1 @channel2` - включить (свои каналы)\n"
-                        "`/testmode off` - выключить\n"
-                        "`/testmode speed 10` - установить скорость"
-                    )
+                    selector = parts[1].strip()
+                    raw_usernames = []
+
+                    if selector.isdigit():
+                        try:
+                            idx = int(selector)
+                            if idx < 1 or idx > len(self.channels):
+                                await event.respond(
+                                    f"❌ Неверный номер канала. Диапазон: 1-{len(self.channels)}"
+                                )
+                                return
+                            selected = self.channels[idx - 1]
+                            if isinstance(selected, dict):
+                                selected_username = selected.get('username') or selected.get('channel') or selected.get('name')
+                            else:
+                                selected_username = selected
+                            if not selected_username:
+                                await event.respond("❌ Не удалось определить username канала по номеру")
+                                return
+                            raw_usernames = [selected_username]
+                        except Exception as e:
+                            logger.error(f"Testmode selector error: {e}")
+                            await event.respond("❌ Ошибка при выборе канала по номеру")
+                            return
+                    else:
+                        raw_usernames = [selector]
+
+                    normalized = []
+                    seen = set()
+                    for raw in raw_usernames:
+                        norm = self._normalize_channel_username(raw)
+                        if not norm:
+                            continue
+                        if norm not in seen:
+                            seen.add(norm)
+                            normalized.append(norm)
+
+                    if not normalized:
+                        await event.respond("❌ Не удалось распознать канал")
+                        return
+
+                    self.test_mode = True
+                    self.test_channels = normalized
+
+                    await self.test_mode_bulk_channels(event, normalized)
                     
             except Exception as e:
                 logger.error(f"Testmode command error: {e}")
