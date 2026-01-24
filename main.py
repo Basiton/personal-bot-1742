@@ -5,6 +5,8 @@ import logging
 import os
 import sqlite3
 import requests
+import traceback
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from telethon import TelegramClient, events, functions, Button
@@ -3468,8 +3470,10 @@ class UltimateCommentBot:
 **/help** - все команды"""
             await event.respond(text)
         
+        logger.warning(f"🔥 /help DECORATOR ATTACHED")
         @self.bot_client.on(events.NewMessage(pattern='/help'))
         async def help_handler(event):
+            logger.warning(f"🔥 /help HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
             if not await self.is_admin(event.sender_id): return
             text = """**📱 АККАУНТЫ:**
 `/auth +79123456789 [socks5:host:port:user:pass]` - авторизовать
@@ -5599,8 +5603,10 @@ class UltimateCommentBot:
                 logger.error(f"Listparsed error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
         
-        @self.bot_client.on(events.NewMessage(pattern='/testmode'))
+        logger.warning(f"🔥 /testmode DECORATOR ATTACHED, test_mode={getattr(self, 'test_mode', None)}")
+        @self.bot_client.on(events.NewMessage(pattern=r'^/testmode(?:@comapc_bot)?(\\s.*)?$'))
         async def testmode_command(event):
+            logger.warning(f"🔥 /testmode HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
             """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
             logger.info(f"🎯 /testmode handler called by {event.sender_id}, raw={event.raw_text}")
             if not await self.is_admin(event.sender_id):
@@ -8645,5 +8651,10 @@ class UltimateCommentBot:
         await self.bot_client.run_until_disconnected()
 
 if __name__ == '__main__':
-    bot = UltimateCommentBot()
-    asyncio.run(bot.run())
+    try:
+        bot = UltimateCommentBot()
+        asyncio.run(bot.run())
+    except Exception as e:
+        print(f"❌ FATAL ERROR: {e}")
+        traceback.print_exc()
+        sys.exit(1)
