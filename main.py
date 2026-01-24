@@ -8142,11 +8142,16 @@ class UltimateCommentBot:
                         
                         # Get messages
                         try:
+                            logger.info(f"🧪 Check comment eligibility for chat={discussion_entity.id}")
                             msgs = await client.get_messages(discussion_entity, limit=10)
                             
                             reply_id = None
                             post_text = ""
                             for msg in msgs:
+                                logger.info(
+                                    f"🧵 New post event: chat={discussion_entity.id}, "
+                                    f"sender={msg.sender_id}, message_id={msg.id}"
+                                )
                                 if msg.id not in self.commented_posts[username]:
                                     reply_id = msg.id
                                     post_text = msg.text or msg.message or ""
@@ -8210,6 +8215,10 @@ class UltimateCommentBot:
                         # Send comment
                         comment_success = False
                         try:
+                            logger.info(
+                                f"💬 Sending comment to chat={discussion_entity.id}, "
+                                f"message_id={reply_id or 'new'}, account={account_name} ({phone})"
+                            )
                             if reply_id:
                                 await client.send_message(discussion_entity, comment, reply_to=reply_id)
                                 self.commented_posts[username].add(reply_id)
@@ -8251,6 +8260,7 @@ class UltimateCommentBot:
                                     logger.error(f"DB log error: {db_err}")
                         
                         except Exception as send_exc:
+                            logger.error(f"❌ Comment error: {send_exc}", exc_info=True)
                             err_text = str(send_exc)
                             
                             if self.test_mode:
