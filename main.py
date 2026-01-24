@@ -2258,13 +2258,20 @@ class UltimateCommentBot:
                 if about:
                     try:
                         logger.info(f"  Меняю about на: {about}")
-                        from telethon.tl.functions.messages import EditChatAboutRequest
+                        try:
+                            from telethon.tl.functions.channels import EditAboutRequest
 
-                        await temp_client(EditChatAboutRequest(
-                            peer=input_channel,
-                            about=about
-                        ))
-                        logger.info("  ✅ About изменён")
+                            await temp_client(EditAboutRequest(
+                                channel=input_channel,
+                                about=about
+                            ))
+                            logger.info("  ✅ About изменён")
+                        except ImportError:
+                            logger.warning("❌ EditAboutRequest не найден в channels")
+                            success = False
+                        except Exception as e:
+                            logger.error(f"  ❌ Ошибка about: {e}")
+                            success = False
                     except Exception as e:
                         success = False
                         logger.error(f"  ❌ Ошибка about: {e}")
@@ -2274,16 +2281,25 @@ class UltimateCommentBot:
                     try:
                         logger.info(f"  Меняю фото: {photo_path}")
                         from telethon.tl.functions.channels import EditPhotoRequest
-                        from telethon.tl.types import InputChatUploadedPhoto
 
                         # Загружаем файл
                         uploaded = await temp_client.upload_file(photo_path)
 
-                        await temp_client(EditPhotoRequest(
-                            channel=input_channel,
-                            photo=InputChatUploadedPhoto(uploaded)
-                        ))
-                        logger.info("  ✅ Фото изменено")
+                        try:
+                            await temp_client(EditPhotoRequest(
+                                channel=input_channel,
+                                photo=uploaded
+                            ))
+                            logger.info("  ✅ Фото изменено")
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ Прямой upload не прошёл, пробую InputChatUploadedPhoto: {e}")
+                            from telethon.tl.types import InputChatUploadedPhoto
+
+                            await temp_client(EditPhotoRequest(
+                                channel=input_channel,
+                                photo=InputChatUploadedPhoto(file=uploaded)
+                            ))
+                            logger.info("  ✅ Фото изменено")
                     except Exception as e:
                         success = False
                         logger.error(f"  ❌ Ошибка фото: {e}")
@@ -2698,12 +2714,13 @@ class UltimateCommentBot:
             logger.info(f"🔍 _showcase_set: args_str = {repr(args_str)}")
             parts = args_str.split(maxsplit=2)
             
-            if len(parts) < 2:
+                if len(parts) < 2:
                 await event.respond(
                     "**⚙️ НАСТРОЙКА ВИТРИНЫ**\n\n"
                     "Формат: `/showcase set <параметр> <phone> [значение]`\n\n"
                     "**Параметры:**\n"
-                    "`avatar` - установить аватар (затем отправьте фото)\n"
+                        "`avatar` - установить аватар (затем отправьте фото)\n"
+                        "`photo <путь/URL>` - установить фото напрямую\n"
                     "`title \"Название\"` - изменить название\n"
                     "`about \"Описание\"` - изменить описание\n"
                     "`info title:Название|about:Описание` - обновить всё сразу\n"
@@ -2722,7 +2739,7 @@ class UltimateCommentBot:
                 value_str = value_str.strip()
                 return value_str.startswith('+') or value_str.isdigit()
 
-            known_params = {"avatar", "title", "about", "info", "post", "post_pin"}
+            known_params = {"avatar", "photo", "title", "about", "info", "post", "post_pin"}
 
             # Поддерживаем оба формата: <param> <phone> и <phone> <param>
             if param in known_params and not _looks_like_phone(raw_phone):
@@ -2730,6 +2747,11 @@ class UltimateCommentBot:
                     param, raw_phone = raw_phone, param
             elif param not in known_params and raw_phone in known_params and _looks_like_phone(param):
                 param, raw_phone = raw_phone, param
+
+            photo_file = None
+            if param in ("photo", "avatar"):
+                photo_file = value
+                param = "photo"
 
             logger.info(f"🔍 _showcase_set: param={param}, phone={raw_phone}, value={value}")
             
@@ -2778,22 +2800,36 @@ class UltimateCommentBot:
             logger.info(f"🎯 Обновляю витрину: {showcase}")
             
             # Обработка разных параметров
-            if param == "avatar":
-                # Ждём изображение
-                msg = await event.respond(
-                    f"📸 **УСТАНОВКА АВАТАРА**\n\n"
-                    f"Отправьте изображение (reply на это сообщение)\n\n"
-                    f"⚠️ Ограничения:\n"
-                    f"• Максимум: 10 MB\n"
-                    f"• Форматы: JPG, PNG, WebP"
-                )
-                
-                # Сохраняем состояние ожидания
-                self.user_states[event.sender_id] = {
-                    'action': 'waiting_profile_channel_avatar',
-                    'phone': account_key,
-                    'message_id': msg.id
-                }
+            if param == "photo":
+                if not photo_file:
+                    # Ждём изображение
+                    msg = await event.respond(
+                        f"📸 **УСТАНОВКА АВАТАРА**\n\n"
+                        f"Отправьте изображение (reply на это сообщение)\n\n"
+                        f"⚠️ Ограничения:\n"
+                        f"• Максимум: 10 MB\n"
+                        f"• Форматы: JPG, PNG, WebP"
+                    )
+                    
+                    # Сохраняем состояние ожидания
+                    self.user_states[event.sender_id] = {
+                        'action': 'waiting_profile_channel_avatar',
+                        'phone': account_key,
+                        'message_id': msg.id
+                    }
+                else:
+                    await event.respond("⏳ Обновляю фото канала...")
+                    telegram_success = await self.edit_channel_in_telegram(
+                        phone=account_key,
+                        title=None,
+                        about=None,
+                        photo_path=photo_file
+                    )
+
+                    if telegram_success:
+                        await event.respond("✅ Фото обновлено в Telegram!")
+                    else:
+                        await event.respond("❌ Не удалось обновить фото в Telegram")
             
             elif param == "title":
                 if not value:
