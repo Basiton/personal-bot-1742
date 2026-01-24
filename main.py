@@ -352,6 +352,9 @@ def normalize_account_id(phone_or_id):
 
 class UltimateCommentBot:
     def __init__(self):
+        import uuid
+        self._instance_id = str(uuid.uuid4())[:8]
+        print(f"🆔 ComapcBot instance created: {self._instance_id}")
         # ============= ЗАЩИТА: Один клиент на один session-файл =============
         logger.info("🔧 Создание основного бот-клиента (bot_session)...")
         self.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
@@ -5599,6 +5602,7 @@ class UltimateCommentBot:
         @self.bot_client.on(events.NewMessage(pattern='/testmode'))
         async def testmode_command(event):
             """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
+            logger.info(f"🎯 /testmode handler called by {event.sender_id}, raw={event.raw_text}")
             if not await self.is_admin(event.sender_id):
                 await event.respond("❌ У вас нет доступа к этому боту.")
                 return
