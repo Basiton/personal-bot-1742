@@ -3900,7 +3900,13 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/auth'))
         async def auth_account(event):
+            logger.info("=" * 50)
+            logger.info("AUTH HANDLER CALLED")
+            logger.info("user_id=%s text=%r", event.sender_id, event.text)
+            logger.info("=" * 50)
+            
             if not await self.is_admin(event.sender_id): return
+            
             try:
                 parts = event.text.split()
                 if len(parts) < 2 or not parts[1].strip():
@@ -3923,7 +3929,10 @@ class UltimateCommentBot:
                         proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), 
                                 True, proxy_parts[3], proxy_parts[4])
                 await event.respond(f"🔄 Начинаем авторизацию: `{phone}`")
+                
+                logger.info("AUTH: calling authorize_account for phone=%r", phone)
                 result = await self.authorize_account(phone, proxy, event)
+                logger.info("AUTH: authorize_account returned: %s", type(result).__name__)
                 
                 # Если результат 'pending', значит ждём ввода кода через обработчик сообщений
                 if result == 'pending':
@@ -3937,7 +3946,8 @@ class UltimateCommentBot:
                 else:
                     await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
             except Exception as e:
-                logger.exception("Auth error")
+                logger.error("AUTH EXCEPTION: %s", str(e)[:200])
+                logger.exception("AUTH FULL TRACEBACK")
                 await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
         
         # Обработчик для входящих сообщений (для перехвата кодов авторизации и паролей 2FA)
