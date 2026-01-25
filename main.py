@@ -3899,6 +3899,9 @@ class UltimateCommentBot:
                     await event.respond("❌ Укажите номер. Пример: `/auth +79991112233`")
                     return
                 phone = parts[1].strip()
+                # Убираем любые символы, кроме цифр и "+"
+                phone = ''.join(c for c in phone if c.isdigit() or c == '+')
+                logger.info("AUTH: cleaned phone=%r", phone)
                 proxy = None
                 if len(parts) > 2:
                     proxy_parts = parts[2].split(':')
