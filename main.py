@@ -1452,8 +1452,16 @@ class UltimateCommentBot:
             client = TelegramClient(StringSession(session_string), API_ID, API_HASH, proxy=proxy)
             await client.connect()
             
+            logger.info("AUTH START: phone=%r client=%s", phone, type(client))
+            logger.info("AUTH CLIENT CONNECTED: %s", await client.is_connected() if hasattr(client, 'is_connected') else "N/A")
+            
             if not await client.is_user_authorized():
-                await client.send_code_request(phone)
+                try:
+                    result = await client.send_code_request(phone)
+                    logger.info("AUTH CODE REQUEST SUCCESS: %s", result)
+                except Exception as e:
+                    logger.exception("AUTH CODE REQUEST FAILED")
+                    raise
                 logger.info(f"Код отправлен на {phone}")
                 
                 if event:
