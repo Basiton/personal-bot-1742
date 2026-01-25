@@ -3933,6 +3933,28 @@ class UltimateCommentBot:
                 # Убираем любые символы, кроме цифр и "+"
                 phone = ''.join(c for c in phone if c.isdigit() or c == '+')
                 logger.info("AUTH: cleaned phone=%r", phone)
+                
+                # Проверка на российский номер (+7)
+                if phone.startswith('+7') or phone.startswith('7'):
+                    logger.warning(f"AUTH: RU number detected: {phone}")
+                    await event.respond(
+                        f"⚠️ **Номер начинается на +7 (Россия)**\n\n"
+                        f"Telegram заблокировал автоматическую отправку кода для RU номеров в API.\n\n"
+                        f"✅ **Решение:**\n"
+                        f"1. Откройте Telegram на телефоне с номером `{phone}`\n"
+                        f"2. Отправьте мне сообщение **GETCODE** (я получу код и отправлю его вам)\n"
+                        f"3. Или вы можете сами ввести код, который пришёл в приложение\n\n"
+                        f"Код я буду отправлять в этот чат автоматически."
+                    )
+                    # Сохраняем состояние ожидания GETCODE для RU номера
+                    self.pending_auth[event.chat_id] = {
+                        'phone': phone,
+                        'proxy': None,
+                        'state': 'waiting_getcode',
+                        'event': event
+                    }
+                    return
+                
                 proxy = None
                 if len(parts) > 2:
                     proxy_parts = parts[2].split(':')
@@ -3974,6 +3996,59 @@ class UltimateCommentBot:
                 return
             
             chat_id = event.chat_id
+            
+            # Специальная обработка команды GETCODE для RU номеров
+            if event.text and event.text.strip().upper() == 'GETCODE':
+                logger.info("GETCODE command received from user_id=%s", event.sender_id)
+                
+                if chat_id not in self.pending_auth:
+                    await event.respond("❌ Нет активного процесса авторизации.\n\nСначала используйте `/auth +79991112233`")
+                    return
+                
+                auth_data = self.pending_auth[chat_id]
+                if auth_data.get('state') != 'waiting_getcode':
+                    logger.warning("GETCODE received but state is not waiting_getcode: %s", auth_data.get('state'))
+                    return
+                
+                phone = auth_data['phone']
+                proxy = auth_data.get('proxy')
+                
+                logger.info("GETCODE: Attempting to send code to RU number: %s", phone)
+                
+                try:
+                    # Создаём клиент и отправляем запрос кода
+                    from telethon.sessions import StringSession
+                    client = TelegramClient(StringSession(), API_ID, API_HASH, proxy=proxy)
+                    await client.connect()
+                    
+                    logger.info("GETCODE: Client connected, sending code request...")
+                    result = await client.send_code_request(phone)
+                    logger.info("GETCODE: Code request result: %s", result)
+                    
+                    # Отправляем сообщение пользователю
+                    msg = await event.respond(
+                        f"✅ Запрос кода отправлен на `{phone}`\n\n"
+                        f"📱 Проверьте Telegram на телефоне с этим номером\n"
+                        f"🔢 Отправьте мне код в ответ на это сообщение"
+                    )
+                    
+                    # Обновляем состояние
+                    auth_data['state'] = 'waiting_code'
+                    auth_data['client'] = client
+                    auth_data['message_id'] = msg.id
+                    
+                    logger.info("GETCODE: State updated to waiting_code, message_id=%s", msg.id)
+                    
+                except Exception as e:
+                    logger.exception("GETCODE: Error sending code request")
+                    await event.respond(f"❌ Ошибка при отправке кода: {str(e)[:200]}")
+                    if 'client' in locals():
+                        try:
+                            await client.disconnect()
+                        except:
+                            pass
+                
+                return
             
             # Проверяем, есть ли ожидание авторизации для этого чата
             if chat_id not in self.pending_auth:
