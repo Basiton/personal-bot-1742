@@ -2353,12 +2353,30 @@ class UltimateCommentBot:
     def _normalize_channel_username(self, raw_username):
         if not raw_username:
             return None
+        import re
+
         name = str(raw_username).strip()
         if not name:
             return None
-        if name.startswith('@'):
-            name = name[1:]
-        return f"@{name}".lower()
+
+        # Удаляем markdown-ссылки вида (https://t.me/...)
+        name = re.sub(r"\(https?://t\.me/[^)]+\)", "", name, flags=re.IGNORECASE)
+
+        # Удаляем квадратные скобки
+        name = name.replace("[", "").replace("]", "")
+
+        name = name.strip()
+        if not name:
+            return None
+
+        # Удаляем лидирующие @ и все недопустимые символы
+        name = name.lstrip("@")
+        name = re.sub(r"[^A-Za-z0-9_]", "", name)
+
+        if not name:
+            return None
+
+        return f"@{name.upper()}"
 
     def _find_channel_in_list(self, username_norm, entity_id=None):
         """Ищет канал в self.channels по username или id. Возвращает (index, data) или (None, None)."""
@@ -8353,6 +8371,13 @@ class UltimateCommentBot:
                 except Exception as e:
                     logger.error(f"❌ [{account_name}] Ошибка отключения worker-клиента: {e}")
 
+    async def start_commenting(self):
+        """Wrapper to start auto-commenting loop from run()."""
+        try:
+            await self.pro_auto_comment()
+        except Exception as e:
+            logger.error(f"Start commenting error: {e}")
+
     async def pro_auto_comment(self):
         """Main commenting loop - runs accounts in parallel with rate limiting, rotation, and auto-replacement!"""
         logger.info("="*80)
@@ -8647,6 +8672,10 @@ class UltimateCommentBot:
         
         # Запускаем воркер периодических бэкапов
         asyncio.create_task(self.periodic_backup_worker())
+        # Запускаем воркер ротации аккаунтов
+        asyncio.create_task(self.rotation_worker())
+        # Запускаем автокомментирование
+        asyncio.create_task(self.start_commenting())
         
         await self.bot_client.run_until_disconnected()
 
