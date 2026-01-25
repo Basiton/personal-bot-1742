@@ -624,6 +624,8 @@ class UltimateCommentBot:
                 self.templates = data.get('templates', self.templates)
                 self.bio_links = data.get('bio_links', [])
                 self.admins = data.get('admins', [])
+                raw_test_channels = data.get('test_channels', [])
+                self.test_channels = [self._normalize_channel_username(ch) for ch in raw_test_channels if self._normalize_channel_username(ch)]
                 logger.info(f"✅ Loaded {len(self.accounts_data)} accounts, {len(self.channels)} channels, {len(self.templates)} templates")
         except FileNotFoundError:
             logger.warning(f"⚠️ {DB_NAME} not found - starting with empty data")
