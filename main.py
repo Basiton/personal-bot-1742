@@ -3907,14 +3907,16 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/auth'))
         async def auth_account(event):
-            logger.info("=" * 50)
-            logger.info("AUTH HANDLER CALLED")
-            logger.info("user_id=%s text=%r", event.sender_id, event.text)
-            logger.info("=" * 50)
-            
-            if not await self.is_admin(event.sender_id): return
+            logger.info("=" * 60)
+            logger.info("TELETHON AUTH EVENT FIRED")
+            logger.info("sender_id=%s chat_id=%s text=%r", 
+                        event.sender_id, event.chat_id, event.text)
+            logger.info("=" * 60)
             
             try:
+                if not await self.is_admin(event.sender_id): 
+                    logger.info("AUTH: Access denied - user %s is not admin", event.sender_id)
+                    return
                 parts = event.text.split()
                 if len(parts) < 2 or not parts[1].strip():
                     await event.respond("❌ Укажите номер. Пример: `/auth +79991112233`")
@@ -3953,8 +3955,7 @@ class UltimateCommentBot:
                 else:
                     await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
             except Exception as e:
-                logger.error("AUTH EXCEPTION: %s", str(e)[:200])
-                logger.exception("AUTH FULL TRACEBACK")
+                logger.exception("AUTH HANDLER EXCEPTION")
                 await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
         
         # Обработчик для входящих сообщений (для перехвата кодов авторизации и паролей 2FA)
