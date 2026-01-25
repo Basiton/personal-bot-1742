@@ -8422,36 +8422,36 @@ class UltimateCommentBot:
             logger.info("="*80)
             logger.info("🧪 MODE: TEST")
             logger.info("="*80)
-            logger.info(f"🎯 Test channels: {self.test_channels}")
-            logger.info(f"📊 Total channels in system: {len(self.channels)}")
-            logger.info("🔍 Filtering channels...")
-            
-            # Нормализуем test_channels (добавляем @ если нет)
+            # Нормализуем test_channels
             normalized_test_channels = []
             for tc in self.test_channels:
-                if not tc.startswith('@'):
-                    normalized_test_channels.append('@' + tc)
-                else:
-                    normalized_test_channels.append(tc)
+                norm = self._normalize_channel_username(tc)
+                if norm:
+                    normalized_test_channels.append(norm)
+            normalized_test_channels_set = set(normalized_test_channels)
+            logger.info(f"🎯 Test channels: {normalized_test_channels}")
+            logger.info(f"📊 Total channels in system: {len(self.channels)}")
+            logger.info("🔍 Filtering channels...")
             
             # В тестовом режиме используем ТОЛЬКО тестовые каналы
             channels_to_use = []
             for ch in self.channels:
                 ch_username = ch.get('username') if isinstance(ch, dict) else ch
-                # Normalize username
-                if not ch_username.startswith('@'):
-                    ch_username = '@' + ch_username
+                ch_username_norm = self._normalize_channel_username(ch_username)
+                if not ch_username_norm:
+                    continue
                 
-                # Сравниваем case-insensitive
-                if ch_username.lower() in [tc.lower() for tc in normalized_test_channels]:
+                if ch_username_norm in normalized_test_channels_set:
                     channels_to_use.append(ch)
-                    logger.info(f"   ✅ TEST channel: {ch_username}")
+                    logger.info(f"   ✅ TEST channel: {ch_username_norm}")
             
             if not channels_to_use:
                 logger.error("="*80)
                 logger.error("🧪 ❌ ERROR: NO TEST CHANNELS FOUND!")
                 logger.error(f"🔍 Looking for: {normalized_test_channels}")
-                logger.error(f"📋 Available: {[ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels[:10]]}")
+                logger.error(
+                    f"📋 Available: {[self._normalize_channel_username(ch.get('username') if isinstance(ch, dict) else ch) for ch in self.channels[:10]]}"
+                )
                 logger.error("💡 Use /addchannel to add test channels")
                 logger.error("="*80)
                 return
