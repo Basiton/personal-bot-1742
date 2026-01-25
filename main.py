@@ -1453,7 +1453,8 @@ class UltimateCommentBot:
             await client.connect()
             
             logger.info("AUTH START: phone=%r client=%s", phone, type(client))
-            logger.info("AUTH CLIENT CONNECTED: %s", await client.is_connected() if hasattr(client, 'is_connected') else "N/A")
+            is_connected = client.is_connected() if hasattr(client, 'is_connected') else "N/A"
+            logger.info("AUTH CLIENT CONNECTED: %s", is_connected)
             
             if not await client.is_user_authorized():
                 try:
