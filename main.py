@@ -3966,6 +3966,9 @@ class UltimateCommentBot:
             state = auth_data['state']
             code_or_password = event.text.strip()
             
+            # Логирование ввода
+            logger.info("AUTH CODE INPUT: user_id=%s code_text=%r", event.sender_id, event.text)
+            
             try:
                 if state == 'waiting_code':
                     logger.info(f"Получен код авторизации для {phone}: {code_or_password}")
@@ -3973,6 +3976,7 @@ class UltimateCommentBot:
                     try:
                         assert phone is not None, "phone is None"
                         assert code_or_password is not None, "code is None"
+                        logger.info("AUTH CODE SENDING: code=%r", code_or_password)
                         await client.sign_in(phone, code_or_password)
                         logger.info(f"Аккаунт {phone} успешно авторизован")
                         
@@ -4008,36 +4012,60 @@ class UltimateCommentBot:
                         auth_data['state'] = 'waiting_2fa'
                         auth_data['message_id'] = msg.id
                         logger.info(f"Обновлено состояние на waiting_2fa, новый message_id={msg.id}")
+                    except Exception as e:
+                        logger.exception("AUTH CODE ERROR: %s", e)
+                        await event.respond("⚠️ Ошибка при вводе кода. Попробуй ещё раз.")
+                        # Очистка при ошибке
+                        try:
+                            await client.disconnect()
+                        except:
+                            pass
+                        if chat_id in self.pending_auth:
+                            del self.pending_auth[chat_id]
+                        return
                         
                 elif state == 'waiting_2fa':
                     logger.info(f"Получен пароль 2FA для {phone}")
                     
-                    assert code_or_password is not None, "password is None"
-                    await client.sign_in(password=code_or_password)
-                    logger.info(f"Аккаунт {phone} успешно авторизован (с 2FA)")
-                    
-                    # Успешная авторизация!
-                    me = await client.get_me()
-                    session = client.session.save()
-                    await client.disconnect()
-                    
-                    result = {
-                        'session': session,
-                        'active': True,
-                        'name': me.first_name or 'Без имени',
-                        'username': getattr(me, 'username', None),
-                        'phone': phone,
-                        'proxy': proxy
-                    }
-                    
-                    # Сохраняем в базу
-                    self.accounts_data[phone] = result
-                    self.save_data()
-                    
-                    # Очищаем состояние
-                    del self.pending_auth[chat_id]
-                    
-                    await event.respond(f"✅ **{result['name']}** авторизован (с 2FA)!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
+                    try:
+                        assert code_or_password is not None, "password is None"
+                        logger.info("AUTH 2FA SENDING: password=%r", code_or_password)
+                        await client.sign_in(password=code_or_password)
+                        logger.info(f"Аккаунт {phone} успешно авторизован (с 2FA)")
+                        
+                        # Успешная авторизация!
+                        me = await client.get_me()
+                        session = client.session.save()
+                        await client.disconnect()
+                        
+                        result = {
+                            'session': session,
+                            'active': True,
+                            'name': me.first_name or 'Без имени',
+                            'username': getattr(me, 'username', None),
+                            'phone': phone,
+                            'proxy': proxy
+                        }
+                        
+                        # Сохраняем в базу
+                        self.accounts_data[phone] = result
+                        self.save_data()
+                        
+                        # Очищаем состояние
+                        del self.pending_auth[chat_id]
+                        
+                        await event.respond(f"✅ **{result['name']}** авторизован (с 2FA)!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
+                    except Exception as e:
+                        logger.exception("AUTH 2FA ERROR: %s", e)
+                        await event.respond("⚠️ Ошибка при вводе пароля 2FA. Попробуй ещё раз.")
+                        # Очистка при ошибке
+                        try:
+                            await client.disconnect()
+                        except:
+                            pass
+                        if chat_id in self.pending_auth:
+                            del self.pending_auth[chat_id]
+                        return
                     
             except TypeError as e:
                 logger.exception("AUTH TYPEERROR: %s", e)
