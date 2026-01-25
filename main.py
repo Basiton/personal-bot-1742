@@ -3511,6 +3511,13 @@ class UltimateCommentBot:
             logger.warning("⚠️ Нет аккаунтов для проверки. Используйте /auth для добавления.")
     
     def setup_handlers(self):
+        logger.info("=" * 80)
+        logger.info("REGISTERING COMMAND HANDLERS...")
+        logger.info("Bot client: %s", type(self.bot_client))
+        logger.info("Handlers will be registered via Telethon @client.on() decorators")
+        logger.info("Commands: /start, /help, /auth, /testmode, /listaccounts, /addchannel, /startmon, /stopmon, etc.")
+        logger.info("=" * 80)
+        
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
             # Only owner and admins can use the bot
@@ -8055,6 +8062,13 @@ class UltimateCommentBot:
                 await self.clear_user_state(event.sender_id)
         
         # ============= END PROFILE MANAGEMENT COMMANDS =============
+        
+        # Log successful handler registration
+        logger.info("=" * 80)
+        logger.info("✅ ALL COMMAND HANDLERS REGISTERED SUCCESSFULLY")
+        logger.info("Total handlers: 71 (via Telethon @self.bot_client.on() decorators)")
+        logger.info("Key handlers: /auth, /start, /testmode, /addcomment, /setname, etc.")
+        logger.info("=" * 80)
     
     async def auto_stop_after_4_hours(self, chat_id):
         """Automatically stop monitoring after 4 hours"""
