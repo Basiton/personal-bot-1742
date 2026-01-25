@@ -6094,7 +6094,7 @@ class UltimateCommentBot:
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
         
         logger.warning(f"🔥 /testmode DECORATOR ATTACHED, test_mode={getattr(self, 'test_mode', None)}")
-        @self.bot_client.on(events.NewMessage(pattern=r'^/testmode(?:@comapc_bot)?(\\s.*)?$'))
+        @self.bot_client.on(events.NewMessage(pattern=r'^/testmode(?:@\w+)?(\s.*)?$'))
         async def testmode_command(event):
             logger.warning(f"🔥 /testmode HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
             """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
