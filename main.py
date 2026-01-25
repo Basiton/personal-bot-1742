@@ -3518,6 +3518,13 @@ class UltimateCommentBot:
         logger.info("Commands: /start, /help, /auth, /testmode, /listaccounts, /addchannel, /startmon, /stopmon, etc.")
         logger.info("=" * 80)
         
+        # Log all incoming messages for debugging
+        @self.bot_client.on(events.NewMessage())
+        async def log_all_messages(event):
+            if event.is_private:
+                logger.info("INCOMING MSG: sender_id=%s text=%r", 
+                            event.sender_id, event.text[:100] if event.text else None)
+        
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
             # Only owner and admins can use the bot
@@ -3905,7 +3912,7 @@ class UltimateCommentBot:
         
         # ============= END SESSION PROTECTION COMMANDS =============
         
-        @self.bot_client.on(events.NewMessage(pattern='/auth'))
+        @self.bot_client.on(events.NewMessage(pattern=r'^/auth'))
         async def auth_account(event):
             logger.info("=" * 60)
             logger.info("TELETHON AUTH EVENT FIRED")
