@@ -655,7 +655,8 @@ class UltimateCommentBot:
             'channels': self.channels,
             'templates': self.templates,
             'bio_links': self.bio_links,
-            'admins': self.admins
+            'admins': self.admins,
+            'test_channels': self.test_channels
         }
         
         # Создаём бэкап текущего файла (если существует)
@@ -1429,7 +1430,26 @@ class UltimateCommentBot:
     async def authorize_account(self, phone, proxy=None, event=None):
         """Начинает процесс авторизации и сохраняет состояние в pending_auth"""
         try:
-            client = TelegramClient(StringSession(''), API_ID, API_HASH, proxy=proxy)
+            session_string = ''
+            assert API_ID is not None, "api_id is None"
+            assert API_HASH is not None, "api_hash is None"
+            assert phone is not None, "phone is None"
+            assert session_string is not None, "session is None"
+
+            api_hash_masked = f"{API_HASH[:4]}...{API_HASH[-4:]}" if API_HASH else None
+            if proxy and len(proxy) >= 3:
+                proxy_safe = (proxy[0], proxy[1], proxy[2])
+            else:
+                proxy_safe = proxy
+            logger.info(
+                "AUTH PARAMS: api_id=%s api_hash=%s phone=%s proxy=%s",
+                API_ID,
+                api_hash_masked,
+                phone,
+                proxy_safe
+            )
+
+            client = TelegramClient(StringSession(session_string), API_ID, API_HASH, proxy=proxy)
             await client.connect()
             
             if not await client.is_user_authorized():
@@ -1498,10 +1518,23 @@ class UltimateCommentBot:
                     'admin_id': admin_id
                 }
                 
-        except Exception as e:
-            logger.error(f"Ошибка авторизации {phone}: {e}")
+        except TypeError as e:
+            logger.exception("AUTH TYPEERROR: %s", e)
+            logger.exception("Auth error")
             if event:
-                await event.respond(f"❌ Ошибка: {str(e)}")
+                await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
+            # Очистка состояния при ошибке
+            if event and event.chat_id in self.pending_auth:
+                try:
+                    await self.pending_auth[event.chat_id]['client'].disconnect()
+                except:
+                    pass
+                del self.pending_auth[event.chat_id]
+            return None
+        except Exception as e:
+            logger.exception("Auth error")
+            if event:
+                await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
             # Очистка состояния при ошибке
             if event and event.chat_id in self.pending_auth:
                 try:
@@ -3862,7 +3895,10 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             try:
                 parts = event.text.split()
-                phone = parts[1]
+                if len(parts) < 2 or not parts[1].strip():
+                    await event.respond("❌ Укажите номер. Пример: `/auth +79991112233`")
+                    return
+                phone = parts[1].strip()
                 proxy = None
                 if len(parts) > 2:
                     proxy_parts = parts[2].split(':')
@@ -3888,10 +3924,10 @@ class UltimateCommentBot:
                     self.save_data()
                     await event.respond(f"✅ **{result['name']}** авторизован!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
                 else:
-                    await event.respond("❌ Ошибка авторизации!")
+                    await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
             except Exception as e:
-                logger.error(f"Ошибка в /auth: {e}")
-                await event.respond(f"❌ Ошибка: `{str(e)[:50]}`")
+                logger.exception("Auth error")
+                await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
         
         # Обработчик для входящих сообщений (для перехвата кодов авторизации и паролей 2FA)
         @self.bot_client.on(events.NewMessage(func=lambda e: not e.text.startswith('/')))
@@ -3932,6 +3968,8 @@ class UltimateCommentBot:
                     logger.info(f"Получен код авторизации для {phone}: {code_or_password}")
                     
                     try:
+                        assert phone is not None, "phone is None"
+                        assert code_or_password is not None, "code is None"
                         await client.sign_in(phone, code_or_password)
                         logger.info(f"Аккаунт {phone} успешно авторизован")
                         
@@ -3971,6 +4009,7 @@ class UltimateCommentBot:
                 elif state == 'waiting_2fa':
                     logger.info(f"Получен пароль 2FA для {phone}")
                     
+                    assert code_or_password is not None, "password is None"
                     await client.sign_in(password=code_or_password)
                     logger.info(f"Аккаунт {phone} успешно авторизован (с 2FA)")
                     
@@ -3997,9 +4036,20 @@ class UltimateCommentBot:
                     
                     await event.respond(f"✅ **{result['name']}** авторизован (с 2FA)!\n@{result.get('username', 'нет')}\n`{phone}` ✅ АКТИВЕН")
                     
+            except TypeError as e:
+                logger.exception("AUTH TYPEERROR: %s", e)
+                logger.exception("Auth error")
+                await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
+                # Очистка при ошибке
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+                if chat_id in self.pending_auth:
+                    del self.pending_auth[chat_id]
             except Exception as e:
-                logger.error(f"Ошибка при обработке кода/пароля для {phone}: {e}")
-                await event.respond(f"❌ Ошибка: {str(e)}\n\nПопробуйте заново: /auth {phone}")
+                logger.exception("Auth error")
+                await event.respond("⚠️ Ошибка авторизации, проверь номер и попробуй ещё раз.")
                 
                 # Очистка при ошибке
                 try:
@@ -5628,6 +5678,34 @@ class UltimateCommentBot:
         async def testmode_command(event):
             logger.warning(f"🔥 /testmode HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
             """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
+            from types import SimpleNamespace
+
+            class _EffectiveMessageProxy:
+                def __init__(self, _event):
+                    self._event = _event
+                    self.text = _event.raw_text if _event else None
+
+                async def reply_text(self, text):
+                    await self._event.respond(text)
+
+            _chat = getattr(event, "chat", None)
+            _effective_chat = None
+            if event and getattr(event, "chat_id", None) is not None:
+                _effective_chat = SimpleNamespace(
+                    id=event.chat_id,
+                    username=getattr(_chat, "username", None)
+                )
+
+            update = SimpleNamespace(
+                effective_chat=_effective_chat,
+                effective_message=_EffectiveMessageProxy(event) if event else None,
+            )
+            logger.info(
+                "TESTMODE CMD: chat_id=%s username=%s text=%r",
+                update.effective_chat.id if update.effective_chat else None,
+                (update.effective_chat.username if update.effective_chat else None),
+                update.effective_message.text if update.effective_message else None,
+            )
             logger.info(f"🎯 /testmode handler called by {event.sender_id}, raw={event.raw_text}")
             if not await self.is_admin(event.sender_id):
                 await event.respond("❌ У вас нет доступа к этому боту.")
@@ -5637,7 +5715,8 @@ class UltimateCommentBot:
             logger.info(f"🧪 TESTMODE command received from {event.sender_id}")
             
             try:
-                parts = event.text.strip().split()
+                text = (event.raw_text or event.text or "").rstrip(';').strip()
+                parts = text.split()
                 
                 if len(parts) == 1:
                     # Show current status
@@ -5665,7 +5744,8 @@ class UltimateCommentBot:
                 action = parts[1].lower()
                 
                 if action == 'on':
-                    if len(parts) < 3:
+                    split_after_on = text.split(None, 2)
+                    if len(split_after_on) < 3:
                         await event.respond(
                             "❌ Укажите список каналов.\n\n"
                             "Пример:\n"
@@ -5676,7 +5756,13 @@ class UltimateCommentBot:
                         )
                         return
 
-                    raw_usernames = parts[2:]
+                    raw_channels_part = split_after_on[2]
+                    raw_tokens = raw_channels_part.replace("\n", " ").split(" ")
+                    raw_usernames = []
+                    for token in raw_tokens:
+                        cleaned = token.strip().lstrip('@').strip()
+                        if cleaned:
+                            raw_usernames.append(cleaned)
                     normalized = []
                     seen = set()
                     for raw in raw_usernames:
@@ -5693,8 +5779,14 @@ class UltimateCommentBot:
 
                     self.test_mode = True
                     self.test_channels = normalized
+                    self.save_data()
 
                     await self.test_mode_bulk_channels(event, normalized)
+
+                    await update.effective_message.reply_text(
+                        f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}"
+                    )
+                    logger.info("TESTMODE UPDATED: %s", self.test_channels)
 
                     logger.info("="*80)
                     logger.info("🧪 TEST MODE: ENABLED (BULK)")
@@ -5806,8 +5898,14 @@ class UltimateCommentBot:
 
                     self.test_mode = True
                     self.test_channels = normalized
+                    self.save_data()
 
                     await self.test_mode_bulk_channels(event, normalized)
+
+                    await update.effective_message.reply_text(
+                        f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}"
+                    )
+                    logger.info("TESTMODE UPDATED: %s", self.test_channels)
                     
             except Exception as e:
                 logger.error(f"Testmode command error: {e}")
