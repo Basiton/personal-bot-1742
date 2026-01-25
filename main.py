@@ -3913,7 +3913,191 @@ class UltimateCommentBot:
         
         # ============= END SESSION PROTECTION COMMANDS =============
         
+        @self.bot_client.on(events.NewMessage(pattern=r'^/addsession'))
+        async def add_session(event):
+            """Добавляет аккаунт по готовой сессии StringSession"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            try:
+                parts = event.text.split(maxsplit=2)
+                if len(parts) < 3:
+                    await event.respond(
+                        "❌ Неверный формат.\n\n"
+                        "**Использование:**\n"
+                        "`/addsession +79991112233 1AaBbCcDd...сессия...`\n\n"
+                        "**Как получить сессию:**\n"
+                        "1. На телефоне с этим номером откройте Telegram\n"
+                        "2. Напишите мне команду `/exportsession +79991112233`\n"
+                        "3. Скопируйте полученную строку сессии"
+                    )
+                    return
+                
+                phone = parts[1].strip()
+                session_string = parts[2].strip()
+                
+                # Очистка номера
+                phone = ''.join(c for c in phone if c.isdigit() or c == '+')
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                logger.info(f"ADDSESSION: Attempting to add account phone={phone}, session_len={len(session_string)}")
+                
+                # Проверяем сессию
+                await event.respond(f"🔄 Проверяю сессию для `{phone}`...")
+                
+                try:
+                    from telethon.sessions import StringSession
+                    client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+                    await client.connect()
+                    
+                    if not await client.is_user_authorized():
+                        await client.disconnect()
+                        await event.respond(
+                            f"❌ **Сессия невалидна или истекла**\n\n"
+                            f"Сессия для `{phone}` не авторизована.\n\n"
+                            f"Попробуйте:\n"
+                            f"1. Получить новую сессию через `/exportsession {phone}`\n"
+                            f"2. Или использовать `/auth {phone}` (для не-RU номеров)"
+                        )
+                        logger.warning(f"ADDSESSION: Session not authorized for {phone}")
+                        return
+                    
+                    # Получаем данные пользователя
+                    me = await client.get_me()
+                    await client.disconnect()
+                    
+                    # Определяем admin_id
+                    admin_id = None if self.is_super_admin(event.sender_id) else event.sender_id
+                    
+                    # Создаём структуру аккаунта
+                    account_data = {
+                        'session': session_string,
+                        'active': True,
+                        'name': me.first_name or 'Без имени',
+                        'username': getattr(me, 'username', None),
+                        'phone': phone,
+                        'proxy': None,
+                        'admin_id': admin_id,
+                        'status': 'active'
+                    }
+                    
+                    # Сохраняем
+                    self.accounts_data[phone] = account_data
+                    self.save_data()
+                    
+                    logger.info(f"ADDSESSION: Successfully added account {phone}, name={account_data['name']}")
+                    
+                    await event.respond(
+                        f"✅ **Аккаунт успешно добавлен!**\n\n"
+                        f"👤 **{account_data['name']}**\n"
+                        f"@{account_data.get('username', 'нет')}\n"
+                        f"📱 `{phone}`\n"
+                        f"🟢 Статус: ACTIVE\n\n"
+                        f"Аккаунт готов к работе!"
+                    )
+                    
+                except Exception as e:
+                    logger.exception(f"ADDSESSION: Error validating session for {phone}")
+                    await event.respond(
+                        f"❌ **Ошибка проверки сессии**\n\n"
+                        f"Телефон: `{phone}`\n"
+                        f"Ошибка: {str(e)[:200]}\n\n"
+                        f"Возможные причины:\n"
+                        f"• Сессия повреждена при копировании\n"
+                        f"• Сессия истекла\n"
+                        f"• Неверный формат\n\n"
+                        f"Попробуйте получить новую сессию."
+                    )
+                    
+            except Exception as e:
+                logger.exception("ADDSESSION: Handler exception")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern=r'^/exportsession'))
+        async def export_session(event):
+            """Экспортирует сессию для указанного номера (создаёт новую авторизацию)"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.respond(
+                        "❌ Укажите номер телефона.\n\n"
+                        "**Использование:**\n"
+                        "`/exportsession +79991112233`\n\n"
+                        "Вы получите строку сессии для этого номера."
+                    )
+                    return
+                
+                phone = parts[1].strip()
+                phone = ''.join(c for c in phone if c.isdigit() or c == '+')
+                if not phone.startswith('+'):
+                    phone = '+' + phone
+                
+                logger.info(f"EXPORTSESSION: Starting for phone={phone}, user={event.sender_id}")
+                
+                # Проверяем, не RU ли номер
+                if phone.startswith('+7') or phone.startswith('7'):
+                    await event.respond(
+                        f"⚠️ **Номер начинается на +7 (Россия)**\n\n"
+                        f"Для RU номеров используйте `/auth {phone}` и команду **GETCODE**.\n\n"
+                        f"Или продолжите здесь - я попробую отправить код автоматически."
+                    )
+                
+                await event.respond(f"🔄 Начинаю процесс экспорта сессии для `{phone}`...")
+                
+                try:
+                    from telethon.sessions import StringSession
+                    client = TelegramClient(StringSession(), API_ID, API_HASH)
+                    await client.connect()
+                    
+                    logger.info(f"EXPORTSESSION: Sending code request to {phone}")
+                    result = await client.send_code_request(phone)
+                    logger.info(f"EXPORTSESSION: Code sent, result: {result}")
+                    
+                    msg = await event.respond(
+                        f"📱 **Код отправлен на `{phone}`**\n\n"
+                        f"Проверьте Telegram на телефоне с этим номером.\n"
+                        f"Отправьте мне код в ответ на это сообщение."
+                    )
+                    
+                    # Сохраняем состояние для экспорта
+                    self.pending_auth[event.chat_id] = {
+                        'phone': phone,
+                        'proxy': None,
+                        'client': client,
+                        'message_id': msg.id,
+                        'state': 'export_waiting_code',
+                        'event': event
+                    }
+                    
+                    logger.info(f"EXPORTSESSION: Waiting for code, chat_id={event.chat_id}")
+                    
+                except Exception as e:
+                    logger.exception(f"EXPORTSESSION: Error sending code to {phone}")
+                    await event.respond(
+                        f"❌ **Ошибка отправки кода**\n\n"
+                        f"Телефон: `{phone}`\n"
+                        f"Ошибка: {str(e)[:200]}\n\n"
+                        f"Для RU номеров (+7) используйте:\n"
+                        f"1. `/auth {phone}`\n"
+                        f"2. Отправьте **GETCODE**\n"
+                        f"3. Введите код из приложения"
+                    )
+                    if 'client' in locals():
+                        try:
+                            await client.disconnect()
+                        except:
+                            pass
+                    
+            except Exception as e:
+                logger.exception("EXPORTSESSION: Handler exception")
+                await event.respond(f"❌ Ошибка: {str(e)[:200]}")
+        
         @self.bot_client.on(events.NewMessage(pattern=r'^/auth'))
+
         async def auth_account(event):
             logger.info("=" * 60)
             logger.info("TELETHON AUTH EVENT FIRED")
@@ -4079,7 +4263,103 @@ class UltimateCommentBot:
             logger.info("AUTH CODE INPUT: user_id=%s code_text=%r", event.sender_id, event.text)
             
             try:
-                if state == 'waiting_code':
+                if state == 'export_waiting_code':
+                    # Специальная обработка для экспорта сессии
+                    logger.info(f"EXPORTSESSION: Получен код для {phone}: {code_or_password}")
+                    
+                    try:
+                        assert phone is not None, "phone is None"
+                        assert code_or_password is not None, "code is None"
+                        
+                        await client.sign_in(phone, code_or_password)
+                        logger.info(f"EXPORTSESSION: Account {phone} successfully authorized")
+                        
+                        # Получаем данные и сессию
+                        me = await client.get_me()
+                        session_string = client.session.save()
+                        await client.disconnect()
+                        
+                        # Очищаем состояние
+                        del self.pending_auth[chat_id]
+                        
+                        # Отправляем сессию пользователю
+                        await event.respond(
+                            f"✅ **Сессия успешно создана!**\n\n"
+                            f"👤 **{me.first_name or 'Без имени'}**\n"
+                            f"@{getattr(me, 'username', 'нет')}\n"
+                            f"📱 `{phone}`\n\n"
+                            f"🔑 **Строка сессии:**\n"
+                            f"```\n{session_string}\n```\n\n"
+                            f"📋 **Скопируйте и используйте:**\n"
+                            f"`/addsession {phone} {session_string}`"
+                        )
+                        
+                        logger.info(f"EXPORTSESSION: Session exported for {phone}")
+                        
+                    except SessionPasswordNeededError:
+                        # Нужен пароль 2FA
+                        logger.info(f"EXPORTSESSION: 2FA required for {phone}")
+                        msg = await event.respond(
+                            f"🔐 **Требуется пароль 2FA**\n\n"
+                            f"Отправьте пароль двухфакторной аутентификации в ответ на это сообщение"
+                        )
+                        
+                        # Обновляем состояние
+                        auth_data['state'] = 'export_waiting_2fa'
+                        auth_data['message_id'] = msg.id
+                        logger.info(f"EXPORTSESSION: State updated to export_waiting_2fa")
+                        
+                    except Exception as e:
+                        logger.exception(f"EXPORTSESSION: Error during sign_in for {phone}")
+                        await event.respond(
+                            f"❌ **Ошибка авторизации**\n\n"
+                            f"Код неверный или истёк.\n"
+                            f"Попробуйте снова: `/exportsession {phone}`"
+                        )
+                        await client.disconnect()
+                        del self.pending_auth[chat_id]
+                
+                elif state == 'export_waiting_2fa':
+                    # 2FA для экспорта сессии
+                    logger.info(f"EXPORTSESSION: Получен пароль 2FA для {phone}")
+                    
+                    try:
+                        await client.sign_in(password=code_or_password)
+                        logger.info(f"EXPORTSESSION: Account {phone} authorized with 2FA")
+                        
+                        # Получаем данные и сессию
+                        me = await client.get_me()
+                        session_string = client.session.save()
+                        await client.disconnect()
+                        
+                        # Очищаем состояние
+                        del self.pending_auth[chat_id]
+                        
+                        # Отправляем сессию
+                        await event.respond(
+                            f"✅ **Сессия успешно создана!**\n\n"
+                            f"👤 **{me.first_name or 'Без имени'}**\n"
+                            f"@{getattr(me, 'username', 'нет')}\n"
+                            f"📱 `{phone}`\n\n"
+                            f"🔑 **Строка сессии:**\n"
+                            f"```\n{session_string}\n```\n\n"
+                            f"📋 **Скопируйте и используйте:**\n"
+                            f"`/addsession {phone} {session_string}`"
+                        )
+                        
+                        logger.info(f"EXPORTSESSION: Session exported for {phone} with 2FA")
+                        
+                    except Exception as e:
+                        logger.exception(f"EXPORTSESSION: Error with 2FA for {phone}")
+                        await event.respond(
+                            f"❌ **Ошибка 2FA**\n\n"
+                            f"Пароль неверный.\n"
+                            f"Попробуйте снова: `/exportsession {phone}`"
+                        )
+                        await client.disconnect()
+                        del self.pending_auth[chat_id]
+                
+                elif state == 'waiting_code':
                     logger.info(f"Получен код авторизации для {phone}: {code_or_password}")
                     
                     try:
