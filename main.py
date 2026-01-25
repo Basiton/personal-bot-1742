@@ -6098,34 +6098,7 @@ class UltimateCommentBot:
         async def testmode_command(event):
             logger.warning(f"🔥 /testmode HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
             """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
-            from types import SimpleNamespace
-
-            class _EffectiveMessageProxy:
-                def __init__(self, _event):
-                    self._event = _event
-                    self.text = _event.raw_text if _event else None
-
-                async def reply_text(self, text):
-                    await self._event.respond(text)
-
-            _chat = getattr(event, "chat", None)
-            _effective_chat = None
-            if event and getattr(event, "chat_id", None) is not None:
-                _effective_chat = SimpleNamespace(
-                    id=event.chat_id,
-                    username=getattr(_chat, "username", None)
-                )
-
-            update = SimpleNamespace(
-                effective_chat=_effective_chat,
-                effective_message=_EffectiveMessageProxy(event) if event else None,
-            )
-            logger.info(
-                "TESTMODE CMD: chat_id=%s username=%s text=%r",
-                update.effective_chat.id if update.effective_chat else None,
-                (update.effective_chat.username if update.effective_chat else None),
-                update.effective_message.text if update.effective_message else None,
-            )
+            
             logger.info(f"🎯 /testmode handler called by {event.sender_id}, raw={event.raw_text}")
             if not await self.is_admin(event.sender_id):
                 await event.respond("❌ У вас нет доступа к этому боту.")
@@ -6203,7 +6176,7 @@ class UltimateCommentBot:
 
                     await self.test_mode_bulk_channels(event, normalized)
 
-                    await update.effective_message.reply_text(
+                    await event.respond(
                         f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}"
                     )
                     logger.info("TESTMODE UPDATED: %s", self.test_channels)
@@ -6322,7 +6295,7 @@ class UltimateCommentBot:
 
                     await self.test_mode_bulk_channels(event, normalized)
 
-                    await update.effective_message.reply_text(
+                    await event.respond(
                         f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}"
                     )
                     logger.info("TESTMODE UPDATED: %s", self.test_channels)
