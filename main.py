@@ -4665,16 +4665,29 @@ class UltimateCommentBot:
                 
                 # Ищем аккаунт по разным форматам номера
                 phone = None
+                logger.info(f"🔍 /delaccount: поиск аккаунта '{phone_input}'")
+                logger.info(f"   Доступные ключи: {list(self.accounts_data.keys())}")
+                
+                # Нормализуем введённый номер
+                normalized_input = phone_input.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+                logger.info(f"   Нормализованный ввод: '{normalized_input}'")
+                
                 for p in self.accounts_data.keys():
-                    # Сравниваем без + и пробелов
-                    if p.replace('+', '').replace(' ', '') == phone_input.replace('+', '').replace(' ', ''):
+                    # Нормализуем ключ из словаря
+                    normalized_key = p.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+                    logger.info(f"   Сравниваем: '{normalized_input}' == '{normalized_key}' ({p})")
+                    if normalized_key == normalized_input:
                         phone = p
+                        logger.info(f"   ✅ НАЙДЕН: {p}")
                         break
                 
                 if not phone:
+                    logger.error(f"   ❌ НЕ НАЙДЕН среди {len(self.accounts_data)} аккаунтов")
                     await event.respond(
                         f"❌ Аккаунт не найден: `{phone_input}`\n\n"
-                        f"💡 Используйте `/listaccounts` чтобы увидеть все аккаунты"
+                        f"📋 Доступные номера:\n" + 
+                        "\n".join([f"• `{p}`" for p in list(self.accounts_data.keys())[:10]]) +
+                        f"\n\n💡 Используйте `/listaccounts` для полного списка"
                     )
                     return
                 
