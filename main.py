@@ -4661,52 +4661,61 @@ class UltimateCommentBot:
                     )
                     return
                 
-                phone = parts[1]
+                phone_input = parts[1]
+                
+                # Ищем аккаунт по разным форматам номера
+                phone = None
+                for p in self.accounts_data.keys():
+                    # Сравниваем без + и пробелов
+                    if p.replace('+', '').replace(' ', '') == phone_input.replace('+', '').replace(' ', ''):
+                        phone = p
+                        break
+                
+                if not phone:
+                    await event.respond(
+                        f"❌ Аккаунт не найден: `{phone_input}`\n\n"
+                        f"💡 Используйте `/listaccounts` чтобы увидеть все аккаунты"
+                    )
+                    return
                 
                 # Требуем явного подтверждения
                 if len(parts) < 3 or parts[2].upper() != 'CONFIRM':
-                    if phone in self.accounts_data:
-                        account_name = self.accounts_data[phone].get('name', phone)
-                        await event.respond(
-                            f"⚠️ **ПОДТВЕРДИТЕ УДАЛЕНИЕ**\n\n"
-                            f"Аккаунт: `{account_name}`\n"
-                            f"Телефон: `{phone}`\n\n"
-                            f"**Будет удалено:**\n"
-                            f"• Сессия аккаунта (потребуется переавторизация)\n"
-                            f"• Все настройки и статистика\n\n"
-                            f"**Для подтверждения отправьте:**\n"
-                            f"`/delaccount {phone} CONFIRM`\n\n"
-                            f"💡 **Альтернатива:** Используйте `/toggleaccount {phone}` чтобы просто отключить аккаунт"
-                        )
-                    else:
-                        await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    account_name = self.accounts_data[phone].get('name', phone)
+                    await event.respond(
+                        f"⚠️ **ПОДТВЕРДИТЕ УДАЛЕНИЕ**\n\n"
+                        f"Аккаунт: `{account_name}`\n"
+                        f"Телефон: `{phone}`\n\n"
+                        f"**Будет удалено:**\n"
+                        f"• Сессия аккаунта (потребуется переавторизация)\n"
+                        f"• Все настройки и статистика\n\n"
+                        f"**Для подтверждения отправьте:**\n"
+                        f"`/delaccount {phone} CONFIRM`\n\n"
+                        f"💡 **Альтернатива:** Используйте `/toggleaccount {phone}` чтобы просто отключить аккаунт"
+                    )
                     return
                 
                 # Удаляем только после подтверждения
-                if phone in self.accounts_data:
-                    account_name = self.accounts_data[phone].get('name', phone)
-                    
-                    # ============= ЗАЩИТА: Создаём бэкап перед удалением =============
-                    import shutil
-                    from datetime import datetime
-                    backup_name = f'bot_data.json.before_delete_{phone.replace("+", "")}_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-                    shutil.copy2(DB_NAME, backup_name)
-                    logger.warning(f"🔴 DELETING ACCOUNT: {phone} ({account_name}) by user {event.sender_id}, backup: {backup_name}")
-                    # ============= END ЗАЩИТА =============
-                    
-                    del self.accounts_data[phone]
-                    self.save_data()
-                    
-                    await event.respond(
-                        f"✅ **Аккаунт удалён**\n\n"
-                        f"Имя: `{account_name}`\n"
-                        f"Телефон: `{phone}`\n\n"
-                        f"💾 Резервная копия создана:\n"
-                        f"`{backup_name}`\n\n"
-                        f"⚠️ Для восстановления используйте `/restore`"
-                    )
-                else:
-                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                account_name = self.accounts_data[phone].get('name', phone)
+                
+                # ============= ЗАЩИТА: Создаём бэкап перед удалением =============
+                import shutil
+                from datetime import datetime
+                backup_name = f'bot_data.json.before_delete_{phone.replace("+", "")}_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+                shutil.copy2(DB_NAME, backup_name)
+                logger.warning(f"🔴 DELETING ACCOUNT: {phone} ({account_name}) by user {event.sender_id}, backup: {backup_name}")
+                # ============= END ЗАЩИТА =============
+                
+                del self.accounts_data[phone]
+                self.save_data()
+                
+                await event.respond(
+                    f"✅ **Аккаунт удалён**\n\n"
+                    f"Имя: `{account_name}`\n"
+                    f"Телефон: `{phone}`\n\n"
+                    f"💾 Резервная копия создана:\n"
+                    f"`{backup_name}`\n\n"
+                    f"⚠️ Для восстановления используйте `/restore`"
+                )
             except Exception as e:
                 logger.error(f"Error in /delaccount: {e}")
                 await event.respond(
@@ -4720,33 +4729,46 @@ class UltimateCommentBot:
             """Toggle account between active and reserve mode"""
             if not await self.is_admin(event.sender_id): return
             try:
-                phone = event.text.split(maxsplit=1)[1]
-                if phone in self.accounts_data:
-                    # NEW: Используем новые статусы
-                    current_status = self.accounts_data[phone].get('status', ACCOUNT_STATUS_RESERVE)
-                    
-                    # Переключаем между active и reserve (игнорируем broken)
-                    if current_status == ACCOUNT_STATUS_ACTIVE:
-                        new_status = ACCOUNT_STATUS_RESERVE
-                        status_text = "🔵 RESERVE"
-                    elif current_status == ACCOUNT_STATUS_BROKEN:
-                        # Если аккаунт broken, переводим в reserve
-                        new_status = ACCOUNT_STATUS_RESERVE
-                        status_text = "🔵 RESERVE (восстановлен из broken)"
-                    else:
-                        new_status = ACCOUNT_STATUS_ACTIVE
-                        status_text = "✅ ACTIVE"
-                    
-                    self.set_account_status(phone, new_status, "Manual toggle")
-                    account_name = self.accounts_data[phone].get('name', phone)
-                    
+                phone_input = event.text.split(maxsplit=1)[1]
+                
+                # Ищем аккаунт по разным форматам номера
+                phone = None
+                for p in self.accounts_data.keys():
+                    # Сравниваем без + и пробелов
+                    if p.replace('+', '').replace(' ', '') == phone_input.replace('+', '').replace(' ', ''):
+                        phone = p
+                        break
+                
+                if not phone:
                     await event.respond(
-                        f"Аккаунт `{account_name}` ({phone})\n"
-                        f"Статус изменен: {status_text}\n\n"
-                        f"📊 Текущее состояние: {self.get_status_counts()}"
+                        f"❌ Аккаунт не найден: `{phone_input}`\n\n"
+                        f"💡 Используйте `/listaccounts` чтобы увидеть все аккаунты"
                     )
+                    return
+                
+                # NEW: Используем новые статусы
+                current_status = self.accounts_data[phone].get('status', ACCOUNT_STATUS_RESERVE)
+                
+                # Переключаем между active и reserve (игнорируем broken)
+                if current_status == ACCOUNT_STATUS_ACTIVE:
+                    new_status = ACCOUNT_STATUS_RESERVE
+                    status_text = "🔵 RESERVE"
+                elif current_status == ACCOUNT_STATUS_BROKEN:
+                    # Если аккаунт broken, переводим в reserve
+                    new_status = ACCOUNT_STATUS_RESERVE
+                    status_text = "🔵 RESERVE (восстановлен из broken)"
                 else:
-                    await event.respond("Аккаунт не найден")
+                    new_status = ACCOUNT_STATUS_ACTIVE
+                    status_text = "✅ ACTIVE"
+                
+                self.set_account_status(phone, new_status, "Manual toggle")
+                account_name = self.accounts_data[phone].get('name', phone)
+                
+                await event.respond(
+                    f"Аккаунт `{account_name}` ({phone})\n"
+                    f"Статус изменен: {status_text}\n\n"
+                    f"📊 Текущее состояние: {self.get_status_counts()}"
+                )
             except:
                 await event.respond(
                     "Формат: `/toggleaccount +79123456789`\n\n"
