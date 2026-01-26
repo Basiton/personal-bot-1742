@@ -1374,8 +1374,34 @@ class UltimateCommentBot:
                 
                 expected_workers = min(len(active_accounts), self.max_parallel_accounts)
                 
-                # Подсчёт живых воркеров
-                alive_workers = sum(1 for task in self.active_worker_tasks if not task.done())
+                # Подсчёт живых воркеров - КРИТИЧНО для диагностики!
+                alive_workers = 0
+                dead_workers = []
+                for task in self.active_worker_tasks:
+                    if task.done():
+                        dead_workers.append((task.get_name(), task))
+                    else:
+                        alive_workers += 1
+                
+                # Логируем статус каждого воркера
+                logger.debug(f"🏥 Worker status check:")
+                logger.debug(f"   Total tracked: {len(self.active_worker_tasks)}")
+                logger.debug(f"   Alive: {alive_workers}")
+                logger.debug(f"   Dead: {len(dead_workers)}")
+                
+                if dead_workers:
+                    logger.warning(f"💀 Dead workers detected: {len(dead_workers)}")
+                    for task_name, task in dead_workers:
+                        try:
+                            exc = task.exception()
+                            logger.warning(f"   {task_name}: {exc}")
+                        except Exception as e:
+                            logger.warning(f"   {task_name}: Cancelled or completed")
+                    
+                    # Очищаем мертвые таски из списка
+                    logger.info(f"🧹 Cleaning up {len(dead_workers)} dead workers from tracking list")
+                    self.active_worker_tasks = [task for task in self.active_worker_tasks if not task.done()]
+                    logger.info(f"✅ Active workers list updated: {len(self.active_worker_tasks)} tasks remaining")
                 
                 if alive_workers < expected_workers:
                     logger.warning("="*80)
@@ -8447,44 +8473,59 @@ class UltimateCommentBot:
     
     async def account_worker(self, phone, account_data, all_channels, worker_index, total_workers, mode='distributed'):
         """Worker function: processes channels based on mode (cyclic or distributed)"""
+        import traceback
+        
         account_name = account_data.get('name', phone[-10:])
+        worker_task_name = f"worker_{worker_index}_{phone[-10:]}"
         
-        # В distributed режиме делим каналы между воркерами
-        if mode == 'distributed':
-            channels_per_worker = len(all_channels) // total_workers
-            remainder = len(all_channels) % total_workers
-            
-            start_idx = worker_index * channels_per_worker + min(worker_index, remainder)
-            end_idx = start_idx + channels_per_worker + (1 if worker_index < remainder else 0)
-            my_channels = all_channels[start_idx:end_idx]
-            
-            logger.info("="*60)
-            logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
-            logger.info(f"   Name: {account_name}")
-            logger.info(f"   Mode: DISTRIBUTED (dedicated channels)")
-            logger.info(f"   My channels: {start_idx+1}-{end_idx} ({len(my_channels)} total)")
-            logger.info(f"   Status: {account_data.get('status', 'unknown')}")
-            logger.info("="*60)
-        else:  # cyclic mode
-            my_channels = all_channels
-            logger.info("="*60)
-            logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
-            logger.info(f"   Name: {account_name}")
-            logger.info(f"   Mode: CYCLIC (all channels with offset)")
-            logger.info(f"   Total channels: {len(all_channels)}")
-            logger.info(f"   Offset: starts from channel #{(worker_index % len(all_channels)) + 1}")
-            logger.info(f"   Status: {account_data.get('status', 'unknown')}")
-            logger.info("="*60)
-        
-        # Offset delay to spread workers
-        initial_offset = worker_index * 10
-        if initial_offset > 0:
-            logger.info(f"[{account_name}] Offset delay: {initial_offset}s")
-            await asyncio.sleep(initial_offset)
+        logger.info("="*80)
+        logger.info(f"🚀 WORKER PROCESS STARTING")
+        logger.info(f"   Worker ID: {worker_task_name}")
+        logger.info(f"   Account: {account_name} ({phone})")
+        logger.info(f"   Status: {account_data.get('status', 'UNKNOWN')}")
+        logger.info(f"   Task ID: {id(asyncio.current_task())}")
+        logger.info(f"   Index: {worker_index + 1}/{total_workers}")
+        logger.info(f"   Mode: {mode.upper()}")
+        logger.info("="*80)
         
         # Create Telethon client once
         worker_client = None
+        
         try:
+            # В distributed режиме делим каналы между воркерами
+            if mode == 'distributed':
+                channels_per_worker = len(all_channels) // total_workers
+                remainder = len(all_channels) % total_workers
+                
+                start_idx = worker_index * channels_per_worker + min(worker_index, remainder)
+                end_idx = start_idx + channels_per_worker + (1 if worker_index < remainder else 0)
+                my_channels = all_channels[start_idx:end_idx]
+                
+                logger.info("="*60)
+                logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
+                logger.info(f"   Name: {account_name}")
+                logger.info(f"   Mode: DISTRIBUTED (dedicated channels)")
+                logger.info(f"   My channels: {start_idx+1}-{end_idx} ({len(my_channels)} total)")
+                logger.info(f"   Status: {account_data.get('status', 'unknown')}")
+                logger.info("="*60)
+            else:  # cyclic mode
+                my_channels = all_channels
+                logger.info("="*60)
+                logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
+                logger.info(f"   Name: {account_name}")
+                logger.info(f"   Mode: CYCLIC (all channels with offset)")
+                logger.info(f"   Total channels: {len(all_channels)}")
+                logger.info(f"   Offset: starts from channel #{(worker_index % len(all_channels)) + 1}")
+                logger.info(f"   Status: {account_data.get('status', 'unknown')}")
+                logger.info("="*60)
+            
+            # Offset delay to spread workers
+            initial_offset = worker_index * 10
+            if initial_offset > 0:
+                logger.info(f"[{account_name}] Offset delay: {initial_offset}s")
+                await asyncio.sleep(initial_offset)
+            
+            # Create Telethon client
             logger.info(f"🔌 [{account_name}] Создание worker-клиента (StringSession)...")
             worker_client = TelegramClient(
                 StringSession(account_data['session']), 
@@ -8500,15 +8541,11 @@ class UltimateCommentBot:
                 return
             
             logger.info(f"[{account_name}] Client ready")
-        except Exception as e:
-            logger.error(f"[{account_name}] Failed to create client: {e}")
-            return
-        
-        # Main cycle loop
-        cycle_number = 0
-        max_cycles = self.max_cycles_per_worker
-        
-        try:
+            
+            # Main cycle loop
+            cycle_number = 0
+            max_cycles = self.max_cycles_per_worker
+            
             while self.monitoring:
                 # Проверка лимита циклов (если установлен)
                 if max_cycles > 0 and cycle_number >= max_cycles:
@@ -8856,10 +8893,34 @@ class UltimateCommentBot:
                 await asyncio.sleep(cycle_break)
         
         except Exception as outer_e:
-            logger.error(f"[{account_name}] Fatal error: {outer_e}")
+            logger.error("="*80)
+            logger.error(f"💥 WORKER FATAL ERROR: {worker_task_name}")
+            logger.error(f"   Account: {account_name} ({phone})")
+            logger.error(f"   Error: {outer_e}")
+            logger.error(f"   Traceback:")
+            logger.error(traceback.format_exc())
+            logger.error("="*80)
+            
+            # Попытка уведомить владельца об ошибке
+            try:
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"💥 **ВОРКЕР УПАЛ**\n\n"
+                    f"Аккаунт: `{account_name}`\n"
+                    f"Телефон: `{phone}`\n"
+                    f"Ошибка: `{str(outer_e)[:200]}`\n\n"
+                    f"🔄 Система попытается восстановить через health check"
+                )
+            except:
+                pass
         finally:
             # Cleanup
-            logger.info(f"[{account_name}] WORKER STOPPING")
+            logger.info("="*80)
+            logger.info(f"🛑 WORKER STOPPING: {worker_task_name}")
+            logger.info(f"   Account: {account_name} ({phone})")
+            logger.info(f"   Reason: {'Normal exit' if self.monitoring else 'Monitoring stopped'}")
+            logger.info("="*80)
+            
             if worker_client:
                 try:
                     if worker_client.is_connected():
@@ -9064,6 +9125,7 @@ class UltimateCommentBot:
             logger.info(f"🔧 Creating worker #{i+1}/{len(accounts_list)} for [{data.get('name', phone)}]")
             logger.info(f"   Phone: {phone}")
             logger.info(f"   Status: {data.get('status', 'unknown')}")
+            logger.info(f"   Session: {'✅ EXISTS' if data.get('session') else '❌ MISSING'}")
             logger.info(f"   Will process: ALL {len(channels_copy)} channels")
             logger.info(f"   Offset: starts from channel #{(i % len(channels_copy)) + 1}")
             
@@ -9072,8 +9134,11 @@ class UltimateCommentBot:
             task = asyncio.create_task(
                 self.account_worker(phone, data, channels_copy, i, len(accounts_list), mode=self.worker_mode)
             )
+            task.set_name(f"worker_{i}_{phone[-10:]}")
             tasks.append(task)
             self.active_worker_tasks.append(task)  # Отслеживаем для health check
+            
+            logger.info(f"   ✅ Task created: {task.get_name()} (id={id(task)})")  
             
         
         logger.info("="*80)
