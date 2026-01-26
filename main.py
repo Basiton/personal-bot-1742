@@ -6624,7 +6624,16 @@ class UltimateCommentBot:
                 logger.error(f"Listparsed error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:50]}")
         
-        logger.warning(f"🔥 /testmode DECORATOR ATTACHED, test_mode={getattr(self, 'test_mode', None)}")
+        # Диагностика: код дошёл до этой точки
+        logger.warning("=" * 80)
+        logger.warning("🟢 CHECKPOINT: Код дошёл до регистрации /testmode")
+        logger.warning("=" * 80)
+        
+        # === TESTMODE HANDLER ===
+        logger.warning(f"🔥 РЕГИСТРАЦИЯ ОБРАБОТЧИКА /testmode НАЧИНАЕТСЯ...")
+        logger.warning(f"🔥 bot_client type: {type(self.bot_client)}")
+        logger.warning(f"🔥 test_mode={getattr(self, 'test_mode', None)}")
+        
         @self.bot_client.on(events.NewMessage(pattern=r'^/testmode(?:@\w+)?(\s.*)?$'))
         async def testmode_command(event):
             logger.warning(f"🔥 /testmode HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
@@ -6709,12 +6718,15 @@ class UltimateCommentBot:
                     self.save_config_value('test_mode', True)
                     self.save_config_value('test_channels', normalized)
 
-                    await self.test_mode_bulk_channels(event, normalized)
-
+                    # Сначала быстро отвечаем пользователю
                     await event.respond(
                         f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}\n"
-                        f"💾 Настройка сохранена в config.json"
+                        f"💾 Настройка сохранена в config.json\n\n"
+                        f"🔍 Проверяю каналы..."
                     )
+                    
+                    # Потом делаем проверку (может занять время)
+                    await self.test_mode_bulk_channels(event, normalized)
                     logger.info("TESTMODE UPDATED: %s", self.test_channels)
 
                     logger.info("="*80)
@@ -6853,6 +6865,9 @@ class UltimateCommentBot:
             except Exception as e:
                 logger.error(f"Testmode command error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        logger.warning(f"✅ ОБРАБОТЧИК /testmode ЗАРЕГИСТРИРОВАН УСПЕШНО!")
+        # === END TESTMODE HANDLER ===
         
         @self.bot_client.on(events.NewMessage(pattern='/listbans'))
         async def list_bans(event):
