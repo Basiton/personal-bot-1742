@@ -16,6 +16,9 @@ from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotos
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.errors import SessionPasswordNeededError
 
+# Импорт модуля управления конфигурацией
+from config_manager import load_config, save_config, update_config_value, get_config_value
+
 # Try to load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -357,6 +360,13 @@ class UltimateCommentBot:
         import uuid
         self._instance_id = str(uuid.uuid4())[:8]
         print(f"🆔 ComapcBot instance created: {self._instance_id}")
+        
+        # ============= ЗАГРУЗКА КОНФИГУРАЦИИ =============
+        logger.info("📋 Загрузка конфигурации...")
+        self.config = load_config()
+        logger.info("✅ Конфигурация загружена")
+        # ============= END ЗАГРУЗКА КОНФИГУРАЦИИ =============
+        
         # ============= ЗАЩИТА: Один клиент на один session-файл =============
         logger.info("🔧 Создание основного бот-клиента (bot_session)...")
         self.bot_client = TelegramClient('bot_session', API_ID, API_HASH)
@@ -366,7 +376,8 @@ class UltimateCommentBot:
         # ============= END ЗАЩИТА =============
         self.accounts_data = {}
         self.channels = []
-        self.max_parallel_accounts = DEFAULT_MAX_ACTIVE_ACCOUNTS  # Количество одновременно активных аккаунтов
+        # Загружаем из конфига
+        self.max_parallel_accounts = self.config.get('max_parallel_accounts', DEFAULT_MAX_ACTIVE_ACCOUNTS)
         self.templates = [
             'Отличный пост! 👍', 'Интересно! Спасибо!', 'Супер контент! 🔥',
             'Класс! 👌', 'Огонь! 🔥🔥', 'Согласен! 💯', 'Спасибо за контент! 🙌',
@@ -396,20 +407,18 @@ class UltimateCommentBot:
         # Authorization state management
         self.pending_auth = {}  # {chat_id: {'phone': '+123', 'proxy': ..., 'client': ..., 'message_id': 123, 'state': 'waiting_code'/'waiting_2fa', 'event': ...}}
         
-        # ============= NEW: RATE LIMITING & ROTATION =============
+        # ============= NEW: RATE LIMITING & ROTATION (из конфига) =============
         # Настройки лимитов скорости
-        self.messages_per_hour = DEFAULT_MESSAGES_PER_HOUR  # Лимит сообщений в час на аккаунт
-        self.rotation_interval = DEFAULT_ROTATION_INTERVAL  # Интервал ротации в секундах
+        self.messages_per_hour = self.config.get('speed', DEFAULT_MESSAGES_PER_HOUR)
+        self.rotation_interval = self.config.get('rotation_interval', DEFAULT_ROTATION_INTERVAL)
         
         # Worker mode: 'cyclic' (all workers process all channels) or 'distributed' (channels divided)
-        # cyclic - для тестов и малых проектов (5-20 каналов)
-        # distributed - для продакшна (50+ каналов)
-        self.worker_mode = 'distributed'  # По умолчанию distributed для 100+ каналов
-        self.max_cycles_per_worker = 3  # Количество циклов перед ротацией (0 = бесконечно)
+        self.worker_mode = self.config.get('worker_mode', 'distributed')
+        self.max_cycles_per_worker = self.config.get('max_cycles_per_worker', 3)
         
         # Worker tracking for automatic recovery
         self.active_worker_tasks = []  # Список активных воркеров
-        self.worker_recovery_enabled = True  # Автоматическое восстановление воркеров
+        self.worker_recovery_enabled = self.config.get('worker_recovery_enabled', True)
         
         # Отслеживание активности аккаунтов: {phone: {'messages': [(timestamp1, channel1), ...], 'status': 'active/reserve/broken'}}
         self.account_activity = {}
@@ -423,10 +432,10 @@ class UltimateCommentBot:
         # Индекс для циклической ротации
         self.rotation_index = 0
         
-        # ============= TEST MODE =============
-        self.test_mode = False  # Флаг тестового режима
-        self.test_channels = []  # Список тестовых каналов
-        self.test_mode_speed_limit = 10  # Лимит в тестовом режиме (комм/час на аккаунт)
+        # ============= TEST MODE (из конфига) =============
+        self.test_mode = self.config.get('test_mode', False)
+        self.test_channels = self.config.get('test_channels', [])
+        self.test_mode_speed_limit = self.config.get('test_mode_speed_limit', 10)
         # ============= END TEST MODE =============
         # ============= END NEW =============
         
@@ -434,6 +443,7 @@ class UltimateCommentBot:
         self.load_stats()
         self.load_data()
         self.init_account_statuses()  # Инициализация статусов аккаунтов
+        self.sync_active_accounts_with_config()  # Синхронизация активных аккаунтов с конфигом
     
     async def can_do_profile_operation(self, phone, operation_type):
         """
@@ -968,7 +978,32 @@ class UltimateCommentBot:
         logger.info(f"🔄 Account {account_name}: {old_status} → {status}{reason_str}")
         
         self.save_data()
+        # Синхронизация с конфигом
+        self.sync_active_accounts_with_config()
         return True
+    
+    def sync_active_accounts_with_config(self):
+        """
+        Синхронизирует список активных аккаунтов с config.json
+        Вызывается при изменении статусов аккаунтов
+        """
+        active_phones = [
+            phone for phone, data in self.accounts_data.items()
+            if data.get('status') == ACCOUNT_STATUS_ACTIVE
+        ]
+        
+        # Обновляем конфиг
+        self.config['active_accounts'] = active_phones
+        save_config(self.config)
+        logger.debug(f"💾 Синхронизация: {len(active_phones)} активных аккаунтов сохранено в конфиг")
+    
+    def save_config_value(self, key, value):
+        """
+        Удобный метод для сохранения одного значения в конфиг
+        """
+        self.config[key] = value
+        save_config(self.config)
+        logger.info(f"💾 Сохранено в конфиг: {key} = {value}")
     
     def can_account_send_message(self, phone):
         """Проверить, может ли аккаунт отправить сообщение с учетом лимитов скорости"""
@@ -3595,6 +3630,7 @@ class UltimateCommentBot:
 `/profile` - показать профили всех активных аккаунтов
 
 **⚙️ НАСТРОЙКИ:**
+`/config` - показать все настройки (сохраняются между перезапусками) 🆕
 `/setparallel 2` - кол-во одновременно активных аккаунтов
 `/getparallel` - текущие настройки
 `/setratelimit 20` - лимит сообщений/час на аккаунт (20-40) 🆕
@@ -4894,7 +4930,14 @@ class UltimateCommentBot:
                     return
                 
                 self.max_parallel_accounts = num
-                await event.respond(f"✅ Количество параллельных аккаунтов установлено: **{num}**\n\n⚠️ Изменения вступят в силу после перезапуска мониторинга (`/stopmon` → `/startmon`)")
+                # Сохраняем в конфиг
+                self.save_config_value('max_parallel_accounts', num)
+                
+                await event.respond(
+                    f"✅ Количество параллельных аккаунтов установлено: **{num}**\n\n"
+                    f"⚠️ Изменения вступят в силу после перезапуска мониторинга (`/stopmon` → `/startmon`)\n"
+                    f"💾 Настройка сохранена в config.json"
+                )
             except (IndexError, ValueError):
                 await event.respond("Формат: `/setparallel 3`\n\n📊 Рекомендации:\n• 1-2 аккаунта - безопасно\n• 3-4 аккаунта - средний риск\n• 5+ аккаунтов - высокий риск банов")
         
@@ -4936,10 +4979,14 @@ class UltimateCommentBot:
                     return
                 
                 self.messages_per_hour = limit
+                # Сохраняем в конфиг
+                self.save_config_value('speed', limit)
+                
                 await event.respond(
                     f"✅ Лимит установлен: **{limit} сообщений/час** на аккаунт\n\n"
                     f"⏱️ Это означает ~{3600 // limit} секунд между сообщениями\n"
-                    f"⚠️ Изменения применяются немедленно ко всем активным аккаунтам"
+                    f"⚠️ Изменения применяются немедленно ко всем активным аккаунтам\n"
+                    f"💾 Настройка сохранена в config.json"
                 )
                 logger.info(f"Rate limit set to {limit} messages/hour")
             except (IndexError, ValueError):
@@ -4986,11 +5033,15 @@ class UltimateCommentBot:
                     return
                 
                 self.worker_mode = mode
+                # Сохраняем в конфиг
+                self.save_config_value('worker_mode', mode)
+                
                 await event.respond(
                     f"✅ Режим установлен: **{mode.upper()}**\n\n"
                     f"{'🔄' if mode == 'cyclic' else '📊'} "
                     f"{'Каждый аккаунт проходит ВСЕ каналы' if mode == 'cyclic' else 'Каналы делятся между аккаунтами'}\n"
-                    f"⚠️ Изменения вступят в силу после перезапуска (`/stopmon` → `/startmon`)"
+                    f"⚠️ Изменения вступят в силу после перезапуска (`/stopmon` → `/startmon`)\n"
+                    f"💾 Настройка сохранена в config.json"
                 )
                 logger.info(f"Worker mode set to: {mode}")
             except (IndexError, ValueError):
@@ -5011,18 +5062,23 @@ class UltimateCommentBot:
                     return
                 
                 self.max_cycles_per_worker = cycles
+                # Сохраняем в конфиг
+                self.save_config_value('max_cycles_per_worker', cycles)
+                
                 if cycles == 0:
                     await event.respond(
                         f"✅ Воркеры будут работать **бесконечно**\n\n"
                         f"🔄 Циклы не ограничены\n"
-                        f"⚠️ Ротация аккаунтов отключена"
+                        f"⚠️ Ротация аккаунтов отключена\n"
+                        f"💾 Настройка сохранена в config.json"
                     )
                 else:
                     await event.respond(
                         f"✅ Максимум циклов: **{cycles}**\n\n"
                         f"🔄 Каждый воркер отработает {cycles} циклов\n"
                         f"🔄 Потом уйдёт в резерв (если есть резервные)\n"
-                        f"⚠️ Изменения вступят в силу после перезапуска"
+                        f"⚠️ Изменения вступят в силу после перезапуска\n"
+                        f"💾 Настройка сохранена в config.json"
                     )
                 logger.info(f"Max cycles per worker set to: {cycles}")
             except (IndexError, ValueError):
@@ -5079,14 +5135,83 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             
             self.worker_recovery_enabled = not self.worker_recovery_enabled
+            # Сохраняем в конфиг
+            self.save_config_value('worker_recovery_enabled', self.worker_recovery_enabled)
+            
             status = "✅ Включено" if self.worker_recovery_enabled else "❌ Выключено"
             
             await event.respond(
                 f"🔄 **Автовосстановление воркеров:** {status}\n\n"
                 f"{'📌 Система автоматически перезапустится при замене аккаунта' if self.worker_recovery_enabled else '⚠️ Требуется ручной перезапуск после бана'}\n\n"
-                f"💡 Health check проверяет воркеры каждые 2 минуты"
+                f"💡 Health check проверяет воркеры каждые 2 минуты\n"
+                f"💾 Настройка сохранена в config.json"
             )
             logger.info(f"Worker recovery {'enabled' if self.worker_recovery_enabled else 'disabled'}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/config'))
+        async def show_config(event):
+            """Показать текущую конфигурацию бота"""
+            if not await self.is_admin(event.sender_id): return
+            
+            active_count = sum(1 for d in self.accounts_data.values() if d.get('status') == ACCOUNT_STATUS_ACTIVE)
+            
+            text = "⚙️ **ТЕКУЩАЯ КОНФИГУРАЦИЯ БОТА:**\n\n"
+            
+            # Основные настройки
+            text += "📊 **ОСНОВНЫЕ НАСТРОЙКИ:**\n"
+            text += f"  • Скорость: `{self.messages_per_hour}` комм/час на аккаунт\n"
+            text += f"  • Параллельность: `{self.max_parallel_accounts}` аккаунтов\n"
+            text += f"  • Ротация: `{self.rotation_interval}` сек ({self.rotation_interval // 3600}ч)\n\n"
+            
+            # Режим воркеров
+            text += "🔄 **РЕЖИМ ВОРКЕРОВ:**\n"
+            text += f"  • Режим: `{self.worker_mode}`\n"
+            text += f"  • Макс циклов: `{self.max_cycles_per_worker if self.max_cycles_per_worker > 0 else '∞'}`\n"
+            text += f"  • Автовосстановление: `{'✅ Вкл' if self.worker_recovery_enabled else '❌ Выкл'}`\n\n"
+            
+            # Тестовый режим
+            text += "🧪 **ТЕСТОВЫЙ РЕЖИМ:**\n"
+            text += f"  • Статус: `{'🟢 Включен' if self.test_mode else '🔴 Выключен'}`\n"
+            if self.test_mode:
+                text += f"  • Тест-каналы: `{len(self.test_channels)}`\n"
+                text += f"  • Лимит: `{self.test_mode_speed_limit}` комм/час\n"
+            text += "\n"
+            
+            # Аккаунты
+            text += "👥 **АККАУНТЫ:**\n"
+            text += f"  • Активных: `{active_count}` / `{self.max_parallel_accounts}`\n"
+            text += f"  • Всего: `{len(self.accounts_data)}`\n"
+            if self.config.get('active_accounts'):
+                text += f"  • В конфиге: `{len(self.config['active_accounts'])}`\n"
+            text += "\n"
+            
+            # Данные
+            text += "📁 **ДАННЫЕ:**\n"
+            text += f"  • Каналов: `{len(self.channels)}`\n"
+            text += f"  • Шаблонов: `{len(self.templates)}`\n"
+            text += f"  • Админов: `{len(self.admins)}`\n\n"
+            
+            # Информация о файлах
+            import os
+            config_exists = os.path.exists('config.json')
+            bot_data_exists = os.path.exists('bot_data.json')
+            
+            text += "💾 **ФАЙЛЫ:**\n"
+            text += f"  • config.json: `{'✅ Есть' if config_exists else '❌ Нет'}`\n"
+            text += f"  • bot_data.json: `{'✅ Есть' if bot_data_exists else '❌ Нет'}`\n"
+            
+            if self.config.get('last_updated'):
+                from datetime import datetime
+                try:
+                    updated = datetime.fromisoformat(self.config['last_updated'])
+                    text += f"  • Обновлен: `{updated.strftime('%d.%m.%Y %H:%M')}`\n"
+                except:
+                    pass
+            
+            text += f"\n💡 Версия конфига: `{self.config.get('version', '1.0')}`"
+            
+            await event.respond(text)
+        
         # ============= END NEW COMMANDS =============
 
         @self.bot_client.on(events.NewMessage(pattern='/setrotation'))
@@ -5107,11 +5232,15 @@ class UltimateCommentBot:
                     return
                 
                 self.rotation_interval = interval
+                # Сохраняем в конфиг
+                self.save_config_value('rotation_interval', interval)
+                
                 hours = interval // 3600
                 await event.respond(
                     f"✅ Интервал ротации установлен: **{interval} секунд** ({hours}ч)\n\n"
                     f"🔄 Следующая ротация через ~{hours}ч\n"
-                    f"⚠️ Изменения применяются немедленно"
+                    f"⚠️ Изменения применяются немедленно\n"
+                    f"💾 Настройка сохранена в config.json"
                 )
                 logger.info(f"Rotation interval set to {interval} seconds ({hours}h)")
             except (IndexError, ValueError):
@@ -6199,11 +6328,16 @@ class UltimateCommentBot:
                     self.test_mode = True
                     self.test_channels = normalized
                     self.save_data()
+                    
+                    # Сохраняем в конфиг
+                    self.save_config_value('test_mode', True)
+                    self.save_config_value('test_channels', normalized)
 
                     await self.test_mode_bulk_channels(event, normalized)
 
                     await event.respond(
-                        f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}"
+                        f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}\n"
+                        f"💾 Настройка сохранена в config.json"
                     )
                     logger.info("TESTMODE UPDATED: %s", self.test_channels)
 
@@ -6221,6 +6355,10 @@ class UltimateCommentBot:
                     self.test_mode = False
                     self.test_channels = []
                     
+                    # Сохраняем в конфиг
+                    self.save_config_value('test_mode', False)
+                    self.save_config_value('test_channels', [])
+                    
                     if was_enabled:
                         text = """✅ **TEST MODE: OFF**
 
@@ -6230,6 +6368,7 @@ class UltimateCommentBot:
                             text += "\n📢 Были в тесте:\n"
                             for ch in old_channels:
                                 text += f"  • `{ch}`\n"
+                        text += "\n💾 Настройка сохранена в config.json"
                     else:
                         text = "ℹ️ TEST MODE уже был выключен"
                     
@@ -6261,10 +6400,14 @@ class UltimateCommentBot:
                         old_speed = self.test_mode_speed_limit
                         self.test_mode_speed_limit = speed
                         
+                        # Сохраняем в конфиг
+                        self.save_config_value('test_mode_speed_limit', speed)
+                        
                         await event.respond(
                             f"✅ Лимит тестового режима изменен:\n"
                             f"Было: `{old_speed}` комм/час\n"
-                            f"Стало: `{self.test_mode_speed_limit}` комм/час"
+                            f"Стало: `{self.test_mode_speed_limit}` комм/час\n"
+                            f"💾 Настройка сохранена в config.json"
                         )
                         
                         logger.info(f"🧪 TEST MODE speed changed: {old_speed} -> {speed}")
@@ -6318,11 +6461,16 @@ class UltimateCommentBot:
                     self.test_mode = True
                     self.test_channels = normalized
                     self.save_data()
+                    
+                    # Сохраняем в конфиг
+                    self.save_config_value('test_mode', True)
+                    self.save_config_value('test_channels', normalized)
 
                     await self.test_mode_bulk_channels(event, normalized)
 
                     await event.respond(
-                        f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}"
+                        f"✅ Test mode ON.\nТест‑каналы: {', '.join(self.test_channels) or 'не заданы'}\n"
+                        f"💾 Настройка сохранена в config.json"
                     )
                     logger.info("TESTMODE UPDATED: %s", self.test_channels)
                     
