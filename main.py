@@ -4668,13 +4668,13 @@ class UltimateCommentBot:
                 logger.info(f"🔍 /delaccount: поиск аккаунта '{phone_input}'")
                 logger.info(f"   Доступные ключи: {list(self.accounts_data.keys())}")
                 
-                # Нормализуем введённый номер
-                normalized_input = phone_input.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+                # Нормализуем введённый номер (удаляем всё кроме цифр)
+                normalized_input = ''.join(c for c in phone_input if c.isdigit())
                 logger.info(f"   Нормализованный ввод: '{normalized_input}'")
                 
                 for p in self.accounts_data.keys():
-                    # Нормализуем ключ из словаря
-                    normalized_key = p.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+                    # Нормализуем ключ из словаря (только цифры)
+                    normalized_key = ''.join(c for c in p if c.isdigit())
                     logger.info(f"   Сравниваем: '{normalized_input}' == '{normalized_key}' ({p})")
                     if normalized_key == normalized_input:
                         phone = p
@@ -4744,11 +4744,13 @@ class UltimateCommentBot:
             try:
                 phone_input = event.text.split(maxsplit=1)[1]
                 
-                # Ищем аккаунт по разным форматам номера
+                # Ищем аккаунт по разным форматам номера (только цифры)
                 phone = None
+                normalized_input = ''.join(c for c in phone_input if c.isdigit())
+                
                 for p in self.accounts_data.keys():
-                    # Сравниваем без + и пробелов
-                    if p.replace('+', '').replace(' ', '') == phone_input.replace('+', '').replace(' ', ''):
+                    normalized_key = ''.join(c for c in p if c.isdigit())
+                    if normalized_key == normalized_input:
                         phone = p
                         break
                 
