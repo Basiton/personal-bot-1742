@@ -115,7 +115,9 @@ def generate_neuro_comment(
     
     # Check if API key is configured
     if not YANDEX_API_KEY:
-        logger.warning("YANDEX_API_KEY not configured, using fallback comments")
+        logger.warning("❌ YANDEX_API_KEY not configured, using fallback comments")
+        logger.warning("   Причина: переменные окружения YC_API_KEY и YANDEX_API_KEY не установлены")
+        logger.warning("   Решение: установите YC_API_KEY в systemd unit или .env файле")
         return random.choice(fallback_comments)
     
     # Рандомизация стиля комментария (больше вариантов)
@@ -178,26 +180,101 @@ def generate_neuro_comment(
         ],
     }
 
+    # Подробное логирование запроса
+    logger.info("🤖 YANDEX GPT: начинаем генерацию комментария")
+    logger.info(f"   Model URI: {payload['modelUri']}")
+    logger.info(f"   Temperature: {temperature}, Max tokens: {max_tokens}")
+    logger.info(f"   Prompt length: {len(prompt)} chars")
+    logger.info(f"   Post text length: {len(post_text)} chars")
+    logger.info(f"   Channel theme: {channel_theme}")
+    
     try:
+        logger.info("📡 Отправляем запрос к YandexGPT API...")
         response = requests.post(YANDEX_GPT_URL, headers=headers, json=payload, timeout=30)
+        
+        logger.info(f"📥 Получен ответ от YandexGPT: HTTP {response.status_code}")
+        
         if response.status_code != 200:
-            logger.warning(f"YandexGPT API error: {response.status_code}")
+            logger.error(f"❌ YandexGPT API error: HTTP {response.status_code}")
+            logger.error(f"   Response headers: {dict(response.headers)}")
+            
+            try:
+                error_data = response.json()
+                logger.error(f"   Error response body: {json.dumps(error_data, ensure_ascii=False, indent=2)}")
+                
+                # Детальный анализ ошибки
+                if response.status_code == 400:
+                    logger.error("   Причина: Неверный запрос (проверьте folder_id и формат запроса)")
+                elif response.status_code == 401:
+                    logger.error("   Причина: Неверный API ключ или нет доступа")
+                elif response.status_code == 403:
+                    logger.error("   Причина: Доступ запрещён (проверьте права на folder_id)")
+                elif response.status_code == 429:
+                    logger.error("   Причина: Превышен лимит запросов (rate limit)")
+                else:
+                    logger.error(f"   Причина: Неизвестная ошибка API")
+            except:
+                logger.error(f"   Response text: {response.text[:500]}")
+            
+            logger.warning("⚠️  Использую fallback шаблоны из-за ошибки API")
             return random.choice(fallback_comments)
         
-        data = response.json()
-        raw_comment = data["result"]["alternatives"][0]["message"]["text"].strip()
-        
-        # Постобработка для "человечности"
-        final_comment = humanize_comment(raw_comment)
-        
-        # Логирование (если включено)
-        if ENABLE_COMMENT_LOGGING:
-            logger.info(f"[COMMENT_GEN] Raw: {raw_comment}")
-            logger.info(f"[COMMENT_GEN] Final: {final_comment}")
-        
-        return final_comment
+        # Парсим успешный ответ
+        try:
+            data = response.json()
+            logger.info("✅ JSON успешно распарсен")
+            
+            # Проверяем структуру ответа
+            if "result" not in data:
+                logger.error(f"❌ Неожиданная структура ответа (нет 'result'): {json.dumps(data, ensure_ascii=False)[:500]}")
+                logger.warning("⚠️  Использую fallback шаблоны")
+                return random.choice(fallback_comments)
+            
+            if "alternatives" not in data["result"]:
+                logger.error(f"❌ Неожиданная структура ответа (нет 'alternatives'): {json.dumps(data, ensure_ascii=False)[:500]}")
+                logger.warning("⚠️  Использую fallback шаблоны")
+                return random.choice(fallback_comments)
+            
+            raw_comment = data["result"]["alternatives"][0]["message"]["text"].strip()
+            logger.info(f"📝 Сырой комментарий от YandexGPT: '{raw_comment}'")
+            
+            # Постобработка для "человечности"
+            final_comment = humanize_comment(raw_comment)
+            logger.info(f"✨ Финальный комментарий после обработки: '{final_comment}'")
+            
+            # Логирование (если включено)
+            if ENABLE_COMMENT_LOGGING:
+                logger.info(f"[COMMENT_GEN] Raw: {raw_comment}")
+                logger.info(f"[COMMENT_GEN] Final: {final_comment}")
+            
+            logger.info("🎉 YandexGPT: комментарий успешно сгенерирован")
+            return final_comment
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON ответа: {e}")
+            logger.error(f"   Response text: {response.text[:500]}")
+            logger.warning("⚠️  Использую fallback шаблоны")
+            return random.choice(fallback_comments)
+        except KeyError as e:
+            logger.error(f"❌ Отсутствует ожидаемое поле в ответе: {e}")
+            logger.error(f"   Response data: {json.dumps(data, ensure_ascii=False)[:500]}")
+            logger.warning("⚠️  Использую fallback шаблоны")
+            return random.choice(fallback_comments)
+            
+    except requests.exceptions.Timeout:
+        logger.error("❌ YandexGPT API timeout (30 секунд)")
+        logger.error("   Причина: API не ответил в течение 30 секунд")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"❌ YandexGPT connection error: {e}")
+        logger.error("   Причина: не удалось подключиться к API (проверьте интернет)")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
     except Exception as e:
-        logger.warning(f"YandexGPT generation failed: {e}")
+        logger.error(f"❌ YandexGPT unexpected error: {e}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        logger.warning("⚠️  Использую fallback шаблоны")
         return random.choice(fallback_comments)
 
 def humanize_comment(text: str) -> str:
@@ -366,6 +443,60 @@ class UltimateCommentBot:
         self.config = load_config()
         logger.info("✅ Конфигурация загружена")
         # ============= END ЗАГРУЗКА КОНФИГУРАЦИИ =============
+        
+        # ============= YANDEX GPT ENVIRONMENT CHECK =============
+        logger.info("="*60)
+        logger.info("🔍 ПРОВЕРКА YANDEX GPT ОКРУЖЕНИЯ")
+        logger.info("="*60)
+        
+        # Проверяем YC_API_KEY
+        yc_api_key_found = bool(os.getenv('YC_API_KEY'))
+        yandex_api_key_found = bool(os.getenv('YANDEX_API_KEY'))
+        
+        if yc_api_key_found:
+            key_value = os.getenv('YC_API_KEY', '')
+            masked_key = key_value[:8] + '***' + key_value[-4:] if len(key_value) > 12 else '***'
+            logger.info(f"✅ YC_API_KEY найден: {masked_key}")
+            logger.info(f"   Источник: переменная окружения YC_API_KEY")
+        elif yandex_api_key_found:
+            key_value = os.getenv('YANDEX_API_KEY', '')
+            masked_key = key_value[:8] + '***' + key_value[-4:] if len(key_value) > 12 else '***'
+            logger.info(f"✅ YANDEX_API_KEY найден: {masked_key}")
+            logger.info(f"   Источник: переменная окружения YANDEX_API_KEY")
+        else:
+            logger.error("❌ API KEY НЕ НАЙДЕН!")
+            logger.error("   Проверьте переменные окружения: YC_API_KEY или YANDEX_API_KEY")
+            logger.error("   YandexGPT будет ОТКЛЮЧЕН, комментарии будут использовать шаблоны")
+        
+        # Проверяем YC_FOLDER_ID
+        yc_folder_found = bool(os.getenv('YC_FOLDER_ID'))
+        yandex_folder_found = bool(os.getenv('YANDEX_FOLDER_ID'))
+        
+        if yc_folder_found:
+            folder_id = os.getenv('YC_FOLDER_ID', '')
+            logger.info(f"✅ YC_FOLDER_ID найден: {folder_id}")
+            logger.info(f"   Источник: переменная окружения YC_FOLDER_ID")
+        elif yandex_folder_found:
+            folder_id = os.getenv('YANDEX_FOLDER_ID', '')
+            logger.info(f"✅ YANDEX_FOLDER_ID найден: {folder_id}")
+            logger.info(f"   Источник: переменная окружения YANDEX_FOLDER_ID")
+        else:
+            logger.warning(f"⚠️  FOLDER_ID не найден в окружении, используется дефолтный: {YANDEX_FOLDER_ID}")
+        
+        # Итоговый статус
+        yandex_gpt_enabled = bool(YANDEX_API_KEY)
+        if yandex_gpt_enabled:
+            logger.info("")
+            logger.info("✅ YANDEX GPT: ВКЛЮЧЁН")
+            logger.info(f"   Model URI: gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest")
+            logger.info(f"   Endpoint: {YANDEX_GPT_URL}")
+        else:
+            logger.error("")
+            logger.error("❌ YANDEX GPT: ОТКЛЮЧЁН (нет API ключа)")
+            logger.error("   Все комментарии будут использовать шаблоны")
+        
+        logger.info("="*60)
+        # ============= END YANDEX GPT ENVIRONMENT CHECK =============
         
         # ============= ЗАЩИТА: Один клиент на один session-файл =============
         logger.info("🔧 Создание основного бот-клиента (bot_session)...")

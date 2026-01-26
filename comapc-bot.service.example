@@ -1,0 +1,90 @@
+# Пример правильной конфигурации systemd unit для бота
+# Путь: /etc/systemd/system/comapc-bot.service
+
+[Unit]
+Description=Comapc Telegram Comment Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/bot
+ExecStart=/usr/bin/python3 /root/bot/main.py
+Restart=always
+RestartSec=10
+
+# ВАЖНО: Переменные окружения для YandexGPT
+# СИНТАКСИС: Environment="NAME=value" (кавычки вокруг всей пары, НЕ вокруг value!)
+# ПРАВИЛЬНО:   Environment="YC_API_KEY=AQVN..."
+# НЕПРАВИЛЬНО: Environment=YC_API_KEY="AQVN..."  (кавычки станут частью значения!)
+#
+# Замените на свои значения:
+Environment="PYTHONUNBUFFERED=1"
+Environment="YC_API_KEY=AQVN...ваш_полный_ключ_здесь..."
+Environment="YC_FOLDER_ID=b1g...ваш_folder_id_здесь..."
+
+# Опционально: включить подробное логирование комментариев
+# Environment="LOG_COMMENTS=true"
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=comapc-bot
+
+[Install]
+WantedBy=multi-user.target
+
+# ============================================
+# ИНСТРУКЦИЯ ПО ПРИМЕНЕНИЮ
+# ============================================
+#
+# 1. Замените YC_API_KEY и YC_FOLDER_ID на свои значения
+#
+# 2. Сохраните файл как /etc/systemd/system/comapc-bot.service
+#
+# 3. Установите права:
+#    sudo chmod 644 /etc/systemd/system/comapc-bot.service
+#
+# 4. Перезагрузите systemd:
+#    sudo systemctl daemon-reload
+#
+# 5. Включите автозапуск:
+#    sudo systemctl enable comapc-bot
+#
+# 6. Запустите бота:
+#    sudo systemctl start comapc-bot
+#
+# 7. Проверьте статус:
+#    sudo systemctl status comapc-bot
+#
+# 8. Смотрите логи:
+#    sudo journalctl -u comapc-bot -f
+#
+# ============================================
+# ПРОВЕРКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ
+# ============================================
+#
+# Чтобы убедиться что переменные видны боту:
+#
+# sudo systemctl show comapc-bot -p Environment
+#
+# Должно показать:
+# Environment=PYTHONUNBUFFERED=1 YC_API_KEY=... YC_FOLDER_ID=...
+#
+# ============================================
+# КАК ПОЛУЧИТЬ YC_API_KEY и YC_FOLDER_ID
+# ============================================
+#
+# YC_API_KEY:
+# 1. Перейдите в консоль Yandex Cloud: https://console.cloud.yandex.ru/
+# 2. Выберите ваш каталог (folder)
+# 3. Перейдите в "Сервисные аккаунты"
+# 4. Создайте новый сервисный аккаунт или выберите существующий
+# 5. Добавьте роль: ai.languageModels.user
+# 6. Создайте API-ключ и скопируйте его (начинается с AQVN...)
+#
+# YC_FOLDER_ID:
+# 1. В консоли Yandex Cloud выберите ваш каталог
+# 2. ID каталога показан в верхней части (начинается с b1g...)
+# 3. Или используйте команду: yc config list
+#
