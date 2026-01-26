@@ -8768,7 +8768,25 @@ class UltimateCommentBot:
                     await worker_client.connect()
                     
                     if not await worker_client.is_user_authorized():
-                        logger.error(f"[{account_name}] Account not authorized!")
+                        logger.error(f"❌ [{account_name}] Account not authorized! Marking as BROKEN")
+                        # Автоматически помечаем аккаунт как сломанный
+                        account_data['status'] = ACCOUNT_STATUS_BROKEN
+                        self.save_data()
+                        
+                        # Уведомляем админа
+                        try:
+                            await self.bot_client.send_message(
+                                BOT_OWNER_ID,
+                                f"⚠️ **АККАУНТ ПОТЕРЯЛ АВТОРИЗАЦИЮ**\n\n"
+                                f"Аккаунт: `{account_name}`\n"
+                                f"Телефон: `{phone}`\n\n"
+                                f"❌ Статус изменён на: **BROKEN**\n"
+                                f"💡 Используйте `/auth {phone}` для реавторизации\n"
+                                f"💡 Или `/toggleaccount {phone}` для активации после входа"
+                            )
+                        except:
+                            pass
+                        
                         return
                     
                     self.account_clients[phone] = worker_client
