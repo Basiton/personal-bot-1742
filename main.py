@@ -6690,6 +6690,11 @@ class UltimateCommentBot:
                         return
 
                     raw_channels_part = split_after_on[2]
+                    
+                    # Убираем markdown ссылки: [@channel](url) -> @channel
+                    import re
+                    raw_channels_part = re.sub(r'\[(@\w+)\]\([^)]+\)', r'\1', raw_channels_part)
+                    
                     raw_tokens = raw_channels_part.replace("\n", " ").split(" ")
                     raw_usernames = []
                     for token in raw_tokens:
