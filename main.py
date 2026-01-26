@@ -8746,9 +8746,21 @@ class UltimateCommentBot:
                     StringSession(account_data['session']), 
                     API_ID, 
                     API_HASH,
-                    proxy=account_data.get('proxy')
+                    proxy=account_data.get('proxy'),
+                    connection_retries=5,
+                    retry_delay=3
                 )
-                await worker_client.connect()
+                
+                try:
+                    await worker_client.connect()
+                except Exception as conn_error:
+                    if 'AuthKeyDuplicated' in str(conn_error):
+                        logger.error(f"❌ [{account_name}] AuthKeyDuplicatedError - аккаунт используется в другом месте")
+                        logger.error(f"   Пропускаю этот аккаунт...")
+                        return
+                    else:
+                        logger.error(f"❌ [{account_name}] Ошибка подключения: {conn_error}")
+                        raise
                 
                 if not await worker_client.is_user_authorized():
                     logger.error(f"[{account_name}] Account not authorized!")
@@ -9348,6 +9360,12 @@ class UltimateCommentBot:
             logger.info(f"   Session: {'✅ EXISTS' if data.get('session') else '❌ MISSING'}")
             logger.info(f"   Will process: ALL {len(channels_copy)} channels")
             logger.info(f"   Offset: starts from channel #{(i % len(channels_copy)) + 1}")
+            
+            # Задержка между созданием воркеров для избежания конфликтов
+            if i > 0:
+                delay = 3
+                logger.info(f"⏳ Задержка {delay}s перед созданием воркера #{i+1}...")
+                await asyncio.sleep(delay)
             
             # Create worker task for this account
             # Create worker task - каждый воркер получает ВСЕ каналы
