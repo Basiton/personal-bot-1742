@@ -1,0 +1,22 @@
+{
+  "speed": 20,
+  "max_parallel_accounts": 2,
+  "rotation_interval": 14400,
+  "worker_mode": "distributed",
+  "max_cycles_per_worker": 3,
+  "worker_recovery_enabled": true,
+  "test_mode": false,
+  "test_channels": [],
+  "test_mode_speed_limit": 10,
+  "active_accounts": [
+    "+18622376920",
+    "+18622376921"
+  ],
+  "min_interval_between_own_accounts": 300,
+  "enable_comment_logging": false,
+  "comment_temperature": 0.8,
+  "comment_max_tokens": 120,
+  "last_updated": "2026-01-26T05:40:20.428213",
+  "version": "1.0",
+  "test_param": 123
+}

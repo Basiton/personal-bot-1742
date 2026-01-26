@@ -3651,6 +3651,7 @@ class UltimateCommentBot:
 `/addchannel @username` - добавить
 `/listchannels` - список
 `/delchannel @username` - удалить
+`/syncchannels` - синхронизировать с БД (для корректной статистики) 🆕
 `/searchchannels тема` - поиск по теме
 `/addparsed тема 10` - добавить найденные в работу
 
@@ -5349,6 +5350,22 @@ class UltimateCommentBot:
                 if username not in existing_usernames:
                     self.channels.append({'username': username})
                     self.save_data()
+                    
+                    # Также добавляем в таблицу parsed_channels для статистики
+                    if self.conn:
+                        try:
+                            cursor = self.conn.cursor()
+                            cursor.execute(
+                                """INSERT OR IGNORE INTO parsed_channels 
+                                (username, theme, source, added_date, admin_id) 
+                                VALUES (?, ?, ?, ?, ?)""",
+                                (username, 'manual', 'addchannel', datetime.now().isoformat(), event.sender_id)
+                            )
+                            self.conn.commit()
+                            logger.info(f"Channel {username} added to parsed_channels table")
+                        except Exception as db_err:
+                            logger.warning(f"Failed to add to parsed_channels table: {db_err}")
+                    
                     logger.info(f"Channel {username} added successfully")
                     await event.respond(f"✅ Канал `{username}` добавлен")
                 else:
@@ -5357,6 +5374,52 @@ class UltimateCommentBot:
             except Exception as e:
                 logger.error(f"Error adding channel: {e}")
                 await event.respond("❌ Формат: `/addchannel @username`")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/syncchannels'))
+        async def sync_channels(event):
+            """Синхронизирует каналы из bot_data.json с таблицей parsed_channels"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                if not self.conn:
+                    await event.respond("❌ База данных недоступна")
+                    return
+                
+                synced = 0
+                cursor = self.conn.cursor()
+                
+                for ch in self.channels:
+                    username = ch.get('username') if isinstance(ch, dict) else ch
+                    if username:
+                        try:
+                            cursor.execute(
+                                """INSERT OR IGNORE INTO parsed_channels 
+                                (username, theme, source, added_date, admin_id) 
+                                VALUES (?, ?, ?, ?, ?)""",
+                                (username, 'manual', 'sync', datetime.now().isoformat(), event.sender_id)
+                            )
+                            if cursor.rowcount > 0:
+                                synced += 1
+                        except Exception as e:
+                            logger.error(f"Error syncing channel {username}: {e}")
+                
+                self.conn.commit()
+                
+                # Подсчёт каналов в БД
+                cursor.execute("SELECT COUNT(*) FROM parsed_channels")
+                total_in_db = cursor.fetchone()[0]
+                
+                await event.respond(
+                    f"✅ **Синхронизация завершена:**\n\n"
+                    f"📊 Каналов в памяти: `{len(self.channels)}`\n"
+                    f"📊 Каналов в БД: `{total_in_db}`\n"
+                    f"➕ Добавлено новых: `{synced}`\n\n"
+                    f"💡 Теперь статистика `/stats` будет показывать корректные данные"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error syncing channels: {e}")
+                await event.respond(f"❌ Ошибка синхронизации: {str(e)[:100]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/searchchannels (.+)'))
         async def search_channels(event):
