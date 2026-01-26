@@ -6678,6 +6678,8 @@ class UltimateCommentBot:
                 
                 if action == 'on':
                     split_after_on = text.split(None, 2)
+                    logger.info(f"🧪 /testmode on: split_after_on = {split_after_on}")
+                    
                     if len(split_after_on) < 3:
                         await event.respond(
                             "❌ Укажите список каналов.\n\n"
@@ -6690,17 +6692,24 @@ class UltimateCommentBot:
                         return
 
                     raw_channels_part = split_after_on[2]
+                    logger.info(f"🧪 raw_channels_part BEFORE: {raw_channels_part}")
                     
                     # Убираем markdown ссылки: [@channel](url) -> @channel
                     import re
                     raw_channels_part = re.sub(r'\[(@\w+)\]\([^)]+\)', r'\1', raw_channels_part)
+                    logger.info(f"🧪 raw_channels_part AFTER regex: {raw_channels_part}")
                     
                     raw_tokens = raw_channels_part.replace("\n", " ").split(" ")
+                    logger.info(f"🧪 raw_tokens: {raw_tokens}")
+                    
                     raw_usernames = []
                     for token in raw_tokens:
                         cleaned = token.strip().lstrip('@').strip()
                         if cleaned:
                             raw_usernames.append(cleaned)
+                    
+                    logger.info(f"🧪 raw_usernames: {raw_usernames}")
+                    
                     normalized = []
                     seen = set()
                     for raw in raw_usernames:
@@ -6710,6 +6719,8 @@ class UltimateCommentBot:
                         if norm not in seen:
                             seen.add(norm)
                             normalized.append(norm)
+
+                    logger.info(f"🧪 normalized channels: {normalized}")
 
                     if not normalized:
                         await event.respond("❌ Не удалось распознать список каналов")
