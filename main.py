@@ -4945,7 +4945,8 @@ class UltimateCommentBot:
                     
                     # Генерируем QR код как изображение
                     import qrcode
-                    from io import BytesIO
+                    import tempfile
+                    import os
                     
                     qr = qrcode.QRCode(version=1, box_size=10, border=4)
                     qr.add_data(qr_url)
@@ -4953,15 +4954,15 @@ class UltimateCommentBot:
                     
                     img = qr.make_image(fill_color="black", back_color="white")
                     
-                    # Сохраняем в BytesIO
-                    bio = BytesIO()
-                    img.save(bio, 'PNG')
-                    bio.seek(0)
+                    # Сохраняем во временный файл
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                    img.save(temp_file.name)
+                    temp_file.close()
                     
-                    # Отправляем QR код
+                    # Отправляем QR код как фото
                     await self.bot_client.send_file(
                         event.chat_id,
-                        bio,
+                        temp_file.name,
                         force_document=False,  # Отправляем как фото, а не файл
                         caption=(
                             f"📱 **QR код для: {account_name}**\n\n"
@@ -4972,6 +4973,12 @@ class UltimateCommentBot:
                             "⏱️ Ожидаю сканирования (таймаут 2 минуты)..."
                         )
                     )
+                    
+                    # Удаляем временный файл
+                    try:
+                        os.unlink(temp_file.name)
+                    except:
+                        pass
                     
                     await msg.delete()
                     
