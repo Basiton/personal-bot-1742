@@ -5961,6 +5961,19 @@ class UltimateCommentBot:
         async def stop_monitor(event):
             if not await self.is_admin(event.sender_id): return
             self.monitoring = False
+            
+            # Закрываем все клиенты аккаунтов
+            if self.account_clients:
+                logger.info(f"🔌 Закрытие {len(self.account_clients)} клиентов аккаунтов...")
+                for phone, client in list(self.account_clients.items()):
+                    try:
+                        await client.disconnect()
+                        logger.info(f"✅ Клиент {phone} закрыт")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка закрытия клиента {phone}: {e}")
+                self.account_clients.clear()
+                logger.info("✅ Все клиенты закрыты")
+            
             await event.respond("Автокомментарии остановлены")
         
         @self.bot_client.on(events.NewMessage(pattern='/addbio'))
@@ -9480,7 +9493,19 @@ class UltimateCommentBot:
         # Запускаем автокомментирование
         asyncio.create_task(self.start_commenting())
         
-        await self.bot_client.run_until_disconnected()
+        try:
+            await self.bot_client.run_until_disconnected()
+        finally:
+            # Закрываем все клиенты при выходе
+            logger.info("🔌 Закрытие всех клиентов аккаунтов...")
+            for phone, client in list(self.account_clients.items()):
+                try:
+                    await client.disconnect()
+                    logger.info(f"✅ Клиент {phone} закрыт")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка закрытия {phone}: {e}")
+            self.account_clients.clear()
+            logger.info("✅ Все клиенты закрыты")
 
 if __name__ == '__main__':
     try:
