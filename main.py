@@ -439,6 +439,9 @@ class UltimateCommentBot:
         # ============= END TEST MODE =============
         # ============= END NEW =============
         
+        # Словарь для переиспользования клиентов (один клиент на аккаунт)
+        self.account_clients = {}  # {phone: TelegramClient}
+        
         self.init_database()
         self.load_stats()
         self.load_data()
@@ -8736,20 +8739,26 @@ class UltimateCommentBot:
                 logger.info(f"[{account_name}] Offset delay: {initial_offset}s")
                 await asyncio.sleep(initial_offset)
             
-            # Create Telethon client
-            logger.info(f"🔌 [{account_name}] Создание worker-клиента (StringSession)...")
-            worker_client = TelegramClient(
-                StringSession(account_data['session']), 
-                API_ID, 
-                API_HASH,
-                proxy=account_data.get('proxy')
-            )
-            logger.info(f"🔌 [{account_name}] Подключение worker-клиента...")
-            await worker_client.connect()
-            
-            if not await worker_client.is_user_authorized():
-                logger.error(f"[{account_name}] Account not authorized!")
-                return
+            # Получаем или создаем клиент (один на аккаунт, переиспользуется всеми воркерами)
+            if phone not in self.account_clients:
+                logger.info(f"🔌 [{account_name}] Создание НОВОГО клиента для {phone}...")
+                worker_client = TelegramClient(
+                    StringSession(account_data['session']), 
+                    API_ID, 
+                    API_HASH,
+                    proxy=account_data.get('proxy')
+                )
+                await worker_client.connect()
+                
+                if not await worker_client.is_user_authorized():
+                    logger.error(f"[{account_name}] Account not authorized!")
+                    return
+                
+                self.account_clients[phone] = worker_client
+                logger.info(f"✅ [{account_name}] Клиент создан и сохранён для переиспользования")
+            else:
+                worker_client = self.account_clients[phone]
+                logger.info(f"♻️ [{account_name}] Переиспользую существующий клиент")
             
             logger.info(f"[{account_name}] Client ready")
             
