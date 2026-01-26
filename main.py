@@ -3625,6 +3625,7 @@ class UltimateCommentBot:
 `/blockedaccounts` - сломанные/заблокированные 🚫
 `/delaccount +79123456789` - удалить
 `/toggleaccount +79123456789` - переключить active ⇄ reserve
+`/importsession +79... StringSession Имя` - импорт готовой сессии (для RU) 🆕
 
 **👤 УПРАВЛЕНИЕ ПРОФИЛЕМ:**
 `/setname` - изменить имя (выбор аккаунта → ввод имени)
@@ -4792,6 +4793,104 @@ class UltimateCommentBot:
                     "🔵 RESERVE → ✅ ACTIVE\n"
                     "🔴 BROKEN → 🔵 RESERVE"
                 )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/importsession'))
+        async def import_session(event):
+            """Импорт готовой StringSession для российских номеров"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split(maxsplit=3)
+                if len(parts) < 3:
+                    await event.respond(
+                        "**📱 ИМПОРТ ГОТОВОЙ СЕССИИ**\n\n"
+                        "Для российских номеров, когда код не приходит через бота.\n\n"
+                        "**Формат:**\n"
+                        "`/importsession +79123456789 StringSession_здесь Имя`\n\n"
+                        "**Где взять StringSession:**\n"
+                        "1. Telegram Desktop → Settings → Advanced → Export Telegram data\n"
+                        "2. Или используйте скрипт: `python3 manual_auth_russia.py`\n"
+                        "3. Или авторизуйтесь через telegram-cli и экспортируйте\n\n"
+                        "**Пример:**\n"
+                        "`/importsession +79991112233 1BVtsOHsBu... Александр`"
+                    )
+                    return
+                
+                phone = parts[1]
+                session_string = parts[2]
+                name = parts[3] if len(parts) > 3 else phone[-10:]
+                
+                # Нормализуем номер
+                phone_digits = ''.join(c for c in phone if c.isdigit())
+                if not phone.startswith('+'):
+                    phone = '+' + phone_digits
+                
+                logger.info(f"📥 /importsession: phone={phone}, name={name}, user={event.sender_id}")
+                
+                # Проверяем что сессия валидна (подключаемся)
+                await event.respond(f"🔍 Проверка сессии для `{phone}`...")
+                
+                from telethon.sessions import StringSession
+                test_client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+                
+                try:
+                    await test_client.connect()
+                    
+                    if not await test_client.is_user_authorized():
+                        await event.respond("❌ Сессия невалидна или аккаунт не авторизован")
+                        await test_client.disconnect()
+                        return
+                    
+                    # Получаем информацию об аккаунте
+                    me = await test_client.get_me()
+                    username = me.username or ""
+                    first_name = me.first_name or ""
+                    last_name = me.last_name or ""
+                    user_id = me.id
+                    
+                    # Если имя не указано, берём из аккаунта
+                    if name == phone[-10:]:
+                        name = f"{first_name} {last_name}".strip() or username or phone[-10:]
+                    
+                    await test_client.disconnect()
+                    
+                    logger.info(f"✅ Session valid: {phone} -> {name} (@{username})")
+                    
+                    # Добавляем в bot_data
+                    self.accounts_data[phone] = {
+                        'session': session_string,
+                        'name': name,
+                        'username': username,
+                        'status': ACCOUNT_STATUS_RESERVE,
+                        'user_id': user_id,
+                        'admin_id': self.get_admin_id(event.sender_id)
+                    }
+                    
+                    self.save_data()
+                    
+                    await event.respond(
+                        f"✅ **Аккаунт успешно импортирован!**\n\n"
+                        f"👤 Имя: `{name}`\n"
+                        f"📱 Телефон: `{phone}`\n"
+                        f"🆔 Username: @{username}\n"
+                        f"🔵 Статус: **RESERVE** (не активен)\n\n"
+                        f"💡 Используйте `/toggleaccount {phone}` для активации\n"
+                        f"📊 Проверьте: `/listaccounts`"
+                    )
+                    
+                    logger.info(f"✅ Account imported: {phone} -> {name}")
+                    
+                except Exception as e:
+                    logger.error(f"Import session error: {e}")
+                    await event.respond(f"❌ Ошибка проверки сессии:\n`{str(e)[:200]}`")
+                    try:
+                        await test_client.disconnect()
+                    except:
+                        pass
+                    
+            except Exception as e:
+                logger.error(f"/importsession error: {e}")
+                await event.respond(f"❌ Ошибка: `{str(e)[:200]}`")
         
         @self.bot_client.on(events.NewMessage(pattern='/verify_sessions'))
         async def verify_sessions_handler(event):
