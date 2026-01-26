@@ -8755,32 +8755,34 @@ class UltimateCommentBot:
             # Получаем или создаем клиент (один на аккаунт, переиспользуется всеми воркерами)
             if phone not in self.account_clients:
                 logger.info(f"🔌 [{account_name}] Создание НОВОГО клиента для {phone}...")
-                worker_client = TelegramClient(
-                    StringSession(account_data['session']), 
-                    API_ID, 
-                    API_HASH,
-                    proxy=account_data.get('proxy'),
-                    connection_retries=5,
-                    retry_delay=3
-                )
-                
                 try:
+                    worker_client = TelegramClient(
+                        StringSession(account_data['session']), 
+                        API_ID, 
+                        API_HASH,
+                        proxy=account_data.get('proxy'),
+                        connection_retries=5,
+                        retry_delay=3
+                    )
+                    
                     await worker_client.connect()
+                    
+                    if not await worker_client.is_user_authorized():
+                        logger.error(f"[{account_name}] Account not authorized!")
+                        return
+                    
+                    self.account_clients[phone] = worker_client
+                    logger.info(f"✅ [{account_name}] Клиент создан и сохранён для переиспользования")
+                    
                 except Exception as conn_error:
                     if 'AuthKeyDuplicated' in str(conn_error):
                         logger.error(f"❌ [{account_name}] AuthKeyDuplicatedError - аккаунт используется в другом месте")
                         logger.error(f"   Пропускаю этот аккаунт...")
-                        return
                     else:
                         logger.error(f"❌ [{account_name}] Ошибка подключения: {conn_error}")
-                        raise
-                
-                if not await worker_client.is_user_authorized():
-                    logger.error(f"[{account_name}] Account not authorized!")
+                        import traceback
+                        logger.error(traceback.format_exc())
                     return
-                
-                self.account_clients[phone] = worker_client
-                logger.info(f"✅ [{account_name}] Клиент создан и сохранён для переиспользования")
             else:
                 worker_client = self.account_clients[phone]
                 logger.info(f"♻️ [{account_name}] Переиспользую существующий клиент")
