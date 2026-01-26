@@ -3625,6 +3625,7 @@ class UltimateCommentBot:
 `/blockedaccounts` - сломанные/заблокированные 🚫
 `/delaccount +79123456789` - удалить
 `/toggleaccount +79123456789` - переключить active ⇄ reserve
+`/qrauth Имя` - добавить аккаунт через QR код (САМЫЙ ПРОСТОЙ!) 🆕
 `/importsession +79... StringSession Имя` - импорт готовой сессии (для RU) 🆕
 
 **👤 УПРАВЛЕНИЕ ПРОФИЛЕМ:**
@@ -4890,6 +4891,158 @@ class UltimateCommentBot:
                     
             except Exception as e:
                 logger.error(f"/importsession error: {e}")
+                await event.respond(f"❌ Ошибка: `{str(e)[:200]}`")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/qrauth'))
+        async def qrauth_handler(event):
+            """Авторизация аккаунта через QR код"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                # Парсим параметры: /qrauth Имя_аккаунта
+                params = event.text.split(maxsplit=1)
+                
+                if len(params) < 2:
+                    await event.respond(
+                        "📱 **Авторизация через QR код**\n\n"
+                        "Использование: `/qrauth Имя_аккаунта`\n\n"
+                        "**Пример:**\n"
+                        "`/qrauth Лена`\n\n"
+                        "После отправки команды:\n"
+                        "1️⃣ Вы получите QR код\n"
+                        "2️⃣ Откройте Telegram Desktop\n"
+                        "3️⃣ Settings → Devices → Link Desktop Device\n"
+                        "4️⃣ Отсканируйте QR код\n"
+                        "5️⃣ Аккаунт автоматически добавится в бот!"
+                    )
+                    return
+                
+                account_name = params[1].strip()
+                
+                logger.info(f"📱 /qrauth: начало авторизации через QR для '{account_name}'")
+                
+                msg = await event.respond(
+                    f"📱 **QR авторизация: {account_name}**\n\n"
+                    "⏳ Генерирую QR код...\n"
+                    "Не закрывайте Telegram Desktop!"
+                )
+                
+                # Создаём временную сессию
+                temp_client = TelegramClient(
+                    StringSession(), 
+                    API_ID, 
+                    API_HASH
+                )
+                
+                try:
+                    await temp_client.connect()
+                    
+                    # Запрашиваем QR код
+                    qr_login = await temp_client.qr_login()
+                    
+                    # Получаем URL для QR кода
+                    qr_url = qr_login.url
+                    
+                    # Генерируем QR код как изображение
+                    import qrcode
+                    from io import BytesIO
+                    
+                    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+                    qr.add_data(qr_url)
+                    qr.make(fit=True)
+                    
+                    img = qr.make_image(fill_color="black", back_color="white")
+                    
+                    # Сохраняем в BytesIO
+                    bio = BytesIO()
+                    img.save(bio, 'PNG')
+                    bio.seek(0)
+                    
+                    # Отправляем QR код
+                    await self.bot_client.send_file(
+                        event.chat_id,
+                        bio,
+                        caption=(
+                            f"📱 **QR код для: {account_name}**\n\n"
+                            "**Инструкция:**\n"
+                            "1️⃣ Откройте Telegram Desktop\n"
+                            "2️⃣ Settings → Devices → Link Desktop Device\n"
+                            "3️⃣ Отсканируйте этот QR код\n\n"
+                            "⏱️ Ожидаю сканирования (таймаут 2 минуты)..."
+                        )
+                    )
+                    
+                    await msg.delete()
+                    
+                    # Ожидаем авторизацию
+                    try:
+                        await qr_login.wait(timeout=120)
+                        
+                        # Получаем информацию об аккаунте
+                        me = await temp_client.get_me()
+                        
+                        # Получаем StringSession
+                        session_string = StringSession.save(temp_client.session)
+                        
+                        # Нормализуем телефон
+                        phone = f"+{me.phone}"
+                        
+                        # Проверяем, не добавлен ли уже этот аккаунт
+                        if phone in self.accounts_data:
+                            await event.respond(
+                                f"⚠️ **Аккаунт уже существует**\n\n"
+                                f"📱 Телефон: `{phone}`\n"
+                                f"👤 Имя в боте: {self.accounts_data[phone].get('name', 'нет')}\n"
+                                f"📊 Статус: {self.accounts_data[phone].get('status', 'неизвестно')}\n\n"
+                                f"💡 Используйте `/toggleaccount {phone}` для управления"
+                            )
+                            await temp_client.disconnect()
+                            return
+                        
+                        # Сохраняем аккаунт
+                        self.accounts_data[phone] = {
+                            'session': session_string,
+                            'name': account_name,
+                            'username': me.username or '',
+                            'user_id': me.id,
+                            'status': ACCOUNT_STATUS_RESERVE
+                        }
+                        
+                        self.save_accounts_data()
+                        
+                        await event.respond(
+                            f"✅ **Аккаунт успешно добавлен!**\n\n"
+                            f"📱 Телефон: `{phone}`\n"
+                            f"👤 Имя: {me.first_name or ''} {me.last_name or ''}\n"
+                            f"🆔 Username: @{me.username}\n" if me.username else ""
+                            f"🔢 User ID: `{me.id}`\n"
+                            f"🏷️ Имя в боте: **{account_name}**\n"
+                            f"📊 Статус: **RESERVE** (резерв)\n\n"
+                            f"💡 Для активации: `/toggleaccount {phone}`"
+                        )
+                        
+                        logger.info(f"✅ QR auth success: {phone} -> {account_name}")
+                        
+                    except asyncio.TimeoutError:
+                        await event.respond(
+                            "❌ **Таймаут!**\n\n"
+                            "QR код не был отсканирован в течение 2 минут.\n"
+                            "Попробуйте ещё раз: `/qrauth Имя`"
+                        )
+                        logger.warning(f"⏱️ QR auth timeout for {account_name}")
+                    
+                    await temp_client.disconnect()
+                    
+                except Exception as e:
+                    logger.error(f"QR auth error: {e}")
+                    await event.respond(f"❌ Ошибка при генерации QR кода:\n`{str(e)[:200]}`")
+                    try:
+                        await temp_client.disconnect()
+                    except:
+                        pass
+                    
+            except Exception as e:
+                logger.error(f"/qrauth error: {e}")
                 await event.respond(f"❌ Ошибка: `{str(e)[:200]}`")
         
         @self.bot_client.on(events.NewMessage(pattern='/verify_sessions'))
