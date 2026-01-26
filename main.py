@@ -6634,7 +6634,7 @@ class UltimateCommentBot:
         logger.warning(f"🔥 bot_client type: {type(self.bot_client)}")
         logger.warning(f"🔥 test_mode={getattr(self, 'test_mode', None)}")
         
-        @self.bot_client.on(events.NewMessage(pattern=r'^/testmode(?:@\w+)?(\s.*)?$'))
+        @self.bot_client.on(events.NewMessage(pattern=r'^/testmode(?:@\w+)?'))
         async def testmode_command(event):
             logger.warning(f"🔥 /testmode HANDLER TRIGGERED from {event.sender_id}, text={event.raw_text!r}")
             """Управление тестовым режимом: /testmode <selector> или /testmode on <list>"""
