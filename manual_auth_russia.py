@@ -6,12 +6,25 @@
 
 import asyncio
 import json
+import os
+import sys
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-# Из main.py
-API_ID = 29857881
-API_HASH = '809cdc22d46ccf3b0bbe6854aeff0962'
+# Читаем API_ID и API_HASH из переменных окружения
+API_ID = os.getenv('API_ID')
+API_HASH = os.getenv('API_HASH')
+
+if not API_ID or not API_HASH:
+    print("❌ Ошибка: API_ID и API_HASH не найдены!")
+    print("\n💡 Установите переменные окружения:")
+    print("   export API_ID=ваш_api_id")
+    print("   export API_HASH=ваш_api_hash")
+    print("\n💡 Или запустите с параметрами:")
+    print("   API_ID=123456 API_HASH=abc123 python3 manual_auth_russia.py")
+    sys.exit(1)
+
+API_ID = int(API_ID)
 
 async def manual_auth():
     """Ручная авторизация с возможностью использования прокси"""
