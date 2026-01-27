@@ -20,6 +20,9 @@ from telethon.errors import SessionPasswordNeededError
 # Импорт модуля управления конфигурацией
 from config_manager import load_config, save_config, update_config_value, get_config_value
 
+# Импорт модуля прогрева аккаунтов
+from account_warmup import warmup_manager
+
 # Try to load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -7408,6 +7411,143 @@ class UltimateCommentBot:
 • Риск бана: `НИЗКИЙ` 🟢"""
             await event.respond(text)
         
+        # ============= ACCOUNT WARMUP HANDLERS =============
+        
+        @self.bot_client.on(events.NewMessage(pattern='/warmup'))
+        async def warmup_command(event):
+            """Управление прогревом аккаунтов"""
+            if not await self.is_admin(event.sender_id):
+                await event.respond("❌ У вас нет доступа к этому боту.")
+                return
+            
+            await event.respond(
+                "🔥 **ПРОГРЕВ АККАУНТОВ (4 ДНЯ)**\n\n"
+                "**Программа прогрева:**\n"
+                "📅 День 1: Просмотр каналов, подписки (5-8 действий)\n"
+                "📅 День 2: Реакции на посты (10-15 реакций)\n"
+                "📅 День 3: Первые комментарии (3-5 шт)\n"
+                "📅 День 4: Полная активность (8-10 комм)\n\n"
+                "**Команды:**\n"
+                "/warmup_start +номер - Начать прогрев\n"
+                "/warmup_stop +номер - Остановить прогрев\n"
+                "/warmup_status - Статус всех прогревов\n"
+                "/warmup_run - Запустить цикл прогрева вручную\n\n"
+                "⚠️ Аккаунты в прогреве не используются для комментирования!"
+            )
+        
+        @self.bot_client.on(events.NewMessage(pattern=r'/warmup_start(?:\s+(.+))?'))
+        async def warmup_start_command(event):
+            """Начать прогрев аккаунта"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            match = event.pattern_match
+            phone = match.group(1).strip() if match.group(1) else None
+            
+            if not phone:
+                await event.respond(
+                    "❌ Укажите номер телефона\n"
+                    "Пример: `/warmup_start +79991234567`"
+                )
+                return
+            
+            # Проверяем, есть ли такой аккаунт
+            accounts = self.get_all_accounts_from_env()
+            if phone not in accounts:
+                await event.respond(f"❌ Аккаунт {phone} не найден в системе")
+                return
+            
+            # Запускаем прогрев
+            success = warmup_manager.start_warmup(phone)
+            
+            if success:
+                await event.respond(
+                    f"🔥 **ПРОГРЕВ НАЧАТ**\n\n"
+                    f"Аккаунт: `{phone}`\n"
+                    f"Программа: 4 дня\n"
+                    f"Старт: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"✅ Аккаунт автоматически исключен из комментирования\n"
+                    f"📊 Следите за прогрессом: /warmup_status"
+                )
+                
+                # Запускаем фоновую задачу прогрева
+                asyncio.create_task(self._run_warmup_background(phone))
+            else:
+                await event.respond(
+                    f"⚠️ Аккаунт {phone} уже прогревается\n"
+                    f"Проверьте статус: /warmup_status"
+                )
+        
+        @self.bot_client.on(events.NewMessage(pattern=r'/warmup_stop(?:\s+(.+))?'))
+        async def warmup_stop_command(event):
+            """Остановить прогрев аккаунта"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            match = event.pattern_match
+            phone = match.group(1).strip() if match.group(1) else None
+            
+            if not phone:
+                await event.respond(
+                    "❌ Укажите номер телефона\n"
+                    "Пример: `/warmup_stop +79991234567`"
+                )
+                return
+            
+            warmup_manager.stop_warmup(phone, 'manual_stop')
+            await event.respond(
+                f"⏸️ **ПРОГРЕВ ОСТАНОВЛЕН**\n\n"
+                f"Аккаунт: `{phone}`\n"
+                f"Причина: Остановлено вручную\n\n"
+                f"Аккаунт можно использовать для комментирования"
+            )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/warmup_status'))
+        async def warmup_status_command(event):
+            """Статус прогрева всех аккаунтов"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            report = warmup_manager.get_warmup_report()
+            await event.respond(report)
+        
+        @self.bot_client.on(events.NewMessage(pattern=r'/warmup_run(?:\s+(.+))?'))
+        async def warmup_run_command(event):
+            """Запустить цикл прогрева вручную для аккаунта"""
+            if not await self.is_admin(event.sender_id):
+                return
+            
+            match = event.pattern_match
+            phone = match.group(1).strip() if match.group(1) else None
+            
+            if not phone:
+                # Запускаем для всех активных
+                active = warmup_manager.get_all_active_warmups()
+                if not active:
+                    await event.respond("❌ Нет аккаунтов в активном прогреве")
+                    return
+                
+                await event.respond(
+                    f"🔄 Запуск прогрева для {len(active)} аккаунтов...\n"
+                    f"Это может занять несколько минут"
+                )
+                
+                for phone in active:
+                    asyncio.create_task(self._run_warmup_background(phone))
+                
+                await event.respond("✅ Прогрев запущен")
+            else:
+                status = warmup_manager.get_warmup_status(phone)
+                if not status or status['status'] != 'active':
+                    await event.respond(f"❌ Аккаунт {phone} не находится в активном прогреве")
+                    return
+                
+                await event.respond(f"🔄 Запуск прогрева для {phone}...")
+                asyncio.create_task(self._run_warmup_background(phone))
+                await event.respond("✅ Прогрев запущен")
+        
+        # ============= END ACCOUNT WARMUP HANDLERS =============
+        
         # ============= ACCOUNTS PROFILE MANAGEMENT HANDLERS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/accounts'))
@@ -9958,6 +10098,16 @@ class UltimateCommentBot:
                          if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
         # ============= END NEW =============
         
+        # ============= ЗАЩИТА: Исключаем аккаунты в прогреве =============
+        warmup_accounts = warmup_manager.get_all_active_warmups()
+        if warmup_accounts:
+            logger.info(f"🔥 Аккаунтов в прогреве: {len(warmup_accounts)}")
+            for phone in warmup_accounts:
+                if phone in active_accounts:
+                    del active_accounts[phone]
+                    logger.info(f"   🔥 {phone[-10:]} исключен (в прогреве)")
+        # ============= END ЗАЩИТА =============
+        
         logger.info(f"✅ Active accounts with sessions: {len(active_accounts)}")
         if active_accounts:
             for phone in active_accounts:
@@ -10159,6 +10309,28 @@ class UltimateCommentBot:
             # ============= END NEW =============
         except Exception as e:
             logger.error(f"Error in parallel workers: {e}")
+    
+    async def _run_warmup_background(self, phone: str):
+        """Фоновая задача для прогрева аккаунта"""
+        try:
+            # Получаем или создаем клиент для аккаунта
+            client = await self.get_account_client(phone)
+            if not client:
+                logger.error(f"❌ Не удалось создать клиент для {phone}")
+                warmup_manager.stop_warmup(phone, 'client_error')
+                return
+            
+            # Запускаем цикл прогрева
+            await warmup_manager.run_warmup_cycle(client, phone)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка прогрева {phone}: {e}")
+            warmup_manager.stop_warmup(phone, f'error: {str(e)[:50]}')
+    
+    def is_account_in_warmup(self, phone: str) -> bool:
+        """Проверить, находится ли аккаунт в процессе прогрева"""
+        status = warmup_manager.get_warmup_status(phone)
+        return status and status['status'] == 'active'
     
     async def rotation_worker(self):
         """Background worker that performs periodic account rotation"""
