@@ -7,6 +7,7 @@ import sqlite3
 import requests
 import traceback
 import sys
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from telethon import TelegramClient, events, functions, Button
@@ -99,18 +100,22 @@ def generate_neuro_comment(
     channel_theme: str = "general",
     temperature: float = 0.8,
     max_tokens: int = 120,
+    comment_type: str = None,
 ) -> str:
     """
     Генерирует короткий живой комментарий к посту с помощью YandexGPT.
     Стиль: разговорный, конкретный, без формальностей.
     """
-    # Fallback comments if API is not configured or fails
+    # Fallback comments if API is not configured or fails (БЕЗ эмодзи)
     fallback_comments = [
-        "Отличный пост, очень вдохновляет! 😊",
-        "Спасибо за интересный пост! 👍",
-        "Классный материал, было интересно прочитать! 😊",
-        "Полезная информация! 💡",
-        "Супер контент, спасибо! 🔥"
+        "Отличный пост",
+        "Интересная информация",
+        "Классный материал",
+        "Полезная инфа",
+        "Круто написано",
+        "Годная тема",
+        "Хорошая статья",
+        "Познавательно"
     ]
     
     # Check if API key is configured
@@ -120,45 +125,55 @@ def generate_neuro_comment(
         logger.warning("   Решение: установите YC_API_KEY в systemd unit или .env файле")
         return random.choice(fallback_comments)
     
-    # Рандомизация стиля комментария (больше вариантов)
-    style_variants = [
-        ("короткий вопрос по сути поста", True, 0.3),  # (стиль, может_без_эмодзи, вероятность)
-        ("реакция на конкретные цифры/сроки", True, 0.4),
-        ("короткая резкая фраза-оценка, без вопроса", True, 0.5),
-        ("мини-реплика одним предложением", False, 0.6),
-        ("обрывистая реплика 3-5 слов", False, 0.7),
+    # Типы реакций для разнообразия комментариев
+    reaction_types = [
+        ("согласие", "выразить согласие с идеей поста, подтвердить точку зрения"),
+        ("уточнение", "задать короткий уточняющий вопрос по теме"),
+        ("эмоция", "выразить лёгкую эмоцию (удивление, интерес, одобрение)"),
+        ("благодарность", "поблагодарить за информацию (кратко, без формальности)"),
+        ("скептицизм", "высказать лёгкий скептицизм или альтернативную точку зрения"),
+        ("опыт", "упомянуть свой опыт, связанный с темой поста")
     ]
     
-    chosen_variant = random.choice(style_variants)
-    chosen_style, can_skip_emoji, emoji_skip_chance = chosen_variant
-    use_emoji = random.random() > emoji_skip_chance  # Иногда без эмодзи вообще
+    # Выбираем тип реакции (если не передан извне)
+    if not comment_type:
+        chosen_type, type_description = random.choice(reaction_types)
+    else:
+        # Находим описание для переданного типа
+        type_description = next((desc for t, desc in reaction_types if t == comment_type), reaction_types[0][1])
+        chosen_type = comment_type
     
-    # Еще более простой, разговорный промпт
-    prompt = f"""Короткий комментарий к Telegram-посту.
+    # Контроль эмодзи: использовать в ~20-25% случаев (1 из 4-5 комментариев)
+    use_emoji = random.random() < 0.22
+    
+    # Еще более простой, разговорный промпт с контролем качества
+    prompt = f"""Напиши короткий осмысленный комментарий к Telegram-посту.
 
-СТИЛЬ: простой, разговорный, как живой человек пишет в чате.
+СТИЛЬ: простой разговорный, как живой человек пишет в чате.
 
-ФОРМАТ: {chosen_style}
-{"БЕЗ ЭМОДЗИ" if not use_emoji else "Можно 1 эмодзи (разный каждый раз)"}
+ТИП КОММЕНТАРИЯ: {type_description}
 
-ВАЖНО:
-• Опирайся на КОНКРЕТИКУ: даты, цифры, факты из поста
-• Если в посте год/число — используй ТОЧНО его
-• Простые короткие фразы, не литературный язык
-• Можно обрывисто: "Смело", "Жёсткий дедлайн", "Звучит реально"
+ТРЕБОВАНИЯ:
+✓ Комментарий должен быть привязан к СОДЕРЖАНИЮ поста
+✓ Минимум 5-7 слов, максимум 2-3 предложения
+✓ Используй конкретику из поста: даты, цифры, факты
+✓ Разнообразие: избегай шаблонов типа "Круто", "Огонь", "Ого"
+✓ Пиши естественно, без агрессии и политики
+✓ {"БЕЗ ЭМОДЗИ" if not use_emoji else "Максимум 1 эмодзи в КОНЦЕ текста"}
 
 ЗАПРЕЩЕНО:
-❌ "Желаю успехов", "Здорово, что", "Благодарю", "Спасибо за пост"
-❌ Длинные сложные предложения
-❌ Формальный/корпоративный тон
-❌ Вводные слова ("честно говоря", "на самом деле", "в общем")
+❌ Однотипные короткие фразы без смысла
+❌ "Желаю успехов", "Благодарю за пост", "Спасибо за пост"
+❌ Формальный тон и длинные предложения
+❌ Вводные слова ("честно говоря", "на самом деле")
+❌ Несколько эмодзи подряд (🔥🔥🔥, 😂😂)
 
-Тема: {channel_theme}
+Тема канала: {channel_theme}
 
-Пост:
+Текст поста:
 {post_text[:800]}
 
-Комментарий:"""
+Твой комментарий:"""
 
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
@@ -281,11 +296,42 @@ def humanize_comment(text: str) -> str:
     """
     Постобработка комментария для большей естественности.
     Убирает отполированные формулировки, делает более разговорным и "шероховатым".
+    Контролирует количество эмодзи.
     """
-    import re
-    
     # Убираем лишние пробелы
     text = " ".join(text.split())
+    
+    # ===== КОНТРОЛЬ ЭМОДЗИ =====
+    # Находим все эмодзи в тексте
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport & map symbols
+        "\U0001F1E0-\U0001F1FF"  # flags
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "]+"
+    )
+    
+    emojis = emoji_pattern.findall(text)
+    
+    # Если эмодзи больше 1 или есть "стек" (повторяющиеся)
+    if len(emojis) > 1 or any(len(e) > 1 for e in emojis):
+        # Убираем все эмодзи
+        text = emoji_pattern.sub('', text).strip()
+        
+        # С вероятностью 20% оставляем один случайный эмодзи в конце
+        if random.random() < 0.2 and emojis:
+            # Берём первый символ из первого эмодзи
+            single_emoji = emojis[0][0] if emojis[0] else ''
+            if single_emoji:
+                text = text.rstrip() + ' ' + single_emoji
+    
+    # С вероятностью 75% убираем эмодзи вообще (даже если был один)
+    elif emojis and random.random() < 0.75:
+        text = emoji_pattern.sub('', text).strip()
     
     # Сначала удаляем формальные фразы (самые приоритетные)
     formal_replacements = {
@@ -572,6 +618,13 @@ class UltimateCommentBot:
         
         # Словарь для переиспользования клиентов (один клиент на аккаунт)
         self.account_clients = {}  # {phone: TelegramClient}
+        
+        # ============= ANTI-SPAM & DEDUPLICATION =============
+        # Хранилище последних комментариев для дедупликации
+        # {channel_username: [(comment_text, timestamp, phone), ...]}
+        self.recent_comments = {}
+        self.recent_comments_limit = 20  # Храним последние 20 комментариев на канал
+        # ============= END ANTI-SPAM & DEDUPLICATION =============
         
         self.init_database()
         self.load_stats()
@@ -875,9 +928,10 @@ class UltimateCommentBot:
                     result = {
                         'authorized': True,
                         'name': me.first_name or 'Без имени',
-                        'username': getattr(me, 'username', None)
+                        'username': getattr(me, 'username', None),
+                        'user_id': me.id  # Добавляем ID пользователя для защиты от самокомментирования
                     }
-                    logger.info(f"✅ {phone}: авторизован как {result['name']}")
+                    logger.info(f"✅ {phone}: авторизован как {result['name']} (ID: {me.id})")
                     logger.debug(f"🔌 [{phone}] Отключение временного клиента (success)...")
                     await client.disconnect()
                     return result
@@ -1037,6 +1091,8 @@ class UltimateCommentBot:
                     data['name'] = result['name']
                 if result.get('username') is not None:
                     data['username'] = result['username']
+                if result.get('user_id'):  # Сохраняем user_id для защиты от самокомментирования
+                    data['user_id'] = result['user_id']
                 
                 # Если был broken, переводим в reserve
                 if data.get('status') == ACCOUNT_STATUS_BROKEN:
@@ -1130,6 +1186,179 @@ class UltimateCommentBot:
         self.config['active_accounts'] = active_phones
         save_config(self.config)
         logger.debug(f"💾 Синхронизация: {len(active_phones)} активных аккаунтов сохранено в конфиг")
+    
+    def get_my_account_ids(self):
+        """
+        Получить список ID всех своих аккаунтов (для защиты от самокомментирования)
+        Возвращает словарь {phone: {'user_id': int, 'username': str}}
+        """
+        my_accounts = {}
+        for phone, data in self.accounts_data.items():
+            user_id = data.get('user_id')
+            username = data.get('username', '')
+            if user_id or username:
+                my_accounts[phone] = {
+                    'user_id': user_id,
+                    'username': username
+                }
+        return my_accounts
+    
+    def is_my_account(self, user_id=None, username=None):
+        """
+        Проверить, является ли пользователь одним из моих аккаунтов
+        """
+        for phone, data in self.accounts_data.items():
+            if user_id and data.get('user_id') == user_id:
+                return True, phone
+            if username and data.get('username') == username:
+                return True, phone
+        return False, None
+    
+    async def get_recent_thread_authors(self, client, discussion_entity, limit=5):
+        """
+        Получить список авторов последних комментариев в треде
+        Возвращает список {'user_id': int, 'username': str, 'phone': str (если свой)}
+        """
+        try:
+            msgs = await client.get_messages(discussion_entity, limit=limit)
+            authors = []
+            
+            for msg in msgs:
+                if not msg.sender_id:
+                    continue
+                    
+                # Проверяем, свой ли это аккаунт
+                is_mine, phone = self.is_my_account(user_id=msg.sender_id)
+                
+                author_info = {
+                    'user_id': msg.sender_id,
+                    'username': getattr(msg.sender, 'username', None) if hasattr(msg, 'sender') else None,
+                    'is_mine': is_mine,
+                    'phone': phone if is_mine else None,
+                    'message_id': msg.id
+                }
+                authors.append(author_info)
+            
+            return authors
+        except Exception as e:
+            logger.error(f"Ошибка получения авторов треда: {e}")
+            return []
+    
+    def can_account_comment_on_post(self, phone, discussion_entity_id, recent_authors):
+        """
+        Проверить, можно ли аккаунту комментировать на основе недавних авторов
+        
+        Логика:
+        1. Не комментировать, если аккаунт уже писал в последних 3 сообщениях
+        2. Не комментировать, если последние 2-3 сообщения только от моих аккаунтов
+        3. Не отвечать самому себе
+        
+        Возвращает: (can_comment: bool, reason: str)
+        """
+        if not recent_authors:
+            return True, "ok"
+        
+        # Получаем user_id для данного phone
+        my_user_id = self.accounts_data.get(phone, {}).get('user_id')
+        if not my_user_id:
+            return True, "ok"  # Если не можем определить ID, разрешаем
+        
+        # Проверка 1: Аккаунт не должен комментировать, если он уже писал в последних 3 сообщениях
+        last_3_authors = recent_authors[:3]
+        if any(author['user_id'] == my_user_id for author in last_3_authors):
+            return False, "account_already_commented_recently"
+        
+        # Проверка 2: Если последние 2+ сообщения только от моих аккаунтов - пауза
+        last_2_authors = recent_authors[:2]
+        if len(last_2_authors) >= 2:
+            all_mine = all(author['is_mine'] for author in last_2_authors)
+            if all_mine:
+                return False, "too_many_own_accounts_in_row"
+        
+        # Проверка 3: Не отвечать сразу после другого своего аккаунта (чередование)
+        if recent_authors and recent_authors[0]['is_mine'] and recent_authors[0]['phone'] != phone:
+            # Последний комментарий от другого моего аккаунта - лучше подождать
+            # Разрешаем только если прошло достаточно времени или есть внешние комментарии
+            if len(recent_authors) >= 2:
+                # Если предпоследний комментарий НЕ от моих аккаунтов - можно
+                if not recent_authors[1]['is_mine']:
+                    return True, "ok"
+            return False, "avoid_own_account_loop"
+        
+        return True, "ok"
+    
+    def is_comment_duplicate(self, channel_username, comment_text, min_word_count=5):
+        """
+        Проверить, не является ли комментарий дубликатом недавних
+        
+        Args:
+            channel_username: Имя канала
+            comment_text: Текст комментария для проверки
+            min_word_count: Минимальное количество слов для валидации
+        
+        Returns:
+            (is_duplicate: bool, reason: str)
+        """
+        # Проверка минимальной длины
+        words = comment_text.split()
+        if len(words) < min_word_count:
+            return True, f"comment_too_short_{len(words)}_words"
+        
+        # Нормализуем текст для сравнения (убираем пробелы, приводим к нижнему регистру)
+        normalized_new = re.sub(r'\s+', ' ', comment_text.lower().strip())
+        
+        # Убираем эмодзи из нормализованного текста для сравнения
+        emoji_pattern = re.compile(
+            "["
+            "\\U0001F600-\\U0001F64F"
+            "\\U0001F300-\\U0001F5FF"
+            "\\U0001F680-\\U0001F6FF"
+            "\\U0001F1E0-\\U0001F1FF"
+            "\\U00002702-\\U000027B0"
+            "\\U000024C2-\\U0001F251"
+            "\\U0001F900-\\U0001F9FF"
+            "]+"
+        )
+        normalized_new = emoji_pattern.sub('', normalized_new).strip()
+        
+        if channel_username not in self.recent_comments:
+            return False, "ok"
+        
+        # Проверяем на совпадение с недавними комментариями
+        for old_comment, timestamp, phone in self.recent_comments[channel_username]:
+            normalized_old = re.sub(r'\\s+', ' ', old_comment.lower().strip())
+            normalized_old = emoji_pattern.sub('', normalized_old).strip()
+            
+            # Точное совпадение
+            if normalized_new == normalized_old:
+                return True, f"exact_duplicate_from_{phone}"
+            
+            # Очень похожие (более 80% совпадения)
+            if len(normalized_new) > 10 and len(normalized_old) > 10:
+                # Простая проверка на похожесть по количеству общих слов
+                words_new = set(normalized_new.split())
+                words_old = set(normalized_old.split())
+                if words_new and words_old:
+                    common_words = words_new & words_old
+                    similarity = len(common_words) / max(len(words_new), len(words_old))
+                    if similarity > 0.8:
+                        return True, f"similar_duplicate_{int(similarity*100)}%_from_{phone}"
+        
+        return False, "ok"
+    
+    def add_comment_to_history(self, channel_username, comment_text, phone):
+        """
+        Добавить комментарий в историю для дедупликации
+        """
+        if channel_username not in self.recent_comments:
+            self.recent_comments[channel_username] = []
+        
+        timestamp = datetime.now().timestamp()
+        self.recent_comments[channel_username].append((comment_text, timestamp, phone))
+        
+        # Ограничиваем размер истории
+        if len(self.recent_comments[channel_username]) > self.recent_comments_limit:
+            self.recent_comments[channel_username] = self.recent_comments[channel_username][-self.recent_comments_limit:]
     
     def save_config_value(self, key, value):
         """
@@ -9462,14 +9691,57 @@ class UltimateCommentBot:
                                 except Exception:
                                     post_text = "Интересный пост!"
                             
-                            # Generate comment
-                            channel_theme_str = channel.get('theme', 'общая') if isinstance(channel, dict) else 'общая'
-                            comment = generate_neuro_comment(
-                                post_text=post_text,
-                                channel_theme=channel_theme_str
+                            # ============= NEW: ANTI-SPAM CHECKS =============
+                            # 1. Получаем недавних авторов в треде для проверки самокомментирования
+                            recent_authors = await self.get_recent_thread_authors(client, discussion_entity, limit=5)
+                            
+                            # 2. Проверяем, можно ли комментировать (защита от петель)
+                            can_comment_check, reason = self.can_account_comment_on_post(
+                                phone, discussion_entity.id, recent_authors
                             )
                             
-                            # Test mode duplicate check
+                            if not can_comment_check:
+                                logger.warning(
+                                    f"[{account_name}] ⛔ Пропускаю @{username}: {reason}"
+                                )
+                                await asyncio.sleep(2)
+                                continue
+                            # ============= END ANTI-SPAM CHECKS =============
+                            
+                            # Generate comment (выбираем случайный тип реакции)
+                            channel_theme_str = channel.get('theme', 'общая') if isinstance(channel, dict) else 'общая'
+                            
+                            # Генерируем до 3 попыток для получения уникального комментария
+                            comment = None
+                            for attempt in range(3):
+                                temp_comment = generate_neuro_comment(
+                                    post_text=post_text,
+                                    channel_theme=channel_theme_str
+                                )
+                                
+                                # Проверка на дублирование
+                                is_dup, dup_reason = self.is_comment_duplicate(username, temp_comment, min_word_count=5)
+                                
+                                if not is_dup:
+                                    comment = temp_comment
+                                    logger.info(f"✅ [{account_name}] Комментарий уникален (попытка {attempt+1}/3)")
+                                    break
+                                else:
+                                    logger.warning(
+                                        f"⚠️ [{account_name}] Дубликат комментария: {dup_reason} "
+                                        f"(попытка {attempt+1}/3)"
+                                    )
+                            
+                            # Если после 3 попыток не получили уникальный комментарий - пропускаем пост
+                            if not comment:
+                                logger.error(
+                                    f"❌ [{account_name}] Не удалось сгенерировать уникальный комментарий "
+                                    f"для @{username} за 3 попытки, пропускаю"
+                                )
+                                await asyncio.sleep(2)
+                                continue
+                            
+                            # Test mode duplicate check (старая проверка, оставляем для совместимости)
                             if self.test_mode:
                                 if not hasattr(self, '_last_test_comments'):
                                     self._last_test_comments = []
@@ -9516,6 +9788,10 @@ class UltimateCommentBot:
                             
                             comment_success = True
                             self.register_message_sent(phone, username)
+                            
+                            # ============= NEW: Сохраняем комментарий в историю для дедупликации =============
+                            self.add_comment_to_history(username, comment, phone)
+                            # ============= END NEW =============
                             
                             # Logging with MODE indicator
                             short_comment = comment[:50] if len(comment) > 50 else comment
