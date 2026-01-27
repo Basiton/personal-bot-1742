@@ -612,6 +612,10 @@ class UltimateCommentBot:
         # Индекс для циклической ротации
         self.rotation_index = 0
         
+        # Флаг для отслеживания ротации (для health_check)
+        self.rotation_in_progress = False
+        self.workers_completing_cycles = set()  # Набор телефонов воркеров, завершающих циклы
+        
         # ============= TEST MODE (из конфига) =============
         self.test_mode = self.config.get('test_mode', False)
         self.test_channels = self.config.get('test_channels', [])
@@ -1645,6 +1649,43 @@ class UltimateCommentBot:
             logger.info(f"⏰ Rotation interval reached ({time_since_rotation:.0f}s >= {self.rotation_interval}s)")
             await self.rotate_accounts()
     
+    async def activate_next_reserve_account(self):
+        """Активировать следующий резервный аккаунт для ротации"""
+        try:
+            # Ищем резервный аккаунт для активации
+            reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
+                              if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session')]
+            
+            if reserve_accounts:
+                # Активируем первый доступный резервный аккаунт
+                reserve_phone, reserve_data = reserve_accounts[0]
+                self.set_account_status(reserve_phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
+                reserve_name = reserve_data.get('name', reserve_phone)
+                
+                logger.info(f"✅ Activated next reserve account: {reserve_name} ({reserve_phone})")
+                logger.info(f"📊 Current status: {self.get_status_counts()}")
+                
+                # Уведомляем владельца
+                try:
+                    await self.bot_client.send_message(
+                        BOT_OWNER_ID,
+                        f"🔄 **Ротация: активирован новый аккаунт**\n\n"
+                        f"✅ Активирован: `{reserve_name}` ({reserve_phone})\n"
+                        f"📊 Состояние: {self.get_status_counts()}\n\n"
+                        f"💡 Новый воркер запустится автоматически"
+                    )
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify owner: {notify_err}")
+                
+                return True
+            else:
+                logger.warning("⚠️ No reserve accounts available for rotation")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error activating next reserve account: {e}")
+            return False
+    
     async def replace_broken_account(self, phone, reason):
         """Заменить сломанный аккаунт на резервный"""
         try:
@@ -1804,7 +1845,33 @@ class UltimateCommentBot:
                     self.active_worker_tasks = [task for task in self.active_worker_tasks if not task.done()]
                     logger.info(f"✅ Active workers list updated: {len(self.active_worker_tasks)} tasks remaining")
                 
+                # ============= УЛУЧШЕНИЕ: Проверяем нормальное завершение ротации =============
                 if alive_workers < expected_workers:
+                    # Проверяем, не завершились ли воркеры по нормальной ротации
+                    if self.workers_completing_cycles:
+                        logger.info(f"ℹ️ Workers completing cycles: {len(self.workers_completing_cycles)}")
+                        logger.info(f"   This is NORMAL rotation, not a crash!")
+                        self.workers_completing_cycles.clear()
+                        
+                        # Даём время на активацию новых аккаунтов
+                        await asyncio.sleep(5)
+                        
+                        # Проверяем количество активных аккаунтов снова
+                        active_accounts = {phone: data for phone, data in self.accounts_data.items()
+                                         if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
+                        new_expected = min(len(active_accounts), self.max_parallel_accounts)
+                        
+                        if new_expected > alive_workers:
+                            logger.info(f"🔄 New accounts activated, initiating soft restart...")
+                            # Мягкий перезапуск без паники
+                            if self.worker_recovery_enabled:
+                                await self.restart_monitoring_after_replacement()
+                                break
+                        else:
+                            logger.info(f"✅ No new accounts to activate, continuing with current setup")
+                        continue
+                    # ============= END УЛУЧШЕНИЕ =============
+                    
                     logger.warning("="*80)
                     logger.warning(f"⚠️ WORKER COUNT MISMATCH DETECTED!")
                     logger.warning(f"   Expected: {expected_workers} workers")
@@ -9686,6 +9753,20 @@ class UltimateCommentBot:
                     logger.info(f"[{account_name}] ROTATION: completed {max_cycles} cycles")
                     logger.info(f"[{account_name}] Moving to reserve, next account will take over")
                     logger.info("="*60)
+                    
+                    # Помечаем что этот воркер завершает циклы (для health_check)
+                    self.workers_completing_cycles.add(phone)
+                    
+                    # Переводим себя в резерв
+                    self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Completed max cycles")
+                    logger.info(f"✅ [{account_name}] Status changed: ACTIVE → RESERVE")
+                    
+                    # Активируем следующий резервный аккаунт
+                    try:
+                        await self.activate_next_reserve_account()
+                    except Exception as activate_err:
+                        logger.error(f"Failed to activate next reserve account: {activate_err}")
+                    
                     break
                 
                 cycle_number += 1
@@ -10290,9 +10371,16 @@ class UltimateCommentBot:
         logger.info(f"🔄 Max cycles per worker: {self.max_cycles_per_worker} (0=infinite)")
         logger.info(f"🛡️ Anti-spam: {MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS}s between own accounts in same chat")
         
-        # ============= NEW: Start rotation and health check tasks =============
-        rotation_task = asyncio.create_task(self.rotation_worker())
+        # ============= NEW: Start health check task =============
+        # ПРИМЕЧАНИЕ: rotation_worker ОТКЛЮЧЕН - ротация происходит автоматически
+        # когда воркеры завершают max_cycles_per_worker циклов
+        # rotation_task = asyncio.create_task(self.rotation_worker())  # ОТКЛЮЧЕНО
         health_task = asyncio.create_task(self.health_check_worker())
+        logger.info("✅ Health check worker started")
+        if self.max_cycles_per_worker > 0:
+            logger.info(f"🔄 Rotation mode: BY CYCLES (every {self.max_cycles_per_worker} cycles)")
+        else:
+            logger.info(f"🔄 Rotation mode: MANUAL (max_cycles=0, no automatic rotation)")
         # ============= END NEW =============
         
         # Create worker tasks for each account
@@ -10343,10 +10431,10 @@ class UltimateCommentBot:
         
         # Wait for all workers (they run until self.monitoring becomes False)
         try:
-            # ============= NEW: Wait for both worker tasks and rotation task =============
-            all_tasks = tasks + [rotation_task]
-            await asyncio.gather(*all_tasks, return_exceptions=True)
-            # ============= END NEW =============
+            # ============= ИСПРАВЛЕНО: rotation_task отключен, ждём только воркеров =============
+            # all_tasks = tasks + [rotation_task]  # СТАРЫЙ КОД
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # ============= END ИСПРАВЛЕНО =============
         except Exception as e:
             logger.error(f"Error in parallel workers: {e}")
     
