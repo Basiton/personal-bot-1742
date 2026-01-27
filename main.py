@@ -4016,7 +4016,7 @@ class UltimateCommentBot:
 `/togglerecovery` - вкл/выкл автовосстановление после бана 🆕
 
 **📢 КАНАЛЫ:**
-`/addchannel @username` - добавить
+`/addchannel @username1 @username2 ...` - добавить каналы (можно сразу несколько)
 `/listchannels` - список
 `/delchannel @username` - удалить
 `/syncchannels` - синхронизировать с БД (для корректной статистики) 🆕
@@ -6003,40 +6003,78 @@ class UltimateCommentBot:
                 logger.info(f"Unauthorized access attempt from {event.sender_id}")
                 return
             try:
-                username = event.text.split(maxsplit=1)[1]
-                # Ensure @ prefix for consistency
-                if not username.startswith('@'):
-                    username = '@' + username
-                logger.info(f"Trying to add channel: {username}")
-                # Check if channel already exists
+                # Извлекаем текст после команды
+                text_parts = event.text.split(maxsplit=1)
+                if len(text_parts) < 2:
+                    await event.respond("❌ Формат: `/addchannel @username1 @username2 ...`")
+                    return
+                
+                channels_text = text_parts[1]
+                # Разделяем по пробелам и переносам строк
+                usernames = channels_text.replace('\n', ' ').split()
+                
+                # Обрабатываем каждый канал
+                added = []
+                already_exist = []
+                errors = []
+                
                 existing_usernames = [ch.get('username') if isinstance(ch, dict) else ch for ch in self.channels]
-                if username not in existing_usernames:
-                    self.channels.append({'username': username})
+                
+                for username in usernames:
+                    username = username.strip()
+                    if not username:
+                        continue
+                    
+                    # Ensure @ prefix for consistency
+                    if not username.startswith('@'):
+                        username = '@' + username
+                    
+                    logger.info(f"Trying to add channel: {username}")
+                    
+                    # Check if channel already exists
+                    if username not in existing_usernames:
+                        self.channels.append({'username': username})
+                        existing_usernames.append(username)  # Обновляем локальный список
+                        
+                        # Также добавляем в таблицу parsed_channels для статистики
+                        if self.conn:
+                            try:
+                                cursor = self.conn.cursor()
+                                cursor.execute(
+                                    """INSERT OR IGNORE INTO parsed_channels 
+                                    (username, theme, source, added_date, admin_id) 
+                                    VALUES (?, ?, ?, ?, ?)""",
+                                    (username, 'manual', 'addchannel', datetime.now().isoformat(), event.sender_id)
+                                )
+                                self.conn.commit()
+                                logger.info(f"Channel {username} added to parsed_channels table")
+                            except Exception as db_err:
+                                logger.warning(f"Failed to add to parsed_channels table: {db_err}")
+                        
+                        logger.info(f"Channel {username} added successfully")
+                        added.append(username)
+                    else:
+                        logger.info(f"Channel {username} already exists")
+                        already_exist.append(username)
+                
+                # Сохраняем данные один раз после всех добавлений
+                if added:
                     self.save_data()
-                    
-                    # Также добавляем в таблицу parsed_channels для статистики
-                    if self.conn:
-                        try:
-                            cursor = self.conn.cursor()
-                            cursor.execute(
-                                """INSERT OR IGNORE INTO parsed_channels 
-                                (username, theme, source, added_date, admin_id) 
-                                VALUES (?, ?, ?, ?, ?)""",
-                                (username, 'manual', 'addchannel', datetime.now().isoformat(), event.sender_id)
-                            )
-                            self.conn.commit()
-                            logger.info(f"Channel {username} added to parsed_channels table")
-                        except Exception as db_err:
-                            logger.warning(f"Failed to add to parsed_channels table: {db_err}")
-                    
-                    logger.info(f"Channel {username} added successfully")
-                    await event.respond(f"✅ Канал `{username}` добавлен")
-                else:
-                    logger.info(f"Channel {username} already exists")
-                    await event.respond("❌ Уже добавлен")
+                
+                # Формируем ответ
+                response_parts = []
+                if added:
+                    response_parts.append(f"✅ Добавлено каналов: {len(added)}\n" + "\n".join(f"  • `{ch}`" for ch in added))
+                if already_exist:
+                    response_parts.append(f"⚠️ Уже существуют: {len(already_exist)}\n" + "\n".join(f"  • `{ch}`" for ch in already_exist))
+                if not added and not already_exist:
+                    response_parts.append("❌ Не удалось добавить ни одного канала")
+                
+                await event.respond("\n\n".join(response_parts))
+                
             except Exception as e:
                 logger.error(f"Error adding channel: {e}")
-                await event.respond("❌ Формат: `/addchannel @username`")
+                await event.respond("❌ Формат: `/addchannel @username1 @username2 ...`")
         
         @self.bot_client.on(events.NewMessage(pattern='/syncchannels'))
         async def sync_channels(event):
