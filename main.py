@@ -1726,12 +1726,20 @@ class UltimateCommentBot:
             logger.info(f"⏰ Rotation interval reached ({time_since_rotation:.0f}s >= {self.rotation_interval}s)")
             await self.rotate_accounts()
     
-    async def activate_next_reserve_account(self):
-        """Активировать следующий резервный аккаунт для ротации (возвращает phone активированного)"""
+    async def activate_next_reserve_account(self, exclude_phone=None):
+        """Активировать следующий резервный аккаунт для ротации (возвращает phone активированного)
+        
+        Args:
+            exclude_phone: Телефон аккаунта, который нужно исключить из выбора (недавно деактивированный)
+        """
         try:
-            # Ищем резервный аккаунт для активации
+            # Ищем резервный аккаунт для активации (ИСКЛЮЧАЯ недавно деактивированный)
             reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
-                              if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session')]
+                              if data.get('status') == ACCOUNT_STATUS_RESERVE 
+                              and data.get('session')
+            if exclude_phone:
+                logger.info(f"   Исключен из выбора: {exclude_phone} (только что деактивирован)")
+                              and p != exclude_phone]  # КРИТИЧНО: Исключаем только что деактивированный
             
             # Подробное логирование для диагностики
             logger.info("="*60)
@@ -10109,7 +10117,8 @@ class UltimateCommentBot:
                     # Активируем следующий резервный аккаунт и запускаем замену
                     logger.info(f"🔄 [{account_name}] Attempting to activate replacement account...")
                     try:
-                        new_phone = await self.activate_next_reserve_account()
+                        # ВАЖНО: Исключаем текущий аккаунт из выбора (он только что стал резервным)
+                        new_phone = await self.activate_next_reserve_account(exclude_phone=phone)
                         if new_phone:
                             logger.info(f"✅ [{account_name}] New account activated: {new_phone}")
                             logger.info(f"🚀 [{account_name}] Launching replacement worker...")
