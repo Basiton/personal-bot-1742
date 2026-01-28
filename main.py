@@ -600,6 +600,9 @@ class UltimateCommentBot:
         self.active_worker_tasks = []  # Список активных воркеров
         self.worker_recovery_enabled = self.config.get('worker_recovery_enabled', True)
         
+        # Хранение распределения каналов для горячей замены: {worker_index: {'phone': phone, 'channels': [...], 'mode': 'distributed'}}
+        self.worker_slots = {}
+        
         # Отслеживание активности аккаунтов: {phone: {'messages': [(timestamp1, channel1), ...], 'status': 'active/reserve/broken'}}
         self.account_activity = {}
         
@@ -1650,7 +1653,7 @@ class UltimateCommentBot:
             await self.rotate_accounts()
     
     async def activate_next_reserve_account(self):
-        """Активировать следующий резервный аккаунт для ротации"""
+        """Активировать следующий резервный аккаунт для ротации (возвращает phone активированного)"""
         try:
             # Ищем резервный аккаунт для активации
             reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
@@ -1677,14 +1680,89 @@ class UltimateCommentBot:
                 except Exception as notify_err:
                     logger.error(f"Failed to notify owner: {notify_err}")
                 
-                return True
+                # Возвращаем телефон для запуска нового worker'а
+                return reserve_phone
             else:
                 logger.warning("⚠️ No reserve accounts available for rotation")
-                return False
+                return None
                 
         except Exception as e:
             logger.error(f"Error activating next reserve account: {e}")
-            return False
+            return None
+    
+    async def launch_replacement_worker(self, worker_index, channels, mode, total_workers):
+        """Запустить нового worker'а на замену завершившемуся (горячая замена)"""
+        try:
+            # Получаем телефон нового активного аккаунта
+            active_accounts = [(p, data) for p, data in self.accounts_data.items() 
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
+            
+            if not active_accounts:
+                logger.error(f"❌ Cannot launch replacement worker: no active accounts")
+                return
+            
+            # Ищем аккаунт, который не имеет активного worker'а
+            existing_worker_phones = set(slot.get('phone') for slot in self.worker_slots.values() if slot.get('phone'))
+            
+            replacement_phone = None
+            replacement_data = None
+            for phone, data in active_accounts:
+                if phone not in existing_worker_phones:
+                    replacement_phone = phone
+                    replacement_data = data
+                    break
+            
+            if not replacement_phone:
+                logger.warning(f"⚠️ No available account for replacement worker in slot {worker_index}")
+                return
+            
+            account_name = replacement_data.get('name', replacement_phone[-10:])
+            
+            logger.info("="*80)
+            logger.info(f"🔄 LAUNCHING REPLACEMENT WORKER")
+            logger.info(f"   Slot: {worker_index}")
+            logger.info(f"   Account: {account_name} ({replacement_phone})")
+            logger.info(f"   Channels: {len(channels)}")
+            logger.info(f"   Mode: {mode}")
+            logger.info("="*80)
+            
+            # Создаём новую задачу worker'а
+            task = asyncio.create_task(
+                self.account_worker(
+                    replacement_phone, 
+                    replacement_data, 
+                    channels, 
+                    worker_index, 
+                    total_workers, 
+                    mode=mode
+                )
+            )
+            task.set_name(f"worker_{worker_index}_{replacement_phone[-10:]}_replacement")
+            
+            # Добавляем в список активных задач
+            self.active_worker_tasks.append(task)
+            
+            logger.info(f"✅ Replacement worker launched: {task.get_name()} (id={id(task)})")
+            logger.info(f"📊 Total active workers: {len(self.active_worker_tasks)}")
+            
+            # Уведомляем владельца
+            try:
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"🔄 **Горячая замена worker'а**\n\n"
+                    f"Слот: `{worker_index}`\n"
+                    f"Новый аккаунт: `{account_name}`\n"
+                    f"Каналов: `{len(channels)}`\n"
+                    f"Режим: `{mode}`\n\n"
+                    f"✅ Worker запущен и начал работу"
+                )
+            except Exception as notify_err:
+                logger.error(f"Failed to notify owner: {notify_err}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error launching replacement worker: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     async def replace_broken_account(self, phone, reason):
         """Заменить сломанный аккаунт на резервный"""
@@ -1851,25 +1929,27 @@ class UltimateCommentBot:
                     if self.workers_completing_cycles:
                         logger.info(f"ℹ️ Workers completing cycles: {len(self.workers_completing_cycles)}")
                         logger.info(f"   This is NORMAL rotation, not a crash!")
+                        logger.info(f"   Replacement workers should already be running...")
                         self.workers_completing_cycles.clear()
                         
-                        # Даём время на активацию новых аккаунтов
+                        # Даём время на запуск replacement workers
+                        logger.info(f"⏳ Waiting 5 seconds for replacement workers to start...")
                         await asyncio.sleep(5)
                         
-                        # Проверяем количество активных аккаунтов снова
-                        active_accounts = {phone: data for phone, data in self.accounts_data.items()
-                                         if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
-                        new_expected = min(len(active_accounts), self.max_parallel_accounts)
+                        # Перечитываем alive workers после задержки
+                        alive_workers_after = 0
+                        for task in self.active_worker_tasks:
+                            if not task.done():
+                                alive_workers_after += 1
                         
-                        if new_expected > alive_workers:
-                            logger.info(f"🔄 New accounts activated, initiating soft restart...")
-                            # Мягкий перезапуск без паники
-                            if self.worker_recovery_enabled:
-                                await self.restart_monitoring_after_replacement()
-                                break
+                        logger.info(f"📊 Workers after rotation: {alive_workers_after}/{expected_workers}")
+                        
+                        if alive_workers_after >= expected_workers:
+                            logger.info(f"✅ Rotation completed successfully, all slots filled")
+                            continue
                         else:
-                            logger.info(f"✅ No new accounts to activate, continuing with current setup")
-                        continue
+                            logger.warning(f"⚠️ Some replacement workers missing: {alive_workers_after}/{expected_workers}")
+                            # Продолжаем нормальную логику восстановления ниже
                     # ============= END УЛУЧШЕНИЕ =============
                     
                     logger.warning("="*80)
@@ -9769,16 +9849,32 @@ class UltimateCommentBot:
                     self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Completed max cycles")
                     logger.info(f"✅ [{account_name}] Status changed: ACTIVE → RESERVE")
                     
-                    # Активируем следующий резервный аккаунт
+                    # Активируем следующий резервный аккаунт и запускаем замену
                     try:
-                        await self.activate_next_reserve_account()
+                        new_phone = await self.activate_next_reserve_account()
+                        if new_phone:
+                            # Запускаем нового worker'а на замену в том же слоте
+                            await self.launch_replacement_worker(worker_index, my_channels, mode, total_workers)
+                        else:
+                            logger.warning(f"⚠️ No reserve accounts available, slot {worker_index} will remain empty")
                     except Exception as activate_err:
-                        logger.error(f"Failed to activate next reserve account: {activate_err}")
+                        logger.error(f"Failed to activate and launch replacement: {activate_err}")
+                        import traceback
+                        logger.error(traceback.format_exc())
                     
                     break
                 
                 cycle_number += 1
                 commented_channels = []
+                
+                # Сохраняем информацию о текущем worker'е для возможной замены
+                self.worker_slots[worker_index] = {
+                    'phone': phone,
+                    'channels': my_channels,
+                    'mode': mode,
+                    'total_workers': total_workers,
+                    'cycle_number': cycle_number
+                }
                 
                 logger.info("="*60)
                 logger.info(f"[{account_name}] CYCLE #{cycle_number} STARTED")
@@ -10394,6 +10490,7 @@ class UltimateCommentBot:
         # Create worker tasks for each account
         tasks = []
         self.active_worker_tasks.clear()  # Очищаем старый список
+        self.worker_slots.clear()  # Очищаем информацию о слотах
         
         logger.info("="*80)
         logger.info(f"🚀 CREATING {len(accounts_list)} PARALLEL WORKERS")
