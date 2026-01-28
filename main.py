@@ -1694,14 +1694,17 @@ class UltimateCommentBot:
         """Запустить нового worker'а на замену завершившемуся (горячая замена)"""
         try:
             # Получаем телефон нового активного аккаунта
+            # ВАЖНО: Используем недавно активированные аккаунты (которые не имеют worker'ов)
             active_accounts = [(p, data) for p, data in self.accounts_data.items() 
                              if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
             
             if not active_accounts:
                 logger.error(f"❌ Cannot launch replacement worker: no active accounts")
-                return
+                # Если нет активных, перераспределяем каналы между существующими
+                await self.redistribute_channels_to_active_workers(worker_index, channels)
+                return False
             
-            # Ищем аккаунт, который не имеет активного worker'а
+            # Ищем аккаунт, который не имеет активного worker'а (недавно активированный)
             existing_worker_phones = set(slot.get('phone') for slot in self.worker_slots.values() if slot.get('phone'))
             
             replacement_phone = None
@@ -1714,7 +1717,10 @@ class UltimateCommentBot:
             
             if not replacement_phone:
                 logger.warning(f"⚠️ No available account for replacement worker in slot {worker_index}")
-                return
+                logger.warning(f"   Все активные аккаунты уже имеют worker'ов")
+                # Перераспределяем каналы между существующими workers
+                await self.redistribute_channels_to_active_workers(worker_index, channels)
+                return False
             
             account_name = replacement_data.get('name', replacement_phone[-10:])
             
@@ -1758,9 +1764,107 @@ class UltimateCommentBot:
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner: {notify_err}")
+            
+            return True  # Успешный запуск
                 
         except Exception as e:
             logger.error(f"❌ Error launching replacement worker: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    async def redistribute_channels_to_active_workers(self, empty_slot_index, orphaned_channels):
+        """
+        Перераспределить каналы из пустого слота между активными workers
+        Вызывается когда нет резервных аккаунтов для замены
+        """
+        try:
+            logger.info("="*80)
+            logger.info(f"🔄 REDISTRIBUTING CHANNELS FROM EMPTY SLOT {empty_slot_index}")
+            logger.info(f"   Orphaned channels: {len(orphaned_channels)}")
+            logger.info("="*80)
+            
+            # Получаем активные слоты (исключая пустой)
+            active_slots = {idx: slot for idx, slot in self.worker_slots.items() 
+                          if idx != empty_slot_index and slot.get('phone')}
+            
+            if not active_slots:
+                logger.error(f"❌ No active workers to redistribute channels to!")
+                # Уведомляем владельца о критической ситуации
+                try:
+                    await self.bot_client.send_message(
+                        BOT_OWNER_ID,
+                        f"🚨 **КРИТИЧЕСКАЯ СИТУАЦИЯ**\n\n"
+                        f"❌ Нет активных workers!\n"
+                        f"📢 Каналов без обработки: {len(orphaned_channels)}\n\n"
+                        f"⚠️ Добавьте резервные аккаунты СРОЧНО!\n"
+                        f"💡 Или остановите и перезапустите мониторинг"
+                    )
+                except:
+                    pass
+                return
+            
+            # Распределяем каналы равномерно между активными workers
+            channels_per_worker = len(orphaned_channels) // len(active_slots)
+            remainder = len(orphaned_channels) % len(active_slots)
+            
+            logger.info(f"📊 Distributing to {len(active_slots)} active workers:")
+            logger.info(f"   Base: {channels_per_worker} channels per worker")
+            logger.info(f"   Extra: {remainder} workers get +1 channel")
+            
+            channel_index = 0
+            for slot_idx, slot_info in active_slots.items():
+                # Сколько каналов добавить этому worker'у
+                extra = 1 if slot_idx < remainder else 0
+                channels_to_add = channels_per_worker + extra
+                
+                if channels_to_add > 0:
+                    new_channels = orphaned_channels[channel_index:channel_index + channels_to_add]
+                    channel_index += channels_to_add
+                    
+                    # Добавляем каналы к существующим
+                    current_channels = slot_info.get('channels', [])
+                    updated_channels = current_channels + new_channels
+                    slot_info['channels'] = updated_channels
+                    
+                    phone = slot_info.get('phone')
+                    account_name = self.accounts_data.get(phone, {}).get('name', phone[-10:] if phone else 'Unknown')
+                    
+                    logger.info(f"  ✅ Slot {slot_idx} ({account_name}): +{len(new_channels)} channels "
+                              f"(total: {len(updated_channels)})")
+            
+            # Удаляем пустой слот
+            if empty_slot_index in self.worker_slots:
+                del self.worker_slots[empty_slot_index]
+                logger.info(f"🗑️  Removed empty slot {empty_slot_index}")
+            
+            logger.info("="*80)
+            logger.info(f"✅ REDISTRIBUTION COMPLETE")
+            logger.info(f"   Active slots: {len(self.worker_slots)}")
+            logger.info(f"   Channels redistributed: {channel_index}/{len(orphaned_channels)}")
+            logger.info("="*80)
+            
+            # Уведомляем владельца
+            try:
+                redistribution_details = "\n".join([
+                    f"• Slot {idx}: {len(slot.get('channels', []))} каналов"
+                    for idx, slot in self.worker_slots.items()
+                ])
+                
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"🔄 **Каналы перераспределены**\n\n"
+                    f"❌ Пустой слот: {empty_slot_index}\n"
+                    f"📢 Осиротевших каналов: {len(orphaned_channels)}\n\n"
+                    f"✅ Перераспределено между {len(self.worker_slots)} workers:\n"
+                    f"{redistribution_details}\n\n"
+                    f"💡 Рекомендация: добавьте резервные аккаунты"
+                )
+            except Exception as notify_err:
+                logger.error(f"Failed to notify owner: {notify_err}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error redistributing channels: {e}")
             import traceback
             logger.error(traceback.format_exc())
     
@@ -1802,29 +1906,34 @@ class UltimateCommentBot:
                 if worker_slot_index is not None and worker_channels and self.monitoring:
                     logger.info(f"🔥 Initiating HOT SWAP for broken account in slot {worker_slot_index}")
                     try:
-                        await self.launch_replacement_worker(
+                        success = await self.launch_replacement_worker(
                             worker_slot_index, 
                             worker_channels, 
                             worker_mode or 'distributed', 
                             worker_total or self.max_parallel_accounts
                         )
-                        logger.info(f"✅ Hot swap completed for slot {worker_slot_index}")
                         
-                        # Уведомляем владельца об успешной горячей замене
-                        try:
-                            await self.bot_client.send_message(
-                                BOT_OWNER_ID,
-                                f"🔥 **Горячая замена после бана**\n\n"
-                                f"🔴 Забанен: `{account_name}` ({phone[-10:]})\n"
-                                f"Причина: {reason}\n\n"
-                                f"✅ Активирован: `{reserve_name}` ({reserve_phone[-10:]})\n"
-                                f"🔄 Worker перезапущен в слоте {worker_slot_index}\n"
-                                f"📢 Каналов: {len(worker_channels) if worker_channels else 0}\n\n"
-                                f"📊 Состояние: {self.get_status_counts()}\n\n"
-                                f"✅ Комментирование продолжается без простоя!"
-                            )
-                        except Exception as notify_err:
-                            logger.error(f"Failed to notify owner: {notify_err}")
+                        if success:
+                            logger.info(f"✅ Hot swap completed for slot {worker_slot_index}")
+                            
+                            # Уведомляем владельца об успешной горячей замене
+                            try:
+                                await self.bot_client.send_message(
+                                    BOT_OWNER_ID,
+                                    f"🔥 **Горячая замена после бана**\n\n"
+                                    f"🔴 Забанен: `{account_name}` ({phone[-10:]})\n"
+                                    f"Причина: {reason}\n\n"
+                                    f"✅ Активирован: `{reserve_name}` ({reserve_phone[-10:]})\n"
+                                    f"🔄 Worker перезапущен в слоте {worker_slot_index}\n"
+                                    f"📢 Каналов: {len(worker_channels) if worker_channels else 0}\n\n"
+                                    f"📊 Состояние: {self.get_status_counts()}\n\n"
+                                    f"✅ Комментирование продолжается без простоя!"
+                                )
+                            except Exception as notify_err:
+                                logger.error(f"Failed to notify owner: {notify_err}")
+                        else:
+                            logger.warning(f"⚠️ Hot swap failed, channels were redistributed")
+                            # Уведомление уже отправлено в redistribute_channels_to_active_workers
                         
                     except Exception as swap_err:
                         logger.error(f"❌ Hot swap failed: {swap_err}, falling back to full restart")
@@ -9909,13 +10018,21 @@ class UltimateCommentBot:
                         new_phone = await self.activate_next_reserve_account()
                         if new_phone:
                             # Запускаем нового worker'а на замену в том же слоте
-                            await self.launch_replacement_worker(worker_index, my_channels, mode, total_workers)
+                            success = await self.launch_replacement_worker(worker_index, my_channels, mode, total_workers)
+                            if not success:
+                                logger.warning(f"⚠️ Replacement worker launch failed, channels redistributed")
                         else:
-                            logger.warning(f"⚠️ No reserve accounts available, slot {worker_index} will remain empty")
+                            logger.warning(f"⚠️ No reserve accounts available, redistributing channels...")
+                            await self.redistribute_channels_to_active_workers(worker_index, my_channels)
                     except Exception as activate_err:
                         logger.error(f"Failed to activate and launch replacement: {activate_err}")
                         import traceback
                         logger.error(traceback.format_exc())
+                        # В случае ошибки - перераспределяем каналы
+                        try:
+                            await self.redistribute_channels_to_active_workers(worker_index, my_channels)
+                        except Exception as redist_err:
+                            logger.error(f"Failed to redistribute channels: {redist_err}")
                     
                     break
                 
