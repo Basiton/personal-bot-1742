@@ -1733,35 +1733,53 @@ class UltimateCommentBot:
             reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
                               if data.get('status') == ACCOUNT_STATUS_RESERVE and data.get('session')]
             
-            if reserve_accounts:
-                # Активируем первый доступный резервный аккаунт
-                reserve_phone, reserve_data = reserve_accounts[0]
-                self.set_account_status(reserve_phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
-                reserve_name = reserve_data.get('name', reserve_phone)
-                
-                logger.info(f"✅ Activated next reserve account: {reserve_name} ({reserve_phone})")
-                logger.info(f"📊 Current status: {self.get_status_counts()}")
-                
-                # Уведомляем владельца
-                try:
-                    await self.bot_client.send_message(
-                        BOT_OWNER_ID,
-                        f"🔄 **Ротация: активирован новый аккаунт**\n\n"
-                        f"✅ Активирован: `{reserve_name}` ({reserve_phone})\n"
-                        f"📊 Состояние: {self.get_status_counts()}\n\n"
-                        f"💡 Новый воркер запустится автоматически"
-                    )
-                except Exception as notify_err:
-                    logger.error(f"Failed to notify owner: {notify_err}")
-                
-                # Возвращаем телефон для запуска нового worker'а
-                return reserve_phone
-            else:
-                logger.warning("⚠️ No reserve accounts available for rotation")
+            # Подробное логирование для диагностики
+            logger.info("="*60)
+            logger.info("🔍 ПОИСК РЕЗЕРВНОГО АККАУНТА ДЛЯ АКТИВАЦИИ")
+            logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
+            logger.info(f"   Найдено резервных с сессией: {len(reserve_accounts)}")
+            
+            # Покажем все статусы для диагностики
+            status_counts = self.get_status_counts()
+            logger.info(f"   Статусы: {status_counts}")
+            
+            if not reserve_accounts:
+                logger.warning("⚠️ No reserve accounts available for rotation!")
+                logger.warning("   Все аккаунты либо ACTIVE, либо BROKEN, либо без сессий")
+                logger.warning("   Рекомендация: добавьте больше аккаунтов или проверьте статусы")
                 return None
+            
+            # Активируем первый доступный резервный аккаунт
+            reserve_phone, reserve_data = reserve_accounts[0]
+            reserve_name = reserve_data.get('name', reserve_phone)
+            
+            logger.info(f"   ✅ Выбран для активации: {reserve_name} ({reserve_phone})")
+            logger.info("="*60)
+            
+            self.set_account_status(reserve_phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
+            
+            logger.info(f"✅ Activated next reserve account: {reserve_name} ({reserve_phone})")
+            logger.info(f"📊 Current status: {self.get_status_counts()}")
+            
+            # Уведомляем владельца
+            try:
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"🔄 **Ротация: активирован новый аккаунт**\n\n"
+                    f"✅ Активирован: `{reserve_name}` ({reserve_phone})\n"
+                    f"📊 Состояние: {self.get_status_counts()}\n\n"
+                    f"💡 Новый воркер запустится автоматически"
+                )
+            except Exception as notify_err:
+                logger.error(f"Failed to notify owner: {notify_err}")
+            
+            # Возвращаем телефон для запуска нового worker'а
+            return reserve_phone
                 
         except Exception as e:
             logger.error(f"Error activating next reserve account: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     async def launch_replacement_worker(self, worker_index, channels, mode, total_workers):
@@ -10078,6 +10096,7 @@ class UltimateCommentBot:
                     logger.info("="*60)
                     logger.info(f"[{account_name}] ROTATION: completed {max_cycles} cycles")
                     logger.info(f"[{account_name}] Moving to reserve, next account will take over")
+                    logger.info(f"[{account_name}] Worker index: {worker_index}, Mode: {mode}")
                     logger.info("="*60)
                     
                     # Помечаем что этот воркер завершает циклы (для health_check)
@@ -10088,18 +10107,24 @@ class UltimateCommentBot:
                     logger.info(f"✅ [{account_name}] Status changed: ACTIVE → RESERVE")
                     
                     # Активируем следующий резервный аккаунт и запускаем замену
+                    logger.info(f"🔄 [{account_name}] Attempting to activate replacement account...")
                     try:
                         new_phone = await self.activate_next_reserve_account()
                         if new_phone:
+                            logger.info(f"✅ [{account_name}] New account activated: {new_phone}")
+                            logger.info(f"🚀 [{account_name}] Launching replacement worker...")
                             # Запускаем нового worker'а на замену в том же слоте
                             success = await self.launch_replacement_worker(worker_index, my_channels, mode, total_workers)
-                            if not success:
-                                logger.warning(f"⚠️ Replacement worker launch failed, channels redistributed")
+                            if success:
+                                logger.info(f"✅ [{account_name}] Replacement worker launched successfully")
+                            else:
+                                logger.warning(f"⚠️ [{account_name}] Replacement worker launch failed, channels redistributed")
                         else:
-                            logger.warning(f"⚠️ No reserve accounts available, redistributing channels...")
+                            logger.warning(f"⚠️ [{account_name}] No reserve accounts available!")
+                            logger.warning(f"   Redistributing {len(my_channels)} channels to active workers...")
                             await self.redistribute_channels_to_active_workers(worker_index, my_channels)
                     except Exception as activate_err:
-                        logger.error(f"Failed to activate and launch replacement: {activate_err}")
+                        logger.error(f"❌ [{account_name}] Failed to activate and launch replacement: {activate_err}")
                         import traceback
                         logger.error(traceback.format_exc())
                         # В случае ошибки - перераспределяем каналы
@@ -10108,6 +10133,7 @@ class UltimateCommentBot:
                         except Exception as redist_err:
                             logger.error(f"Failed to redistribute channels: {redist_err}")
                     
+                    logger.info(f"🛑 [{account_name}] Worker completing, exiting cycle loop")
                     break
                 
                 cycle_number += 1
