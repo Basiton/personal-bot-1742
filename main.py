@@ -1737,14 +1737,14 @@ class UltimateCommentBot:
             reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
                               if data.get('status') == ACCOUNT_STATUS_RESERVE 
                               and data.get('session')
-            if exclude_phone:
-                logger.info(f"   Исключен из выбора: {exclude_phone} (только что деактивирован)")
                               and p != exclude_phone]  # КРИТИЧНО: Исключаем только что деактивированный
             
             # Подробное логирование для диагностики
             logger.info("="*60)
             logger.info("🔍 ПОИСК РЕЗЕРВНОГО АККАУНТА ДЛЯ АКТИВАЦИИ")
             logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
+            if exclude_phone:
+                logger.info(f"   Исключен из выбора: {exclude_phone} (только что деактивирован)")
             logger.info(f"   Найдено резервных с сессией: {len(reserve_accounts)}")
             
             # Покажем все статусы для диагностики
