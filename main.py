@@ -1765,11 +1765,26 @@ class UltimateCommentBot:
             logger.error(traceback.format_exc())
     
     async def replace_broken_account(self, phone, reason):
-        """Заменить сломанный аккаунт на резервный"""
+        """Заменить сломанный аккаунт на резервный (с горячей заменой worker'а)"""
         try:
             # Помечаем аккаунт как broken
             self.set_account_status(phone, ACCOUNT_STATUS_BROKEN, reason)
             account_name = self.accounts_data[phone].get('name', phone)
+            
+            # Находим slot этого worker'а (если есть)
+            worker_slot_index = None
+            worker_channels = None
+            worker_mode = None
+            worker_total = None
+            
+            for slot_idx, slot_info in self.worker_slots.items():
+                if slot_info.get('phone') == phone:
+                    worker_slot_index = slot_idx
+                    worker_channels = slot_info.get('channels')
+                    worker_mode = slot_info.get('mode')
+                    worker_total = slot_info.get('total_workers')
+                    logger.info(f"🔍 Found worker slot {slot_idx} for broken account {phone[-10:]}")
+                    break
             
             # Ищем резервный аккаунт для замены
             reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
@@ -1783,25 +1798,63 @@ class UltimateCommentBot:
                 
                 logger.info(f"✅ Replaced broken account: {account_name} → {reserve_name}")
                 
-                # Уведомляем владельца
-                try:
-                    await self.bot_client.send_message(
-                        BOT_OWNER_ID,
-                        f"⚠️ **Автоматическая замена аккаунта**\n\n"
-                        f"🔴 Сломан: `{account_name}` ({phone})\n"
-                        f"Причина: {reason}\n\n"
-                        f"✅ Активирован резервный: `{reserve_name}` ({reserve_phone})\n\n"
-                        f"📊 Состояние: {self.get_status_counts()}\n\n"
-                        f"🔄 Система автоматически перезапустится через 10 секунд"
-                    )
-                except Exception as notify_err:
-                    logger.error(f"Failed to notify owner: {notify_err}")
-                
-                # ============= NEW: Автоматический перезапуск =============
-                if self.monitoring and self.worker_recovery_enabled:
-                    logger.info("🔄 Scheduling monitoring restart in 10 seconds...")
-                    asyncio.create_task(self.restart_monitoring_after_replacement())
-                # ============= END NEW =============
+                # ============= ГОРЯЧАЯ ЗАМЕНА: Запускаем replacement worker =============
+                if worker_slot_index is not None and worker_channels and self.monitoring:
+                    logger.info(f"🔥 Initiating HOT SWAP for broken account in slot {worker_slot_index}")
+                    try:
+                        await self.launch_replacement_worker(
+                            worker_slot_index, 
+                            worker_channels, 
+                            worker_mode or 'distributed', 
+                            worker_total or self.max_parallel_accounts
+                        )
+                        logger.info(f"✅ Hot swap completed for slot {worker_slot_index}")
+                        
+                        # Уведомляем владельца об успешной горячей замене
+                        try:
+                            await self.bot_client.send_message(
+                                BOT_OWNER_ID,
+                                f"🔥 **Горячая замена после бана**\n\n"
+                                f"🔴 Забанен: `{account_name}` ({phone[-10:]})\n"
+                                f"Причина: {reason}\n\n"
+                                f"✅ Активирован: `{reserve_name}` ({reserve_phone[-10:]})\n"
+                                f"🔄 Worker перезапущен в слоте {worker_slot_index}\n"
+                                f"📢 Каналов: {len(worker_channels) if worker_channels else 0}\n\n"
+                                f"📊 Состояние: {self.get_status_counts()}\n\n"
+                                f"✅ Комментирование продолжается без простоя!"
+                            )
+                        except Exception as notify_err:
+                            logger.error(f"Failed to notify owner: {notify_err}")
+                        
+                    except Exception as swap_err:
+                        logger.error(f"❌ Hot swap failed: {swap_err}, falling back to full restart")
+                        # Fallback: полный перезапуск если горячая замена не удалась
+                        if self.worker_recovery_enabled:
+                            logger.info("🔄 Scheduling monitoring restart in 10 seconds...")
+                            asyncio.create_task(self.restart_monitoring_after_replacement())
+                else:
+                    # Если worker не найден или мониторинг остановлен - обычный путь
+                    logger.warning(f"⚠️ Worker slot not found or monitoring stopped, using standard replacement")
+                    
+                    # Уведомляем владельца
+                    try:
+                        await self.bot_client.send_message(
+                            BOT_OWNER_ID,
+                            f"⚠️ **Автоматическая замена аккаунта**\n\n"
+                            f"🔴 Сломан: `{account_name}` ({phone})\n"
+                            f"Причина: {reason}\n\n"
+                            f"✅ Активирован резервный: `{reserve_name}` ({reserve_phone})\n\n"
+                            f"📊 Состояние: {self.get_status_counts()}\n\n"
+                            f"🔄 Система автоматически перезапустится через 10 секунд"
+                        )
+                    except Exception as notify_err:
+                        logger.error(f"Failed to notify owner: {notify_err}")
+                    
+                    # Автоматический перезапуск
+                    if self.monitoring and self.worker_recovery_enabled:
+                        logger.info("🔄 Scheduling monitoring restart in 10 seconds...")
+                        asyncio.create_task(self.restart_monitoring_after_replacement())
+                # ============= END ГОРЯЧАЯ ЗАМЕНА =============
                 
                 return True
             else:
@@ -1822,6 +1875,8 @@ class UltimateCommentBot:
                 
         except Exception as e:
             logger.error(f"Error replacing broken account: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     async def restart_monitoring_after_replacement(self):
