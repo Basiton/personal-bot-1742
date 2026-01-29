@@ -10091,6 +10091,33 @@ class UltimateCommentBot:
             else:
                 worker_client = self.account_clients[phone]
                 logger.info(f"♻️ [{account_name}] Переиспользую существующий клиент")
+                
+                # КРИТИЧНО: Проверяем подключён ли клиент
+                if not worker_client.is_connected():
+                    logger.warning(f"⚠️ [{account_name}] Клиент отключён, переподключаюсь...")
+                    try:
+                        await worker_client.connect()
+                        logger.info(f"✅ [{account_name}] Клиент успешно переподключён")
+                    except Exception as reconnect_err:
+                        logger.error(f"❌ [{account_name}] Ошибка переподключения: {reconnect_err}")
+                        # Удаляем из кэша и пытаемся создать заново
+                        del self.account_clients[phone]
+                        logger.info(f"🔄 [{account_name}] Создаю новый клиент...")
+                        try:
+                            worker_client = TelegramClient(
+                                StringSession(account_data['session']),
+                                API_ID,
+                                API_HASH,
+                                proxy=account_data.get('proxy'),
+                                connection_retries=5,
+                                retry_delay=3
+                            )
+                            await worker_client.connect()
+                            self.account_clients[phone] = worker_client
+                            logger.info(f"✅ [{account_name}] Новый клиент создан и подключён")
+                        except Exception as new_client_err:
+                            logger.error(f"❌ [{account_name}] Не удалось создать новый клиент: {new_client_err}")
+                            return
             
             logger.info(f"[{account_name}] Client ready")
             
