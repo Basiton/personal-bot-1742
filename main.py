@@ -10487,13 +10487,17 @@ class UltimateCommentBot:
                                 "You can't write in this chat",
                                 "CHAT_WRITE_FORBIDDEN",
                                 "CHAT_SEND_PLAIN_FORBIDDEN",
-                                "CHANNEL_PRIVATE"
+                                "CHANNEL_PRIVATE",
+                                "UserBannedInChannelError",
+                                "You're banned from sending messages"
                             ]
                             
                             is_permanent = any(err in err_text for err in permanent_errors)
                             
                             if is_permanent:
                                 await self.mark_channel_failed_for_account(username, phone, "Comments forbidden")
+                                # Пропускаем этот канал и переходим к следующему СРАЗУ
+                                continue
                             elif "FloodWait" in err_text:
                                 try:
                                     import re
@@ -10501,6 +10505,7 @@ class UltimateCommentBot:
                                     wait_seconds = int(wait_match.group(1)) if wait_match else 60
                                     logger.warning(f"[{account_name}] FloodWait {wait_seconds}s")
                                     await asyncio.sleep(min(wait_seconds + 5, 120))
+                                    # После FloodWait пробуем снова с этим же каналом
                                 except Exception:
                                     await asyncio.sleep(60)
                             elif "USER_DEACTIVATED" in err_text or "AUTH_KEY_UNREGISTERED" in err_text:
@@ -10509,6 +10514,8 @@ class UltimateCommentBot:
                                 break
                             else:
                                 await asyncio.sleep(3)
+                                # Для других ошибок тоже переходим к следующему каналу
+                                continue
                     
                     except Exception as e:
                         logger.error(f"[{account_name}] Error on @{username}: {str(e)[:100]}")
