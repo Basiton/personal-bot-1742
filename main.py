@@ -1660,10 +1660,7 @@ class UltimateCommentBot:
             
             logger.info(f"🔄 Starting account rotation: {num_to_rotate} accounts")
             
-            # Создаем упорядоченный список всех аккаунтов для цикличной ротации
-            all_accounts_list = list(self.accounts_data.keys())
-            
-            # Находим текущие активные в общем списке и берем следующие по циклу
+            # Ротация: используем циклическую логику из activate_next_reserve_account
             accounts_to_deactivate = []
             accounts_to_activate = []
             
@@ -1672,23 +1669,20 @@ class UltimateCommentBot:
                 if i < len(active_accounts):
                     accounts_to_deactivate.append(active_accounts[i])
             
-            # Берем следующие по порядку из резерва для активации
-            for i in range(num_to_rotate):
-                if i < len(reserve_accounts):
-                    accounts_to_activate.append(reserve_accounts[i])
-            
-            # Выполняем ротацию
+            # Выполняем ротацию с использованием циклической логики
             for phone, data in accounts_to_deactivate:
-                old_status = data.get('status')
+                # Переводим в резерв
                 self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Scheduled rotation")
                 account_name = data.get('name', phone)
                 logger.info(f"  🔵 {account_name} → RESERVE")
-            
-            for phone, data in accounts_to_activate:
-                old_status = data.get('status')
-                self.set_account_status(phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
-                account_name = data.get('name', phone)
-                logger.info(f"  🟢 {account_name} → ACTIVE")
+                
+                # Активируем следующий по циклу (исключая только что деактивированный)
+                new_phone = await self.activate_next_reserve_account(exclude_phone=phone)
+                if new_phone:
+                    new_data = self.accounts_data.get(new_phone, {})
+                    new_name = new_data.get('name', new_phone)
+                    accounts_to_activate.append((new_phone, new_data))
+                    logger.info(f"  🟢 {new_name} → ACTIVE")
             
             # Обновляем время последней ротации
             self.last_rotation_time = datetime.now().timestamp()
