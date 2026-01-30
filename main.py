@@ -651,6 +651,15 @@ class UltimateCommentBot:
         self.channel_failed_attempts = {}
         # Track commented posts: {channel_username: {post_id1, post_id2, ...}}
         self.commented_posts = {}
+        
+        # ============= NEW: FLOODWAIT & BLACKLIST TRACKING =============
+        # Track FloodWait history: {phone: {channel: {'timestamp': float, 'wait_seconds': int, 'expires_at': float}}}
+        self.floodwait_history = {}
+        # Blacklist channels per account: {phone: {channel1, channel2, ...}} - каналы с 3+ постоянными ошибками
+        self.account_channel_blacklist = {}
+        # Global delay multiplier (увеличивается при частых FloodWait)
+        self.global_delay_multiplier = 1.0
+        # ============= END NEW =============
         # Channel queue for round-robin distribution
         self.channel_queue = []
         self.channel_queue_index = 0
@@ -1444,6 +1453,172 @@ class UltimateCommentBot:
         if len(self.recent_comments[channel_username]) > self.recent_comments_limit:
             self.recent_comments[channel_username] = self.recent_comments[channel_username][-self.recent_comments_limit:]
     
+    # ============= NEW: FLOODWAIT & BLACKLIST MANAGEMENT =============
+    
+    def record_floodwait(self, phone, channel, wait_seconds):
+        """
+        Записать FloodWait для аккаунта на канале
+        
+        Args:
+            phone: Телефон аккаунта
+            channel: Имя канала
+            wait_seconds: Сколько секунд нужно ждать
+        """
+        current_time = datetime.now().timestamp()
+        expires_at = current_time + wait_seconds
+        
+        if phone not in self.floodwait_history:
+            self.floodwait_history[phone] = {}
+        
+        self.floodwait_history[phone][channel] = {
+            'timestamp': current_time,
+            'wait_seconds': wait_seconds,
+            'expires_at': expires_at
+        }
+        
+        logger.warning(
+            f"📝 FloodWait recorded: phone={phone[-10:]}, channel={channel}, "
+            f"wait={wait_seconds}s, expires_at={datetime.fromtimestamp(expires_at).strftime('%H:%M:%S')}"
+        )
+        
+        # Увеличиваем глобальный множитель задержки при частых FloodWait
+        self.adjust_global_delay_on_floodwait()
+    
+    def has_recent_floodwait(self, phone, channel, within_minutes=30):
+        """
+        Проверить, был ли недавний FloodWait для аккаунта на канале
+        
+        Args:
+            phone: Телефон аккаунта
+            channel: Имя канала
+            within_minutes: В течение скольких минут проверять
+        
+        Returns:
+            bool: True если FloodWait еще активен или был недавно
+        """
+        if phone not in self.floodwait_history:
+            return False
+        
+        if channel not in self.floodwait_history[phone]:
+            return False
+        
+        fw_data = self.floodwait_history[phone][channel]
+        current_time = datetime.now().timestamp()
+        
+        # Проверяем, не истек ли FloodWait
+        if current_time < fw_data['expires_at']:
+            remaining = int(fw_data['expires_at'] - current_time)
+            logger.info(
+                f"⏳ FloodWait still active: phone={phone[-10:]}, channel={channel}, "
+                f"remaining={remaining}s"
+            )
+            return True
+        
+        # Проверяем, был ли недавно (в пределах within_minutes)
+        time_since_floodwait = current_time - fw_data['timestamp']
+        if time_since_floodwait < (within_minutes * 60):
+            logger.info(
+                f"⚠️ Recent FloodWait detected: phone={phone[-10:]}, channel={channel}, "
+                f"was {int(time_since_floodwait/60)} min ago"
+            )
+            return True
+        
+        return False
+    
+    def cleanup_expired_floodwaits(self):
+        """
+        Очистить истекшие записи FloodWait (вызывается периодически)
+        """
+        current_time = datetime.now().timestamp()
+        cleaned_count = 0
+        
+        for phone in list(self.floodwait_history.keys()):
+            for channel in list(self.floodwait_history[phone].keys()):
+                fw_data = self.floodwait_history[phone][channel]
+                # Удаляем записи старше 1 часа
+                if current_time - fw_data['timestamp'] > 3600:
+                    del self.floodwait_history[phone][channel]
+                    cleaned_count += 1
+            
+            # Удаляем пустые записи для phone
+            if not self.floodwait_history[phone]:
+                del self.floodwait_history[phone]
+        
+        if cleaned_count > 0:
+            logger.info(f"🧹 Cleaned {cleaned_count} expired FloodWait records")
+    
+    def adjust_global_delay_on_floodwait(self):
+        """
+        Адаптивно увеличивать глобальную задержку при частых FloodWait
+        """
+        # Подсчитываем активные FloodWait
+        current_time = datetime.now().timestamp()
+        active_floodwaits = 0
+        
+        for phone in self.floodwait_history:
+            for channel, fw_data in self.floodwait_history[phone].items():
+                if current_time < fw_data['expires_at']:
+                    active_floodwaits += 1
+        
+        # Если больше 3 активных FloodWait - увеличиваем задержку
+        if active_floodwaits >= 3:
+            old_multiplier = self.global_delay_multiplier
+            self.global_delay_multiplier = min(2.0, self.global_delay_multiplier * 1.2)
+            if old_multiplier != self.global_delay_multiplier:
+                logger.warning(
+                    f"⚠️ High FloodWait activity ({active_floodwaits} active), "
+                    f"increasing global delay: {old_multiplier:.2f} → {self.global_delay_multiplier:.2f}x"
+                )
+        elif active_floodwaits == 0 and self.global_delay_multiplier > 1.0:
+            # Постепенно снижаем множитель, если нет активных FloodWait
+            old_multiplier = self.global_delay_multiplier
+            self.global_delay_multiplier = max(1.0, self.global_delay_multiplier * 0.95)
+            if abs(old_multiplier - self.global_delay_multiplier) > 0.01:
+                logger.info(
+                    f"✅ No active FloodWaits, reducing global delay: "
+                    f"{old_multiplier:.2f} → {self.global_delay_multiplier:.2f}x"
+                )
+    
+    def blacklist_channel_for_account(self, phone, channel, reason):
+        """
+        Добавить канал в блэклист для конкретного аккаунта
+        
+        Args:
+            phone: Телефон аккаунта
+            channel: Имя канала
+            reason: Причина блокировки
+        """
+        if phone not in self.account_channel_blacklist:
+            self.account_channel_blacklist[phone] = {}
+        
+        self.account_channel_blacklist[phone][channel] = {
+            'reason': reason,
+            'timestamp': datetime.now().timestamp()
+        }
+        
+        logger.warning(
+            f"🚫 Channel blacklisted for account: phone={phone[-10:]}, "
+            f"channel={channel}, reason={reason}"
+        )
+    
+    def is_channel_blacklisted_for_account(self, phone, channel):
+        """
+        Проверить, находится ли канал в блэклисте для аккаунта
+        
+        Returns:
+            (bool, str): (is_blacklisted, reason)
+        """
+        if phone not in self.account_channel_blacklist:
+            return False, ""
+        
+        if channel not in self.account_channel_blacklist[phone]:
+            return False, ""
+        
+        blacklist_data = self.account_channel_blacklist[phone][channel]
+        return True, blacklist_data['reason']
+    
+    # ============= END NEW =============
+    
     def save_config_value(self, key, value):
         """
         Удобный метод для сохранения одного значения в конфиг
@@ -1553,6 +1728,27 @@ class UltimateCommentBot:
             
             self.channel_failed_attempts[username][phone]['count'] += 1
             self.channel_failed_attempts[username][phone]['reasons'].append(reason)
+            
+            failure_count = self.channel_failed_attempts[username][phone]['count']
+            
+            # ============= NEW: BLACKLIST CHANNEL AFTER 3+ PERMANENT FAILURES =============
+            # Если 3+ постоянных ошибок - добавляем канал в блэклист для этого аккаунта
+            if failure_count >= 3:
+                # Проверяем, что это постоянные ошибки, а не временные
+                permanent_error_keywords = [
+                    'CHAT_WRITE_FORBIDDEN', 'CHAT_SEND_PLAIN_FORBIDDEN',
+                    'CHANNEL_PRIVATE', 'CHAT_RESTRICTED', 'Comments forbidden',
+                    'No discussion group', 'Access error'
+                ]
+                
+                is_permanent = any(keyword in reason for keyword in permanent_error_keywords)
+                
+                if is_permanent:
+                    self.blacklist_channel_for_account(phone, username, f"3+ failures: {reason}")
+                    logger.warning(
+                        f"🚫 [{phone[-10:]}] Channel {username} BLACKLISTED after {failure_count} failures"
+                    )
+            # ============= END NEW =============
             
             # Record error in DB for stats with admin_id
             if self.conn:
@@ -1878,7 +2074,7 @@ class UltimateCommentBot:
                 logger.warning(f"⚠️ No available account for replacement worker in slot {worker_index}")
                 logger.warning(f"   Все активные аккаунты уже имеют worker'ов")
                 # Перераспределяем каналы между существующими workers
-                await self.redistribute_channels_to_active_workers(worker_index, channels)
+                await self.redistribute_channels_to_active_workers(worker_index, current_channels)
                 return False
             
             account_name = replacement_data.get('name', replacement_phone[-10:])
@@ -2212,6 +2408,11 @@ class UltimateCommentBot:
                 
                 if not self.monitoring:
                     break
+                
+                # ============= NEW: ОЧИСТКА ИСТОРИИ FLOODWAIT =============
+                # Очищаем истекшие FloodWait каждую проверку
+                self.cleanup_expired_floodwaits()
+                # ============= END NEW =============
                 
                 # Подсчёт активных аккаунтов
                 active_accounts = {phone: data for phone, data in self.accounts_data.items()
@@ -4540,6 +4741,8 @@ class UltimateCommentBot:
 `/history` - история комментариев
 `/resetfails` - сбросить счетчики неудач
 `/showfails` - показать текущие неудачи
+`/showblacklist` - показать блэклист каналов для аккаунтов 🆕
+`/clearblacklist` - очистить блэклист 🆕
 
 **🧪 ТЕСТОВЫЙ РЕЖИМ:**
 `/testmode` - статус тестового режима
@@ -9072,6 +9275,99 @@ class UltimateCommentBot:
                 logger.error(f"Show fails error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)[:100]}")
         
+        @self.bot_client.on(events.NewMessage(pattern='/showblacklist'))
+        async def show_blacklist(event):
+            """Показать блэклист каналов для каждого аккаунта"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                if not self.account_channel_blacklist:
+                    await event.respond(
+                        "✅ **Блэклист пуст!**\n\n"
+                        "Ни один канал не заблокирован для аккаунтов.\n"
+                        "Каналы добавляются в блэклист после 3+ постоянных ошибок."
+                    )
+                    return
+                
+                text = "🚫 **БЛЭКЛИСТ КАНАЛОВ**\n\n"
+                text += "Каналы, которые будут автоматически пропускаться:\n\n"
+                
+                total_blacklisted = 0
+                
+                for phone, channels in self.account_channel_blacklist.items():
+                    if not channels:
+                        continue
+                    
+                    # Получаем имя аккаунта
+                    account_data = self.accounts_data.get(phone, {})
+                    account_name = account_data.get('name', phone[-10:])
+                    
+                    text += f"📱 **{account_name}** ({phone[-10:]})\n"
+                    
+                    for channel, data in channels.items():
+                        display_name = channel if channel.startswith('@') else '@' + channel
+                        reason = data.get('reason', 'Unknown')
+                        
+                        # Форматируем время
+                        timestamp = data.get('timestamp', 0)
+                        if timestamp:
+                            from datetime import datetime
+                            time_str = datetime.fromtimestamp(timestamp).strftime('%d.%m %H:%M')
+                            text += f"  • {display_name}\n"
+                            text += f"    ⚠️ {reason}\n"
+                            text += f"    🕐 {time_str}\n"
+                        else:
+                            text += f"  • {display_name} - {reason}\n"
+                        
+                        total_blacklisted += 1
+                    
+                    text += "\n"
+                
+                text += f"📊 **Итого:** {total_blacklisted} каналов в блэклисте\n\n"
+                text += "💡 **Справка:**\n"
+                text += "• Каналы добавляются после 3+ постоянных ошибок\n"
+                text += "• Аккаунт больше не будет пробовать эти каналы\n"
+                text += "• Используйте `/clearblacklist` для очистки\n"
+                text += "• Используйте `/showfails` для просмотра текущих неудач"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                logger.error(f"Show blacklist error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/clearblacklist'))
+        async def clear_blacklist(event):
+            """Очистить блэклист каналов"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                if not self.account_channel_blacklist:
+                    await event.respond("ℹ️ Блэклист уже пуст")
+                    return
+                
+                # Подсчитываем статистику до очистки
+                total_accounts = len(self.account_channel_blacklist)
+                total_channels = sum(len(channels) for channels in self.account_channel_blacklist.values())
+                
+                # Очищаем блэклист
+                self.account_channel_blacklist = {}
+                
+                await event.respond(
+                    f"✅ **Блэклист очищен!**\n\n"
+                    f"📊 Статистика:\n"
+                    f"• Аккаунтов: {total_accounts}\n"
+                    f"• Каналов: {total_channels}\n\n"
+                    f"💡 Аккаунты теперь будут пробовать все каналы заново.\n"
+                    f"⚠️ Помните: каналы с постоянными ошибками снова попадут в блэклист после 3 неудач."
+                )
+                
+                logger.info(f"Blacklist cleared by admin {event.sender_id}: {total_accounts} accounts, {total_channels} channels")
+                
+            except Exception as e:
+                logger.error(f"Clear blacklist error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)[:100]}")
+        
         @self.bot_client.on(events.NewMessage(pattern='/clearblocked'))
         async def clear_blocked(event):
             """Clear blocked channels from database"""
@@ -10302,6 +10598,23 @@ class UltimateCommentBot:
                         username = str(channel)
                     username = str(username).strip().lstrip('@')
                     
+                    # ============= NEW: ПРОВЕРКИ ПЕРЕД ОТПРАВКОЙ =============
+                    # 1. Проверка блэклиста для этого аккаунта
+                    is_blacklisted, blacklist_reason = self.is_channel_blacklisted_for_account(phone, username)
+                    if is_blacklisted:
+                        logger.info(
+                            f"[{account_name}] @{username} в блэклисте (причина: {blacklist_reason}), пропускаю"
+                        )
+                        continue
+                    
+                    # 2. Проверка недавних FloodWait на этом канале
+                    if self.has_recent_floodwait(phone, username, within_minutes=30):
+                        logger.info(
+                            f"[{account_name}] @{username} недавний FloodWait, пропускаю"
+                        )
+                        continue
+                    # ============= END NEW =============
+                    
                     # Anti-spam protection
                     can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username)
                     if not can_comment:
@@ -10607,11 +10920,49 @@ class UltimateCommentBot:
                                     import re
                                     wait_match = re.search(r'(\d+)', err_text)
                                     wait_seconds = int(wait_match.group(1)) if wait_match else 60
-                                    logger.warning(f"[{account_name}] FloodWait {wait_seconds}s")
-                                    await asyncio.sleep(min(wait_seconds + 5, 120))
-                                    # После FloodWait пробуем снова с этим же каналом
-                                except Exception:
+                                    
+                                    # ============= NEW: УЛУЧШЕННАЯ ОБРАБОТКА FLOODWAIT =============
+                                    logger.warning(
+                                        f"🚨 [{account_name}] FloodWait {wait_seconds}s на @{username}"
+                                    )
+                                    
+                                    # 1. Записываем FloodWait в историю
+                                    self.record_floodwait(phone, username, wait_seconds)
+                                    
+                                    # 2. Если FloodWait > 60 секунд - прерываем работу этого воркера
+                                    # Система автоматически переключится на другой аккаунт
+                                    if wait_seconds > 60:
+                                        logger.error(
+                                            f"⚠️ [{account_name}] FloodWait слишком долгий ({wait_seconds}s), "
+                                            f"прерываю worker для переключения на другой аккаунт"
+                                        )
+                                        # Уведомляем владельца
+                                        try:
+                                            await self.bot_client.send_message(
+                                                BOT_OWNER_ID,
+                                                f"⚠️ **FloodWait обнаружен**\n\n"
+                                                f"Аккаунт: `{account_name}`\n"
+                                                f"Канал: @{username}\n"
+                                                f"Время ожидания: {wait_seconds}s\n\n"
+                                                f"🔄 Переключаюсь на другой аккаунт"
+                                            )
+                                        except:
+                                            pass
+                                        
+                                        # Прерываем цикл - система запустит другой аккаунт
+                                        break
+                                    else:
+                                        # Если FloodWait короткий - ждем и пропускаем канал
+                                        logger.info(f"[{account_name}] Короткий FloodWait, жду {wait_seconds}s")
+                                        await asyncio.sleep(min(wait_seconds + 5, 120))
+                                        # Пропускаем этот канал
+                                        continue
+                                    # ============= END NEW =============
+                                    
+                                except Exception as fw_err:
+                                    logger.error(f"Error processing FloodWait: {fw_err}")
                                     await asyncio.sleep(60)
+                                    continue
                             elif "USER_DEACTIVATED" in err_text or "AUTH_KEY_UNREGISTERED" in err_text:
                                 logger.error(f"[{account_name}] ACCOUNT BANNED!")
                                 await self.handle_account_ban(phone, "Account Deactivated")
@@ -10632,9 +10983,23 @@ class UltimateCommentBot:
                         target_rate = self.messages_per_hour
                     
                     base_delay = (3600 // target_rate) if target_rate > 0 else 60
+                    
+                    # ============= NEW: ПРИМЕНЯЕМ ГЛОБАЛЬНЫЙ МНОЖИТЕЛЬ ЗАДЕРЖКИ =============
+                    # Если были частые FloodWait - увеличиваем задержку
+                    base_delay = int(base_delay * self.global_delay_multiplier)
+                    # ============= END NEW =============
+                    
                     delay = random.randint(int(base_delay * 0.8), int(base_delay * 1.2))
                     
-                    logger.info(f"[{account_name}] Waiting {delay}s (target: {target_rate} msg/hour)")
+                    # Логируем с указанием множителя, если он != 1.0
+                    if self.global_delay_multiplier > 1.0:
+                        logger.info(
+                            f"[{account_name}] Waiting {delay}s (target: {target_rate} msg/hour, "
+                            f"multiplier: {self.global_delay_multiplier:.2f}x)"
+                        )
+                    else:
+                        logger.info(f"[{account_name}] Waiting {delay}s (target: {target_rate} msg/hour)")
+                    
                     await asyncio.sleep(delay)
                 
                 # Cycle completed
