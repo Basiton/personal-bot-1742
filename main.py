@@ -1757,12 +1757,20 @@ class UltimateCommentBot:
                 logger.warning("   Рекомендация: добавьте больше аккаунтов или проверьте статусы")
                 return None
             
-            # Активируем первый доступный резервный аккаунт
-            reserve_phone, reserve_data = reserve_accounts[0]
+            # ============= ЦИКЛИЧЕСКАЯ РОТАЦИЯ: выбираем следующий по кругу =============
+            # Используем rotation_index для циклического перебора аккаунтов
+            selected_index = self.rotation_index % len(reserve_accounts)
+            reserve_phone, reserve_data = reserve_accounts[selected_index]
             reserve_name = reserve_data.get('name', reserve_phone)
             
+            # Увеличиваем индекс для следующей ротации
+            self.rotation_index = (self.rotation_index + 1) % len(reserve_accounts)
+            
+            logger.info(f"   🔄 Циклический выбор: позиция {selected_index + 1}/{len(reserve_accounts)}")
             logger.info(f"   ✅ Выбран для активации: {reserve_name} ({reserve_phone})")
+            logger.info(f"   📌 Следующий индекс ротации: {self.rotation_index}")
             logger.info("="*60)
+            # ============= END ЦИКЛИЧЕСКАЯ РОТАЦИЯ =============
             
             self.set_account_status(reserve_phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
             
