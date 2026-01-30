@@ -10173,9 +10173,17 @@ class UltimateCommentBot:
                     # Помечаем что этот воркер завершает циклы (для health_check)
                     self.workers_completing_cycles.add(phone)
                     
-                    # Переводим себя в резерв
-                    self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Completed max cycles")
-                    logger.info(f"✅ [{account_name}] Status changed: ACTIVE → RESERVE")
+                    # Переводим себя в резерв (только если не BROKEN!)
+                    current_status = self.accounts_data.get(phone, {}).get('status', ACCOUNT_STATUS_RESERVE)
+                    if current_status == ACCOUNT_STATUS_BROKEN:
+                        logger.warning(f"⚠️ [{account_name}] Account is BROKEN, not moving to RESERVE")
+                        logger.warning(f"   Worker will exit without rotation")
+                        # Не пытаемся активировать замену - просто выходим
+                        logger.info(f"🛑 [{account_name}] Worker completing, exiting cycle loop")
+                        break
+                    else:
+                        self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Completed max cycles")
+                        logger.info(f"✅ [{account_name}] Status changed: ACTIVE → RESERVE")
                     
                     # Активируем следующий резервный аккаунт и запускаем замену
                     logger.info(f"🔄 [{account_name}] Attempting to activate replacement account...")
