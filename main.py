@@ -6438,10 +6438,6 @@ class UltimateCommentBot:
             """Perform account rotation immediately"""
             if not await self.is_admin(event.sender_id): return
             
-            if not self.monitoring:
-                await event.respond("❌ Мониторинг не запущен. Запустите `/startmon` сначала")
-                return
-            
             await event.respond("🔄 Выполняю ротацию аккаунтов...")
             await self.rotate_accounts()
             await event.respond("✅ Ротация выполнена успешно!")
