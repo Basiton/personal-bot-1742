@@ -1763,12 +1763,13 @@ class UltimateCommentBot:
             reserve_phone, reserve_data = reserve_accounts[selected_index]
             reserve_name = reserve_data.get('name', reserve_phone)
             
-            # Увеличиваем индекс для следующей ротации
-            self.rotation_index = (self.rotation_index + 1) % len(reserve_accounts)
+            # Увеличиваем индекс для следующей ротации ПЕРЕД модулем
+            # (после активации список reserve_accounts изменится, поэтому увеличиваем сейчас)
+            self.rotation_index += 1
             
             logger.info(f"   🔄 Циклический выбор: позиция {selected_index + 1}/{len(reserve_accounts)}")
             logger.info(f"   ✅ Выбран для активации: {reserve_name} ({reserve_phone})")
-            logger.info(f"   📌 Следующий индекс ротации: {self.rotation_index}")
+            logger.info(f"   📌 Следующий индекс ротации: {self.rotation_index} (без модуля)")
             logger.info("="*60)
             # ============= END ЦИКЛИЧЕСКАЯ РОТАЦИЯ =============
             
@@ -1798,18 +1799,43 @@ class UltimateCommentBot:
             logger.error(traceback.format_exc())
             return None
     
-    async def launch_replacement_worker(self, worker_index, channels, mode, total_workers):
-        """Запустить нового worker'а на замену завершившемуся (горячая замена)"""
+    async def launch_replacement_worker(self, worker_index, old_channels, mode, old_total_workers):
+        """Запустить нового worker'а на замену завершившемуся (горячая замена)
+        
+        ВАЖНО: Не используем старые параметры old_channels и old_total_workers!
+        Пересчитываем всё заново на основе текущего состояния системы.
+        """
         try:
-            # Получаем телефон нового активного аккаунта
-            # ВАЖНО: Используем недавно активированные аккаунты (которые не имеют worker'ов)
+            # ============= ПЕРЕСЧЁТ ПАРАМЕТРОВ НА ОСНОВЕ ТЕКУЩЕГО СОСТОЯНИЯ =============
+            # Получаем АКТУАЛЬНЫЙ список каналов (не старый!)
+            if self.test_mode and self.test_channels:
+                current_channels = []
+                for ch in self.channels:
+                    username = ch.get('username') if isinstance(ch, dict) else str(ch)
+                    username_clean = str(username).strip().lstrip('@').upper()
+                    if username_clean in [tc.upper() for tc in self.test_channels]:
+                        current_channels.append(ch)
+            else:
+                current_channels = self.channels.copy()
+            
+            # Получаем АКТУАЛЬНОЕ количество активных аккаунтов
             active_accounts = [(p, data) for p, data in self.accounts_data.items() 
                              if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')]
+            current_total_workers = min(len(active_accounts), self.max_parallel_accounts)
+            
+            logger.info("="*80)
+            logger.info(f"🔄 ПЕРЕСЧЁТ ПАРАМЕТРОВ ДЛЯ REPLACEMENT WORKER")
+            logger.info(f"   Старые параметры: {len(old_channels)} каналов, {old_total_workers} воркеров")
+            logger.info(f"   Новые параметры: {len(current_channels)} каналов, {current_total_workers} воркеров")
+            logger.info(f"   Активных аккаунтов: {len(active_accounts)}")
+            logger.info(f"   max_parallel_accounts: {self.max_parallel_accounts}")
+            logger.info("="*80)
+            # ============= END ПЕРЕСЧЁТ =============
             
             if not active_accounts:
                 logger.error(f"❌ Cannot launch replacement worker: no active accounts")
                 # Если нет активных, перераспределяем каналы между существующими
-                await self.redistribute_channels_to_active_workers(worker_index, channels)
+                await self.redistribute_channels_to_active_workers(worker_index, current_channels)
                 return False
             
             # Ищем аккаунт, который не имеет активного worker'а (недавно активированный)
@@ -1836,18 +1862,19 @@ class UltimateCommentBot:
             logger.info(f"🔄 LAUNCHING REPLACEMENT WORKER")
             logger.info(f"   Slot: {worker_index}")
             logger.info(f"   Account: {account_name} ({replacement_phone})")
-            logger.info(f"   Channels: {len(channels)}")
+            logger.info(f"   Channels: {len(current_channels)} (АКТУАЛЬНОЕ количество)")
+            logger.info(f"   Total workers: {current_total_workers} (АКТУАЛЬНОЕ количество)")
             logger.info(f"   Mode: {mode}")
             logger.info("="*80)
             
-            # Создаём новую задачу worker'а
+            # Создаём новую задачу worker'а с АКТУАЛЬНЫМИ параметрами
             task = asyncio.create_task(
                 self.account_worker(
                     replacement_phone, 
                     replacement_data, 
-                    channels, 
+                    current_channels,  # АКТУАЛЬНЫЙ список каналов!
                     worker_index, 
-                    total_workers, 
+                    current_total_workers,  # АКТУАЛЬНОЕ количество!
                     mode=mode
                 )
             )
@@ -1866,7 +1893,8 @@ class UltimateCommentBot:
                     f"🔄 **Горячая замена worker'а**\n\n"
                     f"Слот: `{worker_index}`\n"
                     f"Новый аккаунт: `{account_name}`\n"
-                    f"Каналов: `{len(channels)}`\n"
+                    f"Каналов: `{len(current_channels)}`\n"
+                    f"Всего воркеров: `{current_total_workers}`\n"
                     f"Режим: `{mode}`\n\n"
                     f"✅ Worker запущен и начал работу"
                 )
