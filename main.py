@@ -10545,14 +10545,26 @@ class UltimateCommentBot:
                             
                             logger.error(f"[{account_name}] Send error for @{username}: {err_text}")
                             
+                            # ============= ПРОВЕРКА НА БАН АККАУНТА =============
+                            # Если аккаунт забанен в каналах - это серьёзно!
+                            if "UserBannedInChannelError" in err_text or "You're banned from sending messages" in err_text:
+                                logger.error(f"⚠️ [{account_name}] ACCOUNT IS BANNED IN CHANNELS!")
+                                logger.error(f"   This account cannot comment anywhere")
+                                logger.error(f"   Marking account as BROKEN...")
+                                
+                                # Помечаем аккаунт как сломанный
+                                await self.handle_account_ban(phone, "Banned from channels")
+                                
+                                # Прерываем цикл - нет смысла пробовать другие каналы
+                                break
+                            # ============= END ПРОВЕРКА НА БАН =============
+                            
                             # Error handling...
                             permanent_errors = [
                                 "You can't write in this chat",
                                 "CHAT_WRITE_FORBIDDEN",
                                 "CHAT_SEND_PLAIN_FORBIDDEN",
                                 "CHANNEL_PRIVATE",
-                                "UserBannedInChannelError",
-                                "You're banned from sending messages"
                             ]
                             
                             is_permanent = any(err in err_text for err in permanent_errors)
