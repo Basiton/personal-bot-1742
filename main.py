@@ -1758,34 +1758,38 @@ class UltimateCommentBot:
                 return None
             
             # ============= ЦИКЛИЧЕСКАЯ РОТАЦИЯ: выбираем следующий по кругу =============
-            # Получаем ПОЛНЫЙ список резервных (включая exclude_phone для правильного подсчета)
-            all_reserve = [(p, data) for p, data in self.accounts_data.items() 
-                          if data.get('status') == ACCOUNT_STATUS_RESERVE 
-                          and data.get('session')]
+            # Получаем ПОЛНЫЙ список ВСЕХ аккаунтов с сессиями (для определения порядка)
+            all_accounts = [(p, data) for p, data in self.accounts_data.items() 
+                          if data.get('session') and data.get('status') != ACCOUNT_STATUS_BROKEN]
             
-            # Находим последний активированный аккаунт в полном списке
+            # Находим позицию последнего активированного в полном списке
             last_phone = getattr(self, 'last_activated_phone', None)
-            start_index = 0
+            start_pos = 0
             if last_phone:
-                for i, (p, _) in enumerate(all_reserve):
+                for i, (p, _) in enumerate(all_accounts):
                     if p == last_phone:
-                        start_index = (i + 1) % len(all_reserve)  # Следующий после последнего
+                        start_pos = i + 1  # Начинаем со следующего после последнего
+                        logger.info(f"   🔍 Последний активированный найден на позиции {i+1}/{len(all_accounts)}")
                         break
             
-            # Ищем первый доступный (не exclude_phone) начиная с start_index
+            # Ищем первый RESERVE (не exclude_phone) начиная с start_pos
             selected_phone = None
             selected_data = None
-            for offset in range(len(all_reserve)):
-                idx = (start_index + offset) % len(all_reserve)
-                phone, data = all_reserve[idx]
-                if phone != exclude_phone:  # Пропускаем исключенный
+            attempts = 0
+            for offset in range(len(all_accounts)):
+                idx = (start_pos + offset) % len(all_accounts)
+                phone, data = all_accounts[idx]
+                attempts += 1
+                # Проверяем: RESERVE и не excluded
+                if data.get('status') == ACCOUNT_STATUS_RESERVE and phone != exclude_phone:
                     selected_phone = phone
                     selected_data = data
-                    logger.info(f"   🔄 Циклический выбор: позиция {idx + 1}/{len(all_reserve)}")
+                    logger.info(f"   🔄 Циклический выбор: позиция {idx + 1}/{len(all_accounts)} (проверено {attempts} аккаунтов)")
                     break
             
             if not selected_phone:
-                logger.error("❌ Не найден аккаунт для активации (все исключены?)")
+                logger.error("❌ Не найден резервный аккаунт для активации")
+                logger.error(f"   Проверено {attempts} аккаунтов, все либо ACTIVE/BROKEN, либо excluded")
                 return None
             
             reserve_phone = selected_phone
