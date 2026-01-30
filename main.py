@@ -1863,15 +1863,17 @@ class UltimateCommentBot:
                     accounts_to_deactivate.append((phone, data))
                     logger.info(f"  🔵 {data.get('name', phone)} → RESERVE")
 
-            # Активируем столько же резервных аккаунтов
+            # Активируем столько же резервных аккаунтов (циклическая логика)
             accounts_to_activate = []
-            reserve_candidates = [item for item in reserve_accounts if item[0] not in [p for p, _ in accounts_to_deactivate]]
-            for i in range(num_to_rotate):
-                if i < len(reserve_candidates):
-                    phone, data = reserve_candidates[i]
-                    self.set_account_status(phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
-                    accounts_to_activate.append((phone, data))
-                    logger.info(f"  🟢 {data.get('name', phone)} → ACTIVE")
+            exclude_phones = {p for p, _ in accounts_to_deactivate}
+            for _ in range(num_to_rotate):
+                new_phone = await self.activate_next_reserve_account(exclude_phones=exclude_phones)
+                if not new_phone:
+                    break
+                new_data = self.accounts_data.get(new_phone, {})
+                accounts_to_activate.append((new_phone, new_data))
+                exclude_phones.add(new_phone)
+                logger.info(f"  🟢 {new_data.get('name', new_phone)} → ACTIVE")
 
             # Обновляем время последней ротации
             self.last_rotation_time = datetime.now().timestamp()
@@ -1908,65 +1910,47 @@ class UltimateCommentBot:
             logger.info(f"⏰ Rotation interval reached ({time_since_rotation:.0f}s >= {self.rotation_interval}s)")
             await self.rotate_accounts()
     
-    async def activate_next_reserve_account(self, exclude_phone=None):
+    async def activate_next_reserve_account(self, exclude_phone=None, exclude_phones=None):
         """Активировать следующий резервный аккаунт для ротации (возвращает phone активированного)
         
         Args:
             exclude_phone: Телефон аккаунта, который нужно исключить из выбора (недавно деактивированный)
+            exclude_phones: Набор телефонов для исключения из выбора (например, уже деактивированные в текущей ротации)
         """
-        # Ищем резервный аккаунт для активации (ИСКЛЮЧАЯ недавно деактивированный)
-        reserve_accounts = [(p, data) for p, data in self.accounts_data.items() 
-                            if data.get('status') == ACCOUNT_STATUS_RESERVE 
-                            and data.get('session')
-                            and p != exclude_phone]  # КРИТИЧНО: Исключаем только что деактивированный
+        try:
+            exclude_set = set(exclude_phones) if exclude_phones else set()
+            if exclude_phone:
+                exclude_set.add(exclude_phone)
 
-        # Подробное логирование для диагностики
-        logger.info("="*60)
-        logger.info("🔍 ПОИСК РЕЗЕРВНОГО АККАУНТА ДЛЯ АКТИВАЦИИ")
-        logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
-        if exclude_phone:
-            logger.info(f"   Исключен из выбора: {exclude_phone} (только что деактивирован)")
-        logger.info(f"   Найдено резервных с сессией: {len(reserve_accounts)}")
+            # Ищем резервный аккаунт для активации (ИСКЛЮЧАЯ недавно деактивированный)
+            reserve_accounts = [(p, data) for p, data in self.accounts_data.items()
+                              if data.get('status') == ACCOUNT_STATUS_RESERVE
+                              and data.get('session')
+                              and p not in exclude_set]
 
-        # Покажем все статусы для диагностики
-        status_counts = self.get_status_counts()
-        logger.info(f"   Статусы: {status_counts}")
+            # Подробное логирование для диагностики
+            logger.info("="*60)
+            logger.info("🔍 ПОИСК РЕЗЕРВНОГО АККАУНТА ДЛЯ АКТИВАЦИИ")
+            logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
+            if exclude_set:
+                logger.info(f"   Исключены из выбора: {', '.join(sorted(exclude_set))}")
+            logger.info(f"   Найдено резервных с сессией: {len(reserve_accounts)}")
 
-        if not reserve_accounts:
-            logger.warning("⚠️ No reserve accounts available for rotation!")
-            logger.warning("   Все аккаунты либо ACTIVE, либо BROKEN, либо без сессий")
-            logger.warning("   Рекомендация: добавьте больше аккаунтов или проверьте статусы")
-            return None
-        reserve_accounts = [
-            (p, data) for p, data in self.accounts_data.items()
-            if data.get('status') == ACCOUNT_STATUS_RESERVE
-            and data.get('session')
-            and p != exclude_phone
-        ]  # КРИТИЧНО: Исключаем только что деактивированный
+            # Покажем все статусы для диагностики
+            status_counts = self.get_status_counts()
+            logger.info(f"   Статусы: {status_counts}")
 
-        # Подробное логирование для диагностики
-        logger.info("="*60)
-        logger.info("🔍 ПОИСК РЕЗЕРВНОГО АККАУНТА ДЛЯ АКТИВАЦИИ")
-        logger.info(f"   Всего аккаунтов в системе: {len(self.accounts_data)}")
-        if exclude_phone:
-            logger.info(f"   Исключен из выбора: {exclude_phone} (только что деактивирован)")
-        logger.info(f"   Найдено резервных с сессией: {len(reserve_accounts)}")
+            if not reserve_accounts:
+                logger.warning("⚠️ No reserve accounts available for rotation!")
+                logger.warning("   Все аккаунты либо ACTIVE, либо BROKEN, либо без сессий")
+                logger.warning("   Рекомендация: добавьте больше аккаунтов или проверьте статусы")
+                return None
 
-        # Покажем все статусы для диагностики
-        status_counts = self.get_status_counts()
-        logger.info(f"   Статусы: {status_counts}")
-
-        if not reserve_accounts:
-            logger.warning("⚠️ No reserve accounts available for rotation!")
-            logger.warning("   Все аккаунты либо ACTIVE, либо BROKEN, либо без сессий")
-            logger.warning("   Рекомендация: добавьте больше аккаунтов или проверьте статусы")
-            return None
-            
             # ============= ЦИКЛИЧЕСКАЯ РОТАЦИЯ: выбираем следующий по кругу =============
             # Получаем ПОЛНЫЙ список ВСЕХ аккаунтов с сессиями (для определения порядка)
-            all_accounts = [(p, data) for p, data in self.accounts_data.items() 
+            all_accounts = [(p, data) for p, data in self.accounts_data.items()
                           if data.get('session') and data.get('status') != ACCOUNT_STATUS_BROKEN]
-            
+
             # Находим позицию последнего активированного в полном списке
             last_phone = getattr(self, 'last_activated_phone', None)
             start_pos = 0
@@ -1976,17 +1960,62 @@ class UltimateCommentBot:
                         start_pos = i + 1  # Начинаем со следующего после последнего
                         logger.info(f"   🔍 Последний активированный найден на позиции {i+1}/{len(all_accounts)}")
                         break
-            
 
-            # МАССОВАЯ АКТИВАЦИЯ: возвращаем список резервных аккаунтов для активации
-            reserve_phones = []
-            for phone, data in all_accounts:
-                if data.get('status') == ACCOUNT_STATUS_RESERVE and phone != exclude_phone:
-                    reserve_phones.append(phone)
+            # Ищем первый RESERVE (не exclude_phone) начиная с start_pos
+            selected_phone = None
+            selected_data = None
+            attempts = 0
+            for offset in range(len(all_accounts)):
+                idx = (start_pos + offset) % len(all_accounts)
+                phone, data = all_accounts[idx]
+                attempts += 1
+                if data.get('status') == ACCOUNT_STATUS_RESERVE and phone not in exclude_set:
+                    selected_phone = phone
+                    selected_data = data
+                    logger.info(f"   🔄 Циклический выбор: позиция {idx + 1}/{len(all_accounts)} (проверено {attempts} аккаунтов)")
+                    break
 
-            # Можно ограничить количество, если нужно
-            # Например, для ротации: return reserve_phones[:N]
-            return reserve_phones
+            if not selected_phone:
+                logger.error("❌ Не найден резервный аккаунт для активации")
+                logger.error(f"   Проверено {attempts} аккаунтов, все либо ACTIVE/BROKEN, либо excluded")
+                return None
+
+            reserve_phone = selected_phone
+            reserve_data = selected_data
+            reserve_name = reserve_data.get('name', reserve_phone)
+
+            # Сохраняем для следующей ротации
+            self.last_activated_phone = reserve_phone
+
+            logger.info(f"   ✅ Выбран для активации: {reserve_name} ({reserve_phone})")
+            logger.info(f"   📌 Последний активированный сохранен для следующей ротации")
+            logger.info("="*60)
+            # ============= END ЦИКЛИЧЕСКАЯ РОТАЦИЯ =============
+
+            self.set_account_status(reserve_phone, ACCOUNT_STATUS_ACTIVE, "Rotation activation")
+
+            logger.info(f"✅ Activated next reserve account: {reserve_name} ({reserve_phone})")
+            logger.info(f"📊 Current status: {self.get_status_counts()}")
+
+            # Уведомляем владельца
+            try:
+                await self.bot_client.send_message(
+                    BOT_OWNER_ID,
+                    f"🔄 **Ротация: активирован новый аккаунт**\n\n"
+                    f"✅ Активирован: `{reserve_name}` ({reserve_phone})\n"
+                    f"📊 Состояние: {self.get_status_counts()}\n\n"
+                    f"💡 Новый воркер запустится автоматически"
+                )
+            except Exception as notify_err:
+                logger.error(f"Failed to notify owner: {notify_err}")
+
+            return reserve_phone
+
+        except Exception as e:
+            logger.error(f"Error activating next reserve account: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
     
     async def launch_replacement_worker(self, worker_index, old_channels, mode, old_total_workers):
         """Запустить нового worker'а на замену завершившемуся (горячая замена)
