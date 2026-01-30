@@ -1758,18 +1758,45 @@ class UltimateCommentBot:
                 return None
             
             # ============= ЦИКЛИЧЕСКАЯ РОТАЦИЯ: выбираем следующий по кругу =============
-            # Используем rotation_index для циклического перебора аккаунтов
-            selected_index = self.rotation_index % len(reserve_accounts)
-            reserve_phone, reserve_data = reserve_accounts[selected_index]
+            # Получаем ПОЛНЫЙ список резервных (включая exclude_phone для правильного подсчета)
+            all_reserve = [(p, data) for p, data in self.accounts_data.items() 
+                          if data.get('status') == ACCOUNT_STATUS_RESERVE 
+                          and data.get('session')]
+            
+            # Находим последний активированный аккаунт в полном списке
+            last_phone = getattr(self, 'last_activated_phone', None)
+            start_index = 0
+            if last_phone:
+                for i, (p, _) in enumerate(all_reserve):
+                    if p == last_phone:
+                        start_index = (i + 1) % len(all_reserve)  # Следующий после последнего
+                        break
+            
+            # Ищем первый доступный (не exclude_phone) начиная с start_index
+            selected_phone = None
+            selected_data = None
+            for offset in range(len(all_reserve)):
+                idx = (start_index + offset) % len(all_reserve)
+                phone, data = all_reserve[idx]
+                if phone != exclude_phone:  # Пропускаем исключенный
+                    selected_phone = phone
+                    selected_data = data
+                    logger.info(f"   🔄 Циклический выбор: позиция {idx + 1}/{len(all_reserve)}")
+                    break
+            
+            if not selected_phone:
+                logger.error("❌ Не найден аккаунт для активации (все исключены?)")
+                return None
+            
+            reserve_phone = selected_phone
+            reserve_data = selected_data
             reserve_name = reserve_data.get('name', reserve_phone)
             
-            # Увеличиваем индекс для следующей ротации ПЕРЕД модулем
-            # (после активации список reserve_accounts изменится, поэтому увеличиваем сейчас)
-            self.rotation_index += 1
+            # Сохраняем для следующей ротации
+            self.last_activated_phone = reserve_phone
             
-            logger.info(f"   🔄 Циклический выбор: позиция {selected_index + 1}/{len(reserve_accounts)}")
             logger.info(f"   ✅ Выбран для активации: {reserve_name} ({reserve_phone})")
-            logger.info(f"   📌 Следующий индекс ротации: {self.rotation_index} (без модуля)")
+            logger.info(f"   📌 Последний активированный сохранен для следующей ротации")
             logger.info("="*60)
             # ============= END ЦИКЛИЧЕСКАЯ РОТАЦИЯ =============
             
