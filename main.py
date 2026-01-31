@@ -10505,33 +10505,42 @@ class UltimateCommentBot:
                         self.set_account_status(phone, ACCOUNT_STATUS_RESERVE, "Completed max cycles")
                         logger.info(f"✅ [{account_name}] Status changed: ACTIVE → RESERVE")
                     
-                    # Активируем следующий резервный аккаунт и запускаем замену
-                    logger.info(f"🔄 [{account_name}] Attempting to activate replacement account...")
-                    try:
-                        # ВАЖНО: Исключаем текущий аккаунт из выбора (он только что стал резервным)
-                        new_phone = await self.activate_next_reserve_account(exclude_phone=phone)
-                        if new_phone:
-                            logger.info(f"✅ [{account_name}] New account activated: {new_phone}")
-                            logger.info(f"🚀 [{account_name}] Launching replacement worker...")
-                            # Запускаем нового worker'а на замену в том же слоте
-                            success = await self.launch_replacement_worker(worker_index, my_channels, mode, total_workers)
-                            if success:
-                                logger.info(f"✅ [{account_name}] Replacement worker launched successfully")
-                            else:
-                                logger.warning(f"⚠️ [{account_name}] Replacement worker launch failed, channels redistributed")
-                        else:
-                            logger.warning(f"⚠️ [{account_name}] No reserve accounts available!")
-                            logger.warning(f"   Redistributing {len(my_channels)} channels to active workers...")
-                            await self.redistribute_channels_to_active_workers(worker_index, my_channels)
-                    except Exception as activate_err:
-                        logger.error(f"❌ [{account_name}] Failed to activate and launch replacement: {activate_err}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                        # В случае ошибки - перераспределяем каналы
+                    # Проверяем, не превышен ли лимит активных аккаунтов
+                    active_count = len([p for p, d in self.accounts_data.items() 
+                                      if d.get('status') == ACCOUNT_STATUS_ACTIVE and d.get('session')])
+                    
+                    if active_count >= self.max_parallel_accounts:
+                        logger.warning(f"⚠️ [{account_name}] Active accounts limit reached ({active_count}/{self.max_parallel_accounts})")
+                        logger.warning(f"   Not activating replacement, redistributing channels instead")
+                        await self.redistribute_channels_to_active_workers(worker_index, my_channels)
+                    else:
+                        # Активируем следующий резервный аккаунт и запускаем замену
+                        logger.info(f"🔄 [{account_name}] Attempting to activate replacement account...")
                         try:
-                            await self.redistribute_channels_to_active_workers(worker_index, my_channels)
-                        except Exception as redist_err:
-                            logger.error(f"Failed to redistribute channels: {redist_err}")
+                            # ВАЖНО: Исключаем текущий аккаунт из выбора (он только что стал резервным)
+                            new_phone = await self.activate_next_reserve_account(exclude_phone=phone)
+                            if new_phone:
+                                logger.info(f"✅ [{account_name}] New account activated: {new_phone}")
+                                logger.info(f"🚀 [{account_name}] Launching replacement worker...")
+                                # Запускаем нового worker'а на замену в том же слоте
+                                success = await self.launch_replacement_worker(worker_index, my_channels, mode, total_workers)
+                                if success:
+                                    logger.info(f"✅ [{account_name}] Replacement worker launched successfully")
+                                else:
+                                    logger.warning(f"⚠️ [{account_name}] Replacement worker launch failed, channels redistributed")
+                            else:
+                                logger.warning(f"⚠️ [{account_name}] No reserve accounts available!")
+                                logger.warning(f"   Redistributing {len(my_channels)} channels to active workers...")
+                                await self.redistribute_channels_to_active_workers(worker_index, my_channels)
+                        except Exception as activate_err:
+                            logger.error(f"❌ [{account_name}] Failed to activate and launch replacement: {activate_err}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            # В случае ошибки - перераспределяем каналы
+                            try:
+                                await self.redistribute_channels_to_active_workers(worker_index, my_channels)
+                            except Exception as redist_err:
+                                logger.error(f"Failed to redistribute channels: {redist_err}")
                     
                     logger.info(f"🛑 [{account_name}] Worker completing, exiting cycle loop")
                     break
