@@ -2020,21 +2020,12 @@ class UltimateCommentBot:
     async def launch_replacement_worker(self, worker_index, old_channels, mode, old_total_workers):
         """Запустить нового worker'а на замену завершившемуся (горячая замена)
         
-        ВАЖНО: Не используем старые параметры old_channels и old_total_workers!
-        Пересчитываем всё заново на основе текущего состояния системы.
+        ВАЖНО: Используем old_channels (осиротевшие каналы) для продолжения работы с того же места!
         """
         try:
-            # ============= ПЕРЕСЧЁТ ПАРАМЕТРОВ НА ОСНОВЕ ТЕКУЩЕГО СОСТОЯНИЯ =============
-            # Получаем АКТУАЛЬНЫЙ список каналов (не старый!)
-            if self.test_mode and self.test_channels:
-                current_channels = []
-                for ch in self.channels:
-                    username = ch.get('username') if isinstance(ch, dict) else str(ch)
-                    username_clean = str(username).strip().lstrip('@').upper()
-                    if username_clean in [tc.upper() for tc in self.test_channels]:
-                        current_channels.append(ch)
-            else:
-                current_channels = self.channels.copy()
+            # ============= ИСПОЛЬЗУЕМ ОСИРОТЕВШИЕ КАНАЛЫ =============
+            # Новый воркер продолжает с тех каналов, которые обрабатывал старый
+            orphaned_channels = old_channels if old_channels else []
             
             # Получаем АКТУАЛЬНОЕ количество активных аккаунтов
             active_accounts = [(p, data) for p, data in self.accounts_data.items() 
@@ -2042,18 +2033,22 @@ class UltimateCommentBot:
             current_total_workers = min(len(active_accounts), self.max_parallel_accounts)
             
             logger.info("="*80)
-            logger.info(f"🔄 ПЕРЕСЧЁТ ПАРАМЕТРОВ ДЛЯ REPLACEMENT WORKER")
-            logger.info(f"   Старые параметры: {len(old_channels)} каналов, {old_total_workers} воркеров")
-            logger.info(f"   Новые параметры: {len(current_channels)} каналов, {current_total_workers} воркеров")
+            logger.info(f"🔄 ЗАПУСК REPLACEMENT WORKER С ОСИРОТЕВШИМИ КАНАЛАМИ")
+            logger.info(f"   Осиротевших каналов: {len(orphaned_channels)} (продолжим с них)")
+            logger.info(f"   Воркеров было: {old_total_workers}, стало: {current_total_workers}")
             logger.info(f"   Активных аккаунтов: {len(active_accounts)}")
             logger.info(f"   max_parallel_accounts: {self.max_parallel_accounts}")
             logger.info("="*80)
             # ============= END ПЕРЕСЧЁТ =============
             
+            if not orphaned_channels:
+                logger.warning(f"⚠️ No orphaned channels to process in slot {worker_index}")
+                return False
+            
             if not active_accounts:
                 logger.error(f"❌ Cannot launch replacement worker: no active accounts")
                 # Если нет активных, перераспределяем каналы между существующими
-                await self.redistribute_channels_to_active_workers(worker_index, current_channels)
+                await self.redistribute_channels_to_active_workers(worker_index, orphaned_channels)
                 return False
             
             # Ищем аккаунт, который не имеет активного worker'а (недавно активированный)
@@ -2071,7 +2066,7 @@ class UltimateCommentBot:
                 logger.warning(f"⚠️ No available account for replacement worker in slot {worker_index}")
                 logger.warning(f"   Все активные аккаунты уже имеют worker'ов")
                 # Перераспределяем каналы между существующими workers
-                await self.redistribute_channels_to_active_workers(worker_index, current_channels)
+                await self.redistribute_channels_to_active_workers(worker_index, orphaned_channels)
                 return False
             
             account_name = replacement_data.get('name', replacement_phone[-10:])
@@ -2080,19 +2075,19 @@ class UltimateCommentBot:
             logger.info(f"🔄 LAUNCHING REPLACEMENT WORKER")
             logger.info(f"   Slot: {worker_index}")
             logger.info(f"   Account: {account_name} ({replacement_phone})")
-            logger.info(f"   Channels: {len(current_channels)} (АКТУАЛЬНОЕ количество)")
-            logger.info(f"   Total workers: {current_total_workers} (АКТУАЛЬНОЕ количество)")
+            logger.info(f"   Channels: {len(orphaned_channels)} (ОСИРОТЕВШИЕ каналы - продолжаем с них!)")
+            logger.info(f"   Total workers: {current_total_workers}")
             logger.info(f"   Mode: {mode}")
             logger.info("="*80)
             
-            # Создаём новую задачу worker'а с АКТУАЛЬНЫМИ параметрами
+            # Создаём новую задачу worker'а с ОСИРОТЕВШИМИ каналами!
             task = asyncio.create_task(
                 self.account_worker(
                     replacement_phone, 
                     replacement_data, 
-                    current_channels,  # АКТУАЛЬНЫЙ список каналов!
+                    orphaned_channels,  # ОСИРОТЕВШИЕ каналы - продолжаем с того места!
                     worker_index, 
-                    current_total_workers,  # АКТУАЛЬНОЕ количество!
+                    current_total_workers,
                     mode=mode
                 )
             )
@@ -2111,10 +2106,10 @@ class UltimateCommentBot:
                     f"🔄 **Горячая замена worker'а**\n\n"
                     f"Слот: `{worker_index}`\n"
                     f"Новый аккаунт: `{account_name}`\n"
-                    f"Каналов: `{len(current_channels)}`\n"
+                    f"Каналов (осиротевших): `{len(orphaned_channels)}`\n"
                     f"Всего воркеров: `{current_total_workers}`\n"
                     f"Режим: `{mode}`\n\n"
-                    f"✅ Worker запущен и начал работу"
+                    f"✅ Worker продолжит с тех каналов, где остановился предыдущий"
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner: {notify_err}")
