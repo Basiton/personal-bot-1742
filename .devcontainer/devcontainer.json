@@ -1,0 +1,1 @@
+{ "name": "Python Codespace", "image": "mcr.microsoft.com/devcontainers/python:3.11", "features": {}, "extensions": [ "ms-python.python" ], "settings": { "python.pythonPath": "/usr/local/bin/python" } }
