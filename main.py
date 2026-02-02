@@ -5835,9 +5835,141 @@ class UltimateCommentBot:
                     "🔴 BROKEN → 🔵 RESERVE"
                 )
         
+        @self.bot_client.on(events.NewMessage(pattern='/addaccount'))
+        async def add_account(event):
+            """Добавление аккаунта через StringSession с поддержкой прокси"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split(maxsplit=4)
+                if len(parts) < 3:
+                    await event.respond(
+                        "**📱 ДОБАВЛЕНИЕ АККАУНТА**\n\n"
+                        "Добавляет аккаунт через готовую StringSession.\n"
+                        "Поддерживает любые источники сессий:\n"
+                        "• Auth Key (через convert_session.py)\n"
+                        "• tdata (через convert_session.py)\n"
+                        "• Готовая StringSession\n\n"
+                        "**Формат:**\n"
+                        "`/addaccount +номер StringSession [Имя] [прокси]`\n\n"
+                        "**Примеры:**\n"
+                        "1. Без прокси:\n"
+                        "`/addaccount +79991112233 1BVtsOHsBu... Александр`\n\n"
+                        "2. С прокси:\n"
+                        "`/addaccount +79991112233 1BVtsOHsBu... Александр socks5:host:1080:user:pass`\n\n"
+                        "**💡 Как получить StringSession:**\n"
+                        "• Из Auth Key или tdata: `python3 convert_session.py`\n"
+                        "• Вручную: `python3 manual_auth_russia.py`\n"
+                        "• Экспорт существующей: `/exportsession +номер`"
+                    )
+                    return
+                
+                phone = parts[1]
+                session_string = parts[2]
+                name = parts[3] if len(parts) > 3 else phone[-10:]
+                proxy_str = parts[4] if len(parts) > 4 else None
+                
+                # Парсим прокси если указан
+                proxy = None
+                if proxy_str:
+                    try:
+                        proxy_parts = proxy_str.split(':')
+                        if len(proxy_parts) == 6:
+                            # Full format: socks5:host:port:rdns:user:pass
+                            proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), 
+                                    proxy_parts[3].lower() == 'true', proxy_parts[4], proxy_parts[5])
+                        elif len(proxy_parts) >= 5:
+                            # Short format: socks5:host:port:user:pass
+                            proxy = (proxy_parts[0], proxy_parts[1], int(proxy_parts[2]), 
+                                    True, proxy_parts[3], proxy_parts[4])
+                        else:
+                            await event.respond("⚠️ Неверный формат прокси. Используйте: `socks5:host:port:user:pass`")
+                            return
+                        
+                        logger.info(f"Parsed proxy: {proxy[0]}://{proxy[1]}:{proxy[2]}")
+                    except Exception as e:
+                        await event.respond(f"❌ Ошибка парсинга прокси: {str(e)[:100]}")
+                        return
+                
+                # Нормализуем номер
+                phone_digits = ''.join(c for c in phone if c.isdigit())
+                if not phone.startswith('+'):
+                    phone = '+' + phone_digits
+                
+                logger.info(f"📥 /addaccount: phone={phone}, name={name}, has_proxy={proxy is not None}, user={event.sender_id}")
+                
+                # Проверяем что сессия валидна
+                await event.respond(f"🔍 Проверка сессии для `{phone}`...")
+                
+                from telethon.sessions import StringSession
+                test_client = TelegramClient(StringSession(session_string), API_ID, API_HASH, proxy=proxy)
+                
+                try:
+                    await test_client.connect()
+                    
+                    if not await test_client.is_user_authorized():
+                        await event.respond("❌ Сессия невалидна или аккаунт не авторизован")
+                        await test_client.disconnect()
+                        return
+                    
+                    # Получаем информацию об аккаунте
+                    me = await test_client.get_me()
+                    username = me.username or ""
+                    first_name = me.first_name or ""
+                    last_name = me.last_name or ""
+                    user_id = me.id
+                    
+                    # Если имя не указано, берём из аккаунта
+                    if name == phone[-10:]:
+                        name = f"{first_name} {last_name}".strip() or username or phone[-10:]
+                    
+                    await test_client.disconnect()
+                    
+                    logger.info(f"✅ Session valid: {phone} -> {name} (@{username})")
+                    
+                    # Добавляем в bot_data
+                    self.accounts_data[phone] = {
+                        'session': session_string,
+                        'name': name,
+                        'username': username,
+                        'status': ACCOUNT_STATUS_RESERVE,
+                        'user_id': user_id,
+                        'admin_id': self.get_admin_id(event.sender_id),
+                        'proxy': proxy
+                    }
+                    
+                    self.save_data()
+                    
+                    proxy_info = f"🌐 Прокси: {proxy[0]}://{proxy[1]}:{proxy[2]}" if proxy else "🌐 Прокси: нет"
+                    
+                    await event.respond(
+                        f"✅ **Аккаунт успешно добавлен!**\n\n"
+                        f"👤 Имя: `{name}`\n"
+                        f"📱 Телефон: `{phone}`\n"
+                        f"🆔 Username: @{username}\n"
+                        f"{proxy_info}\n"
+                        f"🔵 Статус: **RESERVE** (не активен)\n\n"
+                        f"💡 Используйте `/toggleaccount {phone}` для активации\n"
+                        f"📊 Проверьте: `/listaccounts`"
+                    )
+                    
+                    logger.info(f"✅ Account added: {phone} -> {name}")
+                    
+                except Exception as e:
+                    logger.error(f"Add account error: {e}")
+                    await event.respond(f"❌ Ошибка проверки сессии:\n`{str(e)[:200]}`")
+                    try:
+                        await test_client.disconnect()
+                    except:
+                        pass
+                    
+            except Exception as e:
+                logger.error(f"/addaccount error: {e}")
+                await event.respond(f"❌ Ошибка: `{str(e)[:200]}`")
+        
         @self.bot_client.on(events.NewMessage(pattern='/importsession'))
         async def import_session(event):
-            """Импорт готовой StringSession для российских номеров"""
+            """Импорт готовой StringSession для российских номеров (старая команда, используйте /addaccount)"""
             if not await self.is_admin(event.sender_id): return
             
             try:
@@ -5845,15 +5977,12 @@ class UltimateCommentBot:
                 if len(parts) < 3:
                     await event.respond(
                         "**📱 ИМПОРТ ГОТОВОЙ СЕССИИ**\n\n"
-                        "Для российских номеров, когда код не приходит через бота.\n\n"
-                        "**Формат:**\n"
-                        "`/importsession +79123456789 StringSession_здесь Имя`\n\n"
-                        "**Где взять StringSession:**\n"
-                        "1. Telegram Desktop → Settings → Advanced → Export Telegram data\n"
-                        "2. Или используйте скрипт: `python3 manual_auth_russia.py`\n"
-                        "3. Или авторизуйтесь через telegram-cli и экспортируйте\n\n"
-                        "**Пример:**\n"
-                        "`/importsession +79991112233 1BVtsOHsBu... Александр`"
+                        "⚠️ Эта команда устарела, используйте `/addaccount`\n\n"
+                        "**Новая команда:**\n"
+                        "`/addaccount +номер StringSession Имя [прокси]`\n\n"
+                        "**Примеры:**\n"
+                        "• `/addaccount +79991112233 1BVtsOHsBu... Александр`\n"
+                        "• `/addaccount +79991112233 1BVtsOHsBu... Александр socks5:host:1080:user:pass`"
                     )
                     return
                 
