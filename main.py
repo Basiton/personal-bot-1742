@@ -80,8 +80,10 @@ DEFAULT_MAX_ACTIVE_ACCOUNTS = 2
 # По умолчанию: 4 часа (14400 секунд)
 DEFAULT_ROTATION_INTERVAL = 14400
 
-# Минимальный интервал между комментариями от разных аккаунтов в одном чате (в секундах)
-MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS = 300  # 5 минут
+# Интервал между комментариями от разных аккаунтов в одном чате (в секундах)
+# Используется случайное значение из диапазона для естественности
+MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS = 180  # 3 минуты (минимум)
+MAX_INTERVAL_BETWEEN_OWN_ACCOUNTS = 420  # 7 минут (максимум)
 
 # Статусы аккаунтов
 ACCOUNT_STATUS_ACTIVE = 'active'
@@ -657,6 +659,9 @@ class UltimateCommentBot:
         self.floodwait_history = {}
         # Blacklist channels per account: {phone: {channel1, channel2, ...}} - каналы с 3+ постоянными ошибками
         self.account_channel_blacklist = {}
+        # Hot channels - каналы с недавним FloodWait (избегаем на 2 часа)
+        # {channel_username: {'timestamp': float, 'phone': str, 'reason': str}}
+        self.hot_channels = {}
         # Global delay multiplier (увеличивается при частых FloodWait)
         self.global_delay_multiplier = 1.0
         # ============= END NEW =============
@@ -1696,11 +1701,43 @@ class UltimateCommentBot:
             current_time = datetime.now().timestamp()
             time_since_last = current_time - last_timestamp
             
-            if time_since_last < MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS:
-                wait_time = int(MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS - time_since_last)
+            # Случайный интервал между MIN и MAX для естественности
+            import random
+            required_interval = random.randint(MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS, MAX_INTERVAL_BETWEEN_OWN_ACCOUNTS)
+            
+            if time_since_last < required_interval:
+                wait_time = int(required_interval - time_since_last)
                 return False, wait_time
         
         return True, 0
+    
+    def mark_channel_as_hot(self, channel_username, phone, reason="FloodWait"):
+        """Пометить канал как горячий (избегать 2 часа после FloodWait)"""
+        self.hot_channels[channel_username] = {
+            'timestamp': datetime.now().timestamp(),
+            'phone': phone,
+            'reason': reason
+        }
+        logger.warning(f"🔥 Channel @{channel_username} marked as HOT (reason: {reason}, phone: {phone[-4:]})")
+    
+    def is_channel_hot(self, channel_username, cooldown_hours=2):
+        """Проверить, является ли канал горячим (недавний FloodWait)"""
+        if channel_username not in self.hot_channels:
+            return False, None
+        
+        hot_info = self.hot_channels[channel_username]
+        current_time = datetime.now().timestamp()
+        time_since_hot = current_time - hot_info['timestamp']
+        cooldown_seconds = cooldown_hours * 3600
+        
+        if time_since_hot < cooldown_seconds:
+            remaining_minutes = int((cooldown_seconds - time_since_hot) / 60)
+            return True, remaining_minutes
+        else:
+            # Прошло достаточно времени - убираем из горячих
+            del self.hot_channels[channel_username]
+            logger.info(f"❄️ Channel @{channel_username} cooled down, removed from hot list")
+            return False, None
     
     async def add_comment_stat(self, phone, success=True, channel=None, error_message=None, admin_id=None):
         self.stats['total_comments'] += 1
@@ -6505,7 +6542,9 @@ class UltimateCommentBot:
             text = f"⚡ **ЛИМИТЫ СКОРОСТИ:**\n\n"
             text += f"📊 Лимит: **{self.messages_per_hour} сообщений/час** на аккаунт\n"
             text += f"⏱️ Средний интервал: ~{avg_interval} сек между сообщениями\n"
-            text += f"🛡️ Защита от спама: {MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS} сек между своими аккаунтами\n\n"
+            text += f"🛡️ **Защита от спама:**\n"
+            text += f"   • Интервал между своими аккаунтами: {MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS}-{MAX_INTERVAL_BETWEEN_OWN_ACCOUNTS} сек (случайный)\n"
+            text += f"   • Горячие каналы (с FloodWait): избегаем 2 часа\n\n"
             text += f"💡 Диапазон: {MIN_MESSAGES_PER_HOUR}-{MAX_MESSAGES_PER_HOUR} msg/h"
             
             await event.respond(text)
@@ -10764,6 +10803,16 @@ class UltimateCommentBot:
                         username = str(channel)
                     username = str(username).strip().lstrip('@')
                     
+                    # ============= NEW: ПРОВЕРКА ГОРЯЧИХ КАНАЛОВ =============
+                    # Проверяем, не является ли канал "горячим" (недавний FloodWait)
+                    is_hot, cooldown_minutes = self.is_channel_hot(username)
+                    if is_hot:
+                        logger.info(
+                            f"[{account_name}] 🔥 @{username} is HOT (cooldown: {cooldown_minutes} min), skipping"
+                        )
+                        continue
+                    # ============= END ПРОВЕРКА ГОРЯЧИХ КАНАЛОВ =============
+                    
                     # ============= NEW: ПРОВЕРКИ ПЕРЕД ОТПРАВКОЙ =============
                     # 1. Проверка блэклиста для этого аккаунта
                     is_blacklisted, blacklist_reason = self.is_channel_blacklisted_for_account(phone, username)
@@ -11095,7 +11144,10 @@ class UltimateCommentBot:
                                     # 1. Записываем FloodWait в историю
                                     self.record_floodwait(phone, username, wait_seconds)
                                     
-                                    # 2. Если FloodWait > 60 секунд - прерываем работу этого воркера
+                                    # 2. ПОМЕЧАЕМ КАНАЛ КАК ГОРЯЧИЙ (избегаем 2 часа)
+                                    self.mark_channel_as_hot(username, phone, f"FloodWait {wait_seconds}s")
+                                    
+                                    # 3. Если FloodWait > 60 секунд - прерываем работу этого воркера
                                     # Система автоматически переключится на другой аккаунт
                                     if wait_seconds > 60:
                                         logger.error(
