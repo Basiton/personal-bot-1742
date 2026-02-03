@@ -677,7 +677,7 @@ class UltimateCommentBot:
         
         # Worker mode: 'cyclic' (all workers process all channels) or 'distributed' (channels divided)
         self.worker_mode = self.config.get('worker_mode', 'distributed')
-        self.max_cycles_per_worker = self.config.get('max_cycles_per_worker', 3)
+        self.max_cycles_per_worker = self.config.get('max_cycles_per_worker', 1)  # 1 цикл = ~2.5 часа → ротация
         
         # Worker tracking for automatic recovery
         self.active_worker_tasks = []  # Список активных воркеров
@@ -10701,7 +10701,8 @@ class UltimateCommentBot:
                     'channels': my_channels,
                     'mode': mode,
                     'total_workers': total_workers,
-                    'cycle_number': cycle_number
+                    'cycle_number': cycle_number,
+                    'current_channel_index': 0  # Будет обновляться в процессе
                 }
                 
                 logger.info("="*60)
@@ -10709,6 +10710,8 @@ class UltimateCommentBot:
                 logger.info(f"[{account_name}] Channels: {len(my_channels)}")
                 if max_cycles > 0:
                     logger.info(f"[{account_name}] Progress: {cycle_number}/{max_cycles} cycles")
+                else:
+                    logger.info(f"[{account_name}] Mode: Infinite (no auto-rotation)")
                 logger.info("="*60)
                 
                 # Check account status
@@ -10749,6 +10752,10 @@ class UltimateCommentBot:
                     # Get channel with offset
                     channel_idx = (start_offset + idx) % len(my_channels)
                     channel = my_channels[channel_idx]
+                    
+                    # Обновляем текущую позицию в слоте (для продолжения с этого места при замене)
+                    if worker_index in self.worker_slots:
+                        self.worker_slots[worker_index]['current_channel_index'] = channel_idx
                     
                     # Normalize channel
                     if isinstance(channel, dict):
