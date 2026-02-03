@@ -662,6 +662,12 @@ class UltimateCommentBot:
         # Hot channels - каналы с недавним FloodWait (избегаем на 2 часа)
         # {channel_username: {'timestamp': float, 'phone': str, 'reason': str}}
         self.hot_channels = {}
+        # История инцидентов по каналам для статистики
+        # {channel_username: [{'timestamp': float, 'phone': str, 'reason': str, 'cooldown_until': float, 'resolved': bool}, ...]}
+        self.channel_incidents = {}
+        # История инцидентов по аккаунтам - за что получил удар
+        # {phone: [{'timestamp': float, 'channel': str, 'reason': str, 'wait_seconds': int, 'action_taken': str}, ...]}
+        self.account_incidents = {}
         # Global delay multiplier (увеличивается при частых FloodWait)
         self.global_delay_multiplier = 1.0
         # ============= END NEW =============
@@ -1713,12 +1719,29 @@ class UltimateCommentBot:
     
     def mark_channel_as_hot(self, channel_username, phone, reason="FloodWait"):
         """Пометить канал как горячий (избегать 2 часа после FloodWait)"""
+        now = datetime.now().timestamp()
+        cooldown_until = now + (2 * 3600)  # 2 часа
+        
         self.hot_channels[channel_username] = {
-            'timestamp': datetime.now().timestamp(),
+            'timestamp': now,
             'phone': phone,
             'reason': reason
         }
-        logger.warning(f"🔥 Channel @{channel_username} marked as HOT (reason: {reason}, phone: {phone[-4:]})")
+        
+        # Сохраняем инцидент в историю
+        if channel_username not in self.channel_incidents:
+            self.channel_incidents[channel_username] = []
+        
+        self.channel_incidents[channel_username].append({
+            'timestamp': now,
+            'phone': phone,
+            'reason': reason,
+            'cooldown_until': cooldown_until,
+            'resolved': False
+        })
+        
+        logger.warning(f"🔥 Channel @{channel_username} marked as HOT (reason: {reason}, phone: {phone[-4:]})
+)
     
     def is_channel_hot(self, channel_username, cooldown_hours=2):
         """Проверить, является ли канал горячим (недавний FloodWait)"""
@@ -1734,10 +1757,34 @@ class UltimateCommentBot:
             remaining_minutes = int((cooldown_seconds - time_since_hot) / 60)
             return True, remaining_minutes
         else:
+            # Помечаем последний неразрешенный инцидент как resolved
+            if channel_username in self.channel_incidents and self.channel_incidents[channel_username]:
+                for incident in reversed(self.channel_incidents[channel_username]):
+                    if not incident['resolved']:
+                        incident['resolved'] = True
+                        break
+            
             # Прошло достаточно времени - убираем из горячих
             del self.hot_channels[channel_username]
             logger.info(f"❄️ Channel @{channel_username} cooled down, removed from hot list")
             return False, None
+    
+    def record_account_incident(self, phone, channel, reason, wait_seconds=0, action_taken=""):
+        """Записать инцидент для аккаунта (FloodWait, бан и т.д.)"""
+        if phone not in self.account_incidents:
+            self.account_incidents[phone] = []
+        
+        self.account_incidents[phone].append({
+            'timestamp': datetime.now().timestamp(),
+            'channel': channel,
+            'reason': reason,
+            'wait_seconds': wait_seconds,
+            'action_taken': action_taken
+        })
+        
+        # Ограничиваем историю последними 50 инцидентами
+        if len(self.account_incidents[phone]) > 50:
+            self.account_incidents[phone] = self.account_incidents[phone][-50:]
     
     async def add_comment_stat(self, phone, success=True, channel=None, error_message=None, admin_id=None):
         self.stats['total_comments'] += 1
@@ -1851,6 +1898,16 @@ class UltimateCommentBot:
     async def handle_account_ban(self, phone, reason):
         """Handle account ban by deactivating it and activating a reserve account"""
         logger.warning(f"🚫 Account ban detected: {phone} - {reason}")
+        
+        # Записываем инцидент бана
+        self.record_account_incident(
+            phone=phone,
+            channel="ALL_CHANNELS",
+            reason=f"Account banned: {reason}",
+            wait_seconds=0,
+            action_taken="marked_broken"
+        )
+        
         await self.replace_broken_account(phone, reason)
     
     async def block_channel(self, username, reason):
@@ -4790,6 +4847,8 @@ class UltimateCommentBot:
 `/showfails` - показать текущие неудачи
 `/showblacklist` - показать блэклист каналов для аккаунтов 🆕
 `/clearblacklist` - очистить блэклист 🆕
+`/incidents +79123456789` - история инцидентов аккаунта (FloodWait/баны) 🆕
+`/incidents all` - статистика по всем аккаунтам 🆕
 
 **🧪 ТЕСТОВЫЙ РЕЖИМ:**
 `/testmode` - статус тестового режима
@@ -6865,6 +6924,96 @@ class UltimateCommentBot:
             text += f"\n📈 Лимит: {self.messages_per_hour} msg/h на аккаунт"
             
             await event.respond(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/incidents'))
+        async def incidents_command(event):
+            """Показать историю инцидентов (FloodWait, баны) для аккаунта"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.respond("❌ Формат: `/incidents +79123456789` или `/incidents all`")
+                    return
+                
+                if parts[1].lower() == 'all':
+                    # Показываем статистику по всем аккаунтам
+                    text = "🚨 **ИСТОРИЯ ИНЦИДЕНТОВ (ВСЕ АККАУНТЫ):**\n\n"
+                    
+                    if not self.account_incidents:
+                        text += "✅ Нет зарегистрированных инцидентов"
+                    else:
+                        for phone, incidents in sorted(self.account_incidents.items(), key=lambda x: len(x[1]), reverse=True):
+                            name = self.accounts_data.get(phone, {}).get('name', phone[-4:])
+                            text += f"📱 **{name}** (`{phone[-4:]}`): {len(incidents)} инцидентов\n"
+                    
+                    await event.respond(text)
+                    return
+                
+                # Показываем инциденты конкретного аккаунта
+                phone = parts[1].strip()
+                
+                if phone not in self.accounts_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                account_name = self.accounts_data[phone].get('name', phone[-4:])
+                incidents = self.account_incidents.get(phone, [])
+                
+                text = f"🚨 **ИСТОРИЯ ИНЦИДЕНТОВ**\n"
+                text += f"📱 Аккаунт: **{account_name}** (`{phone[-4:]}`)\n"
+                text += f"📊 Всего инцидентов: {len(incidents)}\n\n"
+                
+                if not incidents:
+                    text += "✅ Нет зарегистрированных инцидентов"
+                else:
+                    # Показываем последние 20 инцидентов
+                    recent_incidents = incidents[-20:]
+                    
+                    for idx, incident in enumerate(reversed(recent_incidents), 1):
+                        timestamp = incident['timestamp']
+                        dt = datetime.fromtimestamp(timestamp)
+                        time_str = dt.strftime('%d.%m %H:%M')
+                        
+                        channel = incident['channel']
+                        reason = incident['reason']
+                        wait_sec = incident.get('wait_seconds', 0)
+                        action = incident.get('action_taken', '')
+                        
+                        text += f"{idx}. **{time_str}** - `@{channel}`\n"
+                        text += f"   ⚠️ {reason}\n"
+                        
+                        if wait_sec > 0:
+                            wait_min = wait_sec // 60
+                            text += f"   ⏱️ Ожидание: {wait_min}м {wait_sec % 60}с\n"
+                        
+                        if action:
+                            action_text = {
+                                'marked_hot': '🔥 Канал помечен HOT',
+                                'worker_stopped': '⛔ Воркер остановлен',
+                                'marked_broken': '🔴 Аккаунт помечен BROKEN'
+                            }.get(action, action)
+                            text += f"   🔧 Действие: {action_text}\n"
+                        
+                        text += "\n"
+                    
+                    if len(incidents) > 20:
+                        text += f"_(Показаны последние 20 из {len(incidents)})_\n\n"
+                    
+                    # Статистика
+                    floodwaits = sum(1 for i in incidents if 'FloodWait' in i['reason'])
+                    bans = sum(1 for i in incidents if 'banned' in i['reason'].lower())
+                    
+                    text += f"📊 **Статистика:**\n"
+                    text += f"  • FloodWait: {floodwaits}\n"
+                    text += f"  • Баны: {bans}\n"
+                
+                await event.respond(text)
+                
+            except Exception as e:
+                logger.error(f"Incidents command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)}")
+        
         # ============= END NEW COMMANDS =============
         
         @self.bot_client.on(events.NewMessage(pattern='/addchannel'))
@@ -11144,7 +11293,16 @@ class UltimateCommentBot:
                                     # 1. Записываем FloodWait в историю
                                     self.record_floodwait(phone, username, wait_seconds)
                                     
-                                    # 2. ПОМЕЧАЕМ КАНАЛ КАК ГОРЯЧИЙ (избегаем 2 часа)
+                                    # 2. ЗАПИСЫВАЕМ ИНЦИДЕНТ ДЛЯ АККАУНТА (статистика)
+                                    self.record_account_incident(
+                                        phone=phone,
+                                        channel=username,
+                                        reason=f"FloodWait {wait_seconds}s",
+                                        wait_seconds=wait_seconds,
+                                        action_taken="marked_hot" if wait_seconds <= 60 else "worker_stopped"
+                                    )
+                                    
+                                    # 3. ПОМЕЧАЕМ КАНАЛ КАК ГОРЯЧИЙ (избегаем 2 часа)
                                     self.mark_channel_as_hot(username, phone, f"FloodWait {wait_seconds}s")
                                     
                                     # 3. Если FloodWait > 60 секунд - прерываем работу этого воркера
