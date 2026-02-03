@@ -1740,8 +1740,7 @@ class UltimateCommentBot:
             'resolved': False
         })
         
-        logger.warning(f"🔥 Channel @{channel_username} marked as HOT (reason: {reason}, phone: {phone[-4:]})
-)
+        logger.warning(f"🔥 Channel @{channel_username} marked as HOT (reason: {reason}, phone: {phone[-4:]})")
     
     def is_channel_hot(self, channel_username, cooldown_hours=2):
         """Проверить, является ли канал горячим (недавний FloodWait)"""
