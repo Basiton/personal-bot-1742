@@ -905,11 +905,24 @@ class UltimateCommentBot:
     def load_data(self):
         """
         Загружает данные БЕЗОПАСНО - не перезаписывает при ошибках.
+        Автоматически мигрирует из старой структуры 'accounts' в 'accounts_data'.
         """
         try:
             with open(DB_NAME, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                self.accounts_data = data.get('accounts', {})
+                
+                # МИГРАЦИЯ: Если есть старая структура 'accounts', используем её
+                # Новая структура 'accounts_data' имеет приоритет
+                if 'accounts_data' in data and data['accounts_data']:
+                    self.accounts_data = data['accounts_data']
+                    logger.info(f"✅ Loading from new structure 'accounts_data'")
+                elif 'accounts' in data and data['accounts']:
+                    self.accounts_data = data['accounts']
+                    logger.warning(f"⚠️ Loading from OLD structure 'accounts' - will migrate on save")
+                else:
+                    self.accounts_data = {}
+                    logger.warning(f"⚠️ No accounts found in data file")
+                
                 self.channels = data.get('channels', [])
                 self.templates = data.get('templates', self.templates)
                 self.bio_links = data.get('bio_links', [])
@@ -939,9 +952,10 @@ class UltimateCommentBot:
         """
         Сохраняет данные с атомарной записью и автоматическим бэкапом.
         БЕЗОПАСНО: создаёт бэкап перед каждым сохранением.
+        Использует НОВУЮ структуру 'accounts_data' (старая 'accounts' больше не сохраняется).
         """
         data = {
-            'accounts': self.accounts_data,
+            'accounts_data': self.accounts_data,  # НОВАЯ структура
             'channels': self.channels,
             'templates': self.templates,
             'bio_links': self.bio_links,
@@ -1079,29 +1093,33 @@ class UltimateCommentBot:
                 accounts_to_normalize[phone] = new_phone
                 data['phone'] = new_phone
             
+            # МИГРАЦИЯ: Удаляем старое поле 'active' если оно есть (конфликт со 'status')
+            if 'active' in data:
+                old_active = data.pop('active')  # Удаляем и получаем значение
+                logger.info(f"🔄 Удалено старое поле 'active={old_active}' для {data.get('name', phone)}")
+            
             # Если у аккаунта нет статуса, присваиваем его
-            if 'status' not in data:
-                # МИГРАЦИЯ из старого формата (active: True/False)
-                old_active = data.get('active', False)
-                
-                if old_active and data.get('session') and active_count < self.max_parallel_accounts:
-                    # Если был active=True и есть сессия, делаем reserve (безопасно)
-                    # Пользователь сам активирует через /toggleaccount если нужно
+            if 'status' not in data or not data['status']:
+                # Определяем статус на основе наличия сессии
+                if data.get('session'):
+                    # Есть сессия - делаем reserve (безопасно, пользователь сам активирует)
                     data['status'] = ACCOUNT_STATUS_RESERVE
                     migrated_count += 1
-                    logger.info(f"🔄 Миграция {data.get('name', phone)}: active=True → status=reserve")
-                elif data.get('session'):
-                    data['status'] = ACCOUNT_STATUS_RESERVE
-                    migrated_count += 1
+                    logger.info(f"🔄 Миграция {data.get('name', phone)}: пустой статус → reserve")
                 else:
+                    # Нет сессии - broken
                     data['status'] = ACCOUNT_STATUS_BROKEN
                     logger.warning(f"⚠️ {phone}: нет сессии, помечен как broken")
-                
-                # Удаляем старое поле 'active' если оно есть
-                if 'active' in data:
-                    del data['active']
+                    migrated_count += 1
             elif data['status'] == ACCOUNT_STATUS_ACTIVE:
                 active_count += 1
+            
+            # Проверяем корректность статуса
+            valid_statuses = [ACCOUNT_STATUS_ACTIVE, ACCOUNT_STATUS_RESERVE, ACCOUNT_STATUS_BROKEN]
+            if data['status'] not in valid_statuses:
+                logger.warning(f"⚠️ {phone}: неизвестный статус '{data['status']}', изменён на reserve")
+                data['status'] = ACCOUNT_STATUS_RESERVE
+                migrated_count += 1
             
             # Инициализируем структуру отслеживания активности
             current_phone = accounts_to_normalize.get(phone, phone)
