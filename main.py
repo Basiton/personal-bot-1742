@@ -9715,7 +9715,7 @@ class UltimateCommentBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/showfails'))
         async def show_fails(event):
-            """Show current channel failure attempts"""
+            """Show current channel failure attempts with detailed info"""
             if not await self.is_admin(event.sender_id): return
             
             try:
@@ -9733,34 +9733,96 @@ class UltimateCommentBot:
                 text = f"⚠️ **НЕУДАЧНЫЕ ПОПЫТКИ КОММЕНТИРОВАНИЯ**\n\n"
                 text += f"Всего каналов с проблемами: {len(sorted_channels)}\n\n"
                 
-                # Show top 20 problematic channels
-                for i, (channel, failures) in enumerate(sorted_channels[:20], 1):
+                # Статистика hot channels
+                hot_count = len(self.hot_channels)
+                if hot_count > 0:
+                    text += f"🔥 Горячих каналов (блокировка 2ч): {hot_count}\n\n"
+                
+                # Show top 15 problematic channels with details
+                for i, (channel, failures) in enumerate(sorted_channels[:15], 1):
                     display_name = channel if channel.startswith('@') else '@' + channel
                     
                     # Count persistent failures (3+ times)
                     persistent = sum(1 for data in failures.values() if data['count'] >= 3)
                     total_accounts = len(failures)
                     
-                    text += f"{i}. {display_name}\n"
-                    text += f"   📊 {total_accounts} аккаунтов | 🔴 {persistent} стабильных неудач\n"
+                    text += f"{i}. **{display_name}**\n"
+                    text += f"   📊 Аккаунтов с проблемами: {total_accounts} | 🔴 Стабильных неудач: {persistent}\n"
                     
                     # Show most common reason
                     all_reasons = []
                     for data in failures.values():
                         all_reasons.extend(data['reasons'])
                     if all_reasons:
-                        most_common = max(set(all_reasons), key=all_reasons.count)
-                        text += f"   ⚠️ {most_common}\n"
+                        reason_counts = {}
+                        for r in all_reasons:
+                            reason_counts[r] = reason_counts.get(r, 0) + 1
+                        sorted_reasons = sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)
+                        
+                        # Показываем топ-2 причины
+                        for reason, count in sorted_reasons[:2]:
+                            text += f"   ⚠️ {reason} ({count}x)\n"
+                    
+                    # Проверяем hot status
+                    if channel in self.hot_channels:
+                        hot_info = self.hot_channels[channel]
+                        cooldown_minutes = int((hot_info['timestamp'] + 2*3600 - datetime.now().timestamp()) / 60)
+                        if cooldown_minutes > 0:
+                            text += f"   🔥 HOT (разблокировка через {cooldown_minutes}м)\n"
+                    
+                    # Показываем аккаунты с наибольшими проблемами
+                    problematic_accounts = sorted(
+                        failures.items(),
+                        key=lambda x: x[1]['count'],
+                        reverse=True
+                    )[:3]
+                    
+                    if problematic_accounts:
+                        text += f"   👥 Проблемные аккаунты: "
+                        acc_names = []
+                        for phone, data in problematic_accounts:
+                            name = self.accounts_data.get(phone, {}).get('name', phone[-4:])
+                            count = data['count']
+                            acc_names.append(f"{name}({count})")
+                        text += ", ".join(acc_names)
+                        text += "\n"
+                    
+                    # Последняя попытка
+                    last_timestamp = max(data['last_attempt'] for data in failures.values())
+                    time_ago = int((datetime.now().timestamp() - last_timestamp) / 60)
+                    if time_ago < 60:
+                        text += f"   🕐 Последняя попытка: {time_ago}м назад\n"
+                    else:
+                        hours_ago = time_ago // 60
+                        text += f"   🕐 Последняя попытка: {hours_ago}ч назад\n"
+                    
                     text += "\n"
                 
-                if len(sorted_channels) > 20:
-                    text += f"... и еще {len(sorted_channels) - 20} каналов\n\n"
+                if len(sorted_channels) > 15:
+                    text += f"... и еще {len(sorted_channels) - 15} каналов\n\n"
                 
-                text += f"💡 Используйте `/resetfails` чтобы очистить счетчики"
+                # Рекомендации
+                text += f"💡 **Рекомендации:**\n"
+                
+                # Каналы для удаления
+                channels_to_remove = [ch for ch, fails in sorted_channels 
+                                     if len(fails) >= 3 and 
+                                     sum(1 for d in fails.values() if d['count'] >= 3) >= 2]
+                if channels_to_remove:
+                    text += f"🗑️ Удалить безнадежные: {len(channels_to_remove)} каналов\n"
+                
+                # Hot channels
+                if hot_count > 0:
+                    text += f"⏳ Ждать разблокировки hot: {hot_count} каналов\n"
+                
+                text += f"🔄 `/resetfails` - очистить счетчики\n"
+                text += f"📊 `/incidents all` - история всех инцидентов"
                 
                 await event.respond(text)
             except Exception as e:
                 logger.error(f"Show fails error: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 await event.respond(f"❌ Ошибка: {str(e)[:100]}")
         
         @self.bot_client.on(events.NewMessage(pattern='/showblacklist'))
