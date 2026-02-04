@@ -1785,6 +1785,82 @@ class UltimateCommentBot:
         if len(self.account_incidents[phone]) > 50:
             self.account_incidents[phone] = self.account_incidents[phone][-50:]
     
+    async def check_spam_status(self, phone, account_data):
+        """Проверить статус ограничений аккаунта через @SpamBot"""
+        client = None
+        try:
+            account_name = account_data.get('name', phone[-4:])
+            
+            # Создаем клиент
+            session_string = account_data.get('session')
+            if not session_string:
+                return f"❌ **{account_name}**: нет сессии"
+            
+            proxy = account_data.get('proxy')
+            client = TelegramClient(
+                StringSession(session_string),
+                API_ID,
+                API_HASH,
+                proxy=proxy
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                return f"❌ **{account_name}**: не авторизован"
+            
+            # Получаем @SpamBot
+            try:
+                spambot = await client.get_entity('SpamBot')
+            except Exception as e:
+                return f"❌ **{account_name}**: не удалось найти @SpamBot: {str(e)}"
+            
+            # Отправляем /start
+            await client.send_message(spambot, '/start')
+            
+            # Ждем ответ (обычно приходит сразу)
+            response = None
+            async for message in client.iter_messages(spambot, limit=1):
+                response = message.text
+                break
+            
+            await asyncio.sleep(1)  # Даем время на обработку
+            
+            # Получаем самое свежее сообщение
+            async for message in client.iter_messages(spambot, limit=1):
+                if message.date.timestamp() > (datetime.now().timestamp() - 10):
+                    response = message.text
+                    break
+            
+            await client.disconnect()
+            
+            if not response:
+                return f"⚠️ **{account_name}**: @SpamBot не ответил"
+            
+            # Анализируем ответ
+            text = f"📱 **{account_name}** (`{phone[-4:]}`)\n\n"
+            
+            if "Good news" in response or "not limited" in response.lower():
+                text += "✅ **НЕТ ОГРАНИЧЕНИЙ**\n\n"
+                text += "Аккаунт работает нормально"
+            elif "limited" in response.lower() or "restricted" in response.lower():
+                text += "⚠️ **ЕСТЬ ОГРАНИЧЕНИЯ**\n\n"
+                text += f"```\n{response}\n```"
+            else:
+                text += "📋 **Ответ от @SpamBot:**\n\n"
+                text += f"```\n{response}\n```"
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error checking spam status for {phone}: {e}")
+            if client:
+                try:
+                    await client.disconnect()
+                except:
+                    pass
+            return f"❌ **{account_data.get('name', phone[-4:])}**: ошибка проверки: {str(e)}"
+    
     async def add_comment_stat(self, phone, success=True, channel=None, error_message=None, admin_id=None):
         self.stats['total_comments'] += 1
         if success:
@@ -4863,6 +4939,8 @@ class UltimateCommentBot:
 `/clearblacklist` - очистить блэклист 🆕
 `/incidents +79123456789` - история инцидентов аккаунта (FloodWait/баны) 🆕
 `/incidents all` - статистика по всем аккаунтам 🆕
+`/checkspam +79123456789` - проверить ограничения через @SpamBot 🆕
+`/checkspam all` - проверить все BROKEN аккаунты 🆕
 
 **🧪 ТЕСТОВЫЙ РЕЖИМ:**
 `/testmode` - статус тестового режима
@@ -7026,6 +7104,64 @@ class UltimateCommentBot:
                 
             except Exception as e:
                 logger.error(f"Incidents command error: {e}")
+                await event.respond(f"❌ Ошибка: {str(e)}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/checkspam'))
+        async def checkspam_command(event):
+            """Проверить статус ограничений через @SpamBot"""
+            if not await self.is_admin(event.sender_id): return
+            
+            try:
+                parts = event.text.split()
+                if len(parts) < 2:
+                    await event.respond(
+                        "❌ Формат: `/checkspam +79123456789` или `/checkspam all`\n\n"
+                        "Проверяет статус ограничений аккаунта через @SpamBot"
+                    )
+                    return
+                
+                if parts[1].lower() == 'all':
+                    # Проверяем все BROKEN аккаунты
+                    broken_accounts = [(phone, data) for phone, data in self.accounts_data.items() 
+                                     if data.get('status') == ACCOUNT_STATUS_BROKEN and data.get('session')]
+                    
+                    if not broken_accounts:
+                        await event.respond("✅ Нет аккаунтов со статусом BROKEN")
+                        return
+                    
+                    await event.respond(f"🔍 Проверяю {len(broken_accounts)} broken аккаунтов через @SpamBot...")
+                    
+                    for phone, data in broken_accounts:
+                        name = data.get('name', phone[-4:])
+                        await event.respond(f"📱 Проверяю **{name}**...")
+                        
+                        spam_status = await self.check_spam_status(phone, data)
+                        await event.respond(spam_status)
+                        
+                        await asyncio.sleep(2)  # Задержка между проверками
+                    
+                    return
+                
+                # Проверяем конкретный аккаунт
+                phone = parts[1].strip()
+                
+                if phone not in self.accounts_data:
+                    await event.respond(f"❌ Аккаунт `{phone}` не найден")
+                    return
+                
+                data = self.accounts_data[phone]
+                if not data.get('session'):
+                    await event.respond(f"❌ Аккаунт `{phone}` не авторизован")
+                    return
+                
+                name = data.get('name', phone[-4:])
+                await event.respond(f"🔍 Проверяю **{name}** через @SpamBot...")
+                
+                spam_status = await self.check_spam_status(phone, data)
+                await event.respond(spam_status)
+                
+            except Exception as e:
+                logger.error(f"Checkspam command error: {e}")
                 await event.respond(f"❌ Ошибка: {str(e)}")
         
         # ============= END NEW COMMANDS =============
