@@ -1989,16 +1989,13 @@ class UltimateCommentBot:
             # Обновляем время последней ротации
             self.last_rotation_time = datetime.now().timestamp()
 
-            # Уведомляем владельца
+            # Уведомляем владельца (компактно)
             try:
                 deactivated_names = ", ".join([data.get('name', phone) for phone, data in accounts_to_deactivate])
                 activated_names = ", ".join([data.get('name', phone) for phone, data in accounts_to_activate])
                 await self.bot_client.send_message(
                     BOT_OWNER_ID,
-                    f"🔄 **Ротация аккаунтов выполнена**\n\n"
-                    f"📤 В резерв: {deactivated_names}\n"
-                    f"📥 Активированы: {activated_names}\n\n"
-                    f"📊 Текущее состояние: {self.get_status_counts()}"
+                    f"🔄 Ротация: {deactivated_names} → резерв | {activated_names} → активные"
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner about rotation: {notify_err}")
@@ -2108,14 +2105,12 @@ class UltimateCommentBot:
             logger.info(f"✅ Activated next reserve account: {reserve_name} ({reserve_phone})")
             logger.info(f"📊 Current status: {self.get_status_counts()}")
 
-            # Уведомляем владельца
+            # Уведомляем владельца (компактно)
             try:
+                status = self.get_status_counts()
                 await self.bot_client.send_message(
                     BOT_OWNER_ID,
-                    f"🔄 **Ротация: активирован новый аккаунт**\n\n"
-                    f"✅ Активирован: `{reserve_name}` ({reserve_phone})\n"
-                    f"📊 Состояние: {self.get_status_counts()}\n\n"
-                    f"💡 Новый воркер запустится автоматически"
+                    f"✅ Активирован: {reserve_name} | А:{status.get('active',0)} Р:{status.get('reserve',0)}"
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner: {notify_err}")
@@ -2210,17 +2205,11 @@ class UltimateCommentBot:
             logger.info(f"✅ Replacement worker launched: {task.get_name()} (id={id(task)})")
             logger.info(f"📊 Total active workers: {len(self.active_worker_tasks)}")
             
-            # Уведомляем владельца
+            # Уведомляем владельца (компактное сообщение)
             try:
                 await self.bot_client.send_message(
                     BOT_OWNER_ID,
-                    f"🔄 **Горячая замена worker'а**\n\n"
-                    f"Слот: `{worker_index}`\n"
-                    f"Новый аккаунт: `{account_name}`\n"
-                    f"Каналов (осиротевших): `{len(orphaned_channels)}`\n"
-                    f"Всего воркеров: `{current_total_workers}`\n"
-                    f"Режим: `{mode}`\n\n"
-                    f"✅ Worker продолжит с тех каналов, где остановился предыдущий"
+                    f"🔄 Замена: слот {worker_index} → {account_name} | {len(orphaned_channels)} каналов | воркеров: {current_total_workers}"
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner: {notify_err}")
@@ -2248,21 +2237,47 @@ class UltimateCommentBot:
             active_slots = {idx: slot for idx, slot in self.worker_slots.items() 
                           if idx != empty_slot_index and slot.get('phone')}
             
+            # КРИТИЧНО: Проверяем реальные живые воркеры, а не только слоты!
+            alive_workers = sum(1 for task in self.active_worker_tasks if not task.done())
+            
+            logger.info(f"📊 Worker status:")
+            logger.info(f"   Active slots: {len(active_slots)}")
+            logger.info(f"   Alive workers: {alive_workers}")
+            
             if not active_slots:
-                logger.error(f"❌ No active workers to redistribute channels to!")
-                # Уведомляем владельца о критической ситуации
-                try:
-                    await self.bot_client.send_message(
-                        BOT_OWNER_ID,
-                        f"🚨 **КРИТИЧЕСКАЯ СИТУАЦИЯ**\n\n"
-                        f"❌ Нет активных workers!\n"
-                        f"📢 Каналов без обработки: {len(orphaned_channels)}\n\n"
-                        f"⚠️ Добавьте резервные аккаунты СРОЧНО!\n"
-                        f"💡 Или остановите и перезапустите мониторинг"
-                    )
-                except:
-                    pass
-                return
+                # Проверяем, есть ли на самом деле живые воркеры
+                if alive_workers > 0:
+                    logger.warning(f"⚠️ No active slots BUT {alive_workers} workers are alive!")
+                    logger.warning(f"   This is likely a temporary state during rotation")
+                    logger.warning(f"   Waiting 3 seconds for slots to be populated...")
+                    await asyncio.sleep(3)
+                    
+                    # Перепроверяем после задержки
+                    active_slots = {idx: slot for idx, slot in self.worker_slots.items() 
+                                  if idx != empty_slot_index and slot.get('phone')}
+                    
+                    if active_slots:
+                        logger.info(f"✅ Slots populated after wait: {len(active_slots)} slots found")
+                        # Продолжаем нормальную обработку ниже
+                    else:
+                        logger.error(f"❌ Still no active slots after wait, but workers exist")
+                        logger.error(f"   This indicates worker_slots desync!")
+                        return
+                else:
+                    # Действительно критическая ситуация - нет ни слотов, ни воркеров
+                    logger.error(f"❌ CRITICAL: No active workers AND no active slots!")
+                    try:
+                        await self.bot_client.send_message(
+                            BOT_OWNER_ID,
+                            f"🚨 **КРИТИЧЕСКАЯ СИТУАЦИЯ**\n\n"
+                            f"❌ Нет активных workers!\n"
+                            f"📢 Каналов без обработки: {len(orphaned_channels)}\n\n"
+                            f"⚠️ Добавьте резервные аккаунты СРОЧНО!\n"
+                            f"💡 Или остановите и перезапустите мониторинг"
+                        )
+                    except:
+                        pass
+                    return
             
             # Распределяем каналы равномерно между активными workers
             channels_per_worker = len(orphaned_channels) // len(active_slots)
@@ -2304,21 +2319,11 @@ class UltimateCommentBot:
             logger.info(f"   Channels redistributed: {channel_index}/{len(orphaned_channels)}")
             logger.info("="*80)
             
-            # Уведомляем владельца
+            # Уведомляем владельца (компактно)
             try:
-                redistribution_details = "\n".join([
-                    f"• Slot {idx}: {len(slot.get('channels', []))} каналов"
-                    for idx, slot in self.worker_slots.items()
-                ])
-                
                 await self.bot_client.send_message(
                     BOT_OWNER_ID,
-                    f"🔄 **Каналы перераспределены**\n\n"
-                    f"❌ Пустой слот: {empty_slot_index}\n"
-                    f"📢 Осиротевших каналов: {len(orphaned_channels)}\n\n"
-                    f"✅ Перераспределено между {len(self.worker_slots)} workers:\n"
-                    f"{redistribution_details}\n\n"
-                    f"💡 Рекомендация: добавьте резервные аккаунты"
+                    f"📊 Перераспределение: {len(orphaned_channels)} каналов → {len(self.worker_slots)} воркеров"
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner: {notify_err}")
@@ -2478,13 +2483,12 @@ class UltimateCommentBot:
             
             logger.info("✅ Monitoring restarted successfully")
             
-            # Уведомляем владельца
+            # Уведомляем владельца (компактно)
             try:
+                status = self.get_status_counts()
                 await self.bot_client.send_message(
                     BOT_OWNER_ID,
-                    f"✅ **Мониторинг перезапущен**\n\n"
-                    f"🚀 Новые воркеры запущены с обновлённым составом аккаунтов\n"
-                    f"📊 Состояние: {self.get_status_counts()}"
+                    f"✅ Мониторинг перезапущен | активных: {status.get('active', 0)} | резервных: {status.get('reserve', 0)}"
                 )
             except Exception as notify_err:
                 logger.error(f"Failed to notify owner: {notify_err}")
@@ -2581,24 +2585,35 @@ class UltimateCommentBot:
                             # Продолжаем нормальную логику восстановления ниже
                     # ============= END УЛУЧШЕНИЕ =============
                     
+                    # Проверяем, не временное ли это состояние (воркеры в процессе запуска)
+                    logger.info(f"⏳ Waiting 3 seconds to verify worker count issue...")
+                    await asyncio.sleep(3)
+                    
+                    # Повторная проверка
+                    alive_workers_recheck = sum(1 for task in self.active_worker_tasks if not task.done())
+                    
+                    if alive_workers_recheck >= expected_workers:
+                        logger.info(f"✅ False alarm: workers restored to {alive_workers_recheck}/{expected_workers}")
+                        continue
+                    
                     logger.warning("="*80)
                     logger.warning(f"⚠️ WORKER COUNT MISMATCH DETECTED!")
                     logger.warning(f"   Expected: {expected_workers} workers")
-                    logger.warning(f"   Running: {alive_workers} workers")
-                    logger.warning(f"   Missing: {expected_workers - alive_workers} workers")
+                    logger.warning(f"   Running: {alive_workers_recheck} workers")
+                    logger.warning(f"   Missing: {expected_workers - alive_workers_recheck} workers")
                     logger.warning("="*80)
                     
                     if self.worker_recovery_enabled:
                         logger.info("🔄 Initiating automatic recovery...")
                         
-                        # Уведомляем владельца
+                        # Уведомляем владельца ТОЛЬКО ЕСЛИ ДЕЙСТВИТЕЛЬНО ПРОБЛЕМА
                         try:
                             await self.bot_client.send_message(
                                 BOT_OWNER_ID,
                                 f"⚠️ **Обнаружена проблема с воркерами**\n\n"
                                 f"Ожидается: {expected_workers}\n"
-                                f"Работает: {alive_workers}\n"
-                                f"Недостаёт: {expected_workers - alive_workers}\n\n"
+                                f"Работает: {alive_workers_recheck}\n"
+                                f"Недостаёт: {expected_workers - alive_workers_recheck}\n\n"
                                 f"🔄 Автоматическое восстановление через 10 секунд"
                             )
                         except:
@@ -11311,18 +11326,8 @@ class UltimateCommentBot:
                                             f"⚠️ [{account_name}] FloodWait слишком долгий ({wait_seconds}s), "
                                             f"прерываю worker для переключения на другой аккаунт"
                                         )
-                                        # Уведомляем владельца
-                                        try:
-                                            await self.bot_client.send_message(
-                                                BOT_OWNER_ID,
-                                                f"⚠️ **FloodWait обнаружен**\n\n"
-                                                f"Аккаунт: `{account_name}`\n"
-                                                f"Канал: @{username}\n"
-                                                f"Время ожидания: {wait_seconds}s\n\n"
-                                                f"🔄 Переключаюсь на другой аккаунт"
-                                            )
-                                        except:
-                                            pass
+                                        # FloodWait > 60s - это нормально, уведомление не требуется
+                                        # Инциденты сохраняются в account_incidents для /incidents
                                         
                                         # Прерываем цикл - система запустит другой аккаунт
                                         break
