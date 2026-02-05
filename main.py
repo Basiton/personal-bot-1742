@@ -3722,6 +3722,24 @@ class UltimateCommentBot:
 
         return f"@{name.upper()}"
 
+    def _get_channel_username_normalized(self, channel):
+        """
+        Извлекает и нормализует username из channel объекта.
+        channel может быть словарем {'username': '@channel'} или строкой '@channel'
+        Возвращает нормализованный username БЕЗ @ и в нижнем регистре
+        """
+        if isinstance(channel, dict):
+            username = channel.get('username') or channel.get('name')
+        else:
+            username = str(channel)
+        
+        if not username:
+            return None
+        
+        # Нормализуем: убираем @, приводим к нижнему регистру, оставляем только允许 символы
+        username = str(username).strip().lstrip('@').lower()
+        return username if username else None
+
     def _find_channel_in_list(self, username_norm, entity_id=None):
         """Ищет канал в self.channels по username или id. Возвращает (index, data) или (None, None)."""
         if not self.channels:
@@ -11528,10 +11546,12 @@ class UltimateCommentBot:
                             await self.add_comment_stat(phone, True, channel=username)
                             
                             # ============= НОВОЕ: Обновление прогресса =============
-                            if username not in self.commenting_progress.get('processed_channels', []):
+                            # Нормализуем username для сохранения прогресса (приводим к нижнему регистру)
+                            username_normalized = username.lower() if username else username
+                            if username_normalized not in self.commenting_progress.get('processed_channels', []):
                                 if 'processed_channels' not in self.commenting_progress:
                                     self.commenting_progress['processed_channels'] = []
-                                self.commenting_progress['processed_channels'].append(username)
+                                self.commenting_progress['processed_channels'].append(username_normalized)
                                 self.commenting_progress['last_update'] = datetime.now().timestamp()
                                 
                                 # Сохраняем прогресс каждые 10 каналов или раз в 5 минут
@@ -11898,13 +11918,18 @@ class UltimateCommentBot:
             logger.info("="*80)
             logger.info(f"📊 Обработано ранее: {len(processed_channels)} каналов")
             
-            # Убираем уже обработанные каналы
-            remaining_channels = [ch for ch in channels_copy if ch not in processed_channels]
+            # Убираем уже обработанные каналы (ИСПРАВЛЕНО: правильное сравнение)
+            processed_channels_normalized = set(processed_channels)  # Для быстрого поиска
+            remaining_channels = [
+                ch for ch in channels_copy 
+                if self._get_channel_username_normalized(ch) not in processed_channels_normalized
+            ]
             
             if remaining_channels:
                 # Продолжаем с оставшихся
                 channels_copy = remaining_channels
                 logger.info(f"✅ Продолжаем с {len(channels_copy)} необработанных каналов")
+                logger.info(f"📊 Пропущено обработанных: {len(processed_channels)} каналов")
             else:
                 # Все каналы обработаны - начинаем новый цикл
                 logger.info(f"✅ Все каналы обработаны! Начинаем новый цикл")
