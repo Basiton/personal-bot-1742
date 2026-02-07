@@ -946,6 +946,12 @@ class UltimateCommentBot:
         # {'processed_channels': ['channel1', 'channel2', ...], 'last_channel_index': 42}
         # ============= END ПРОГРЕСС =============
         
+        # ============= ФИКСАЦИЯ СЛОТОВ ЗА ТЕЛЕФОНАМИ =============
+        # Чтобы аккаунты не "прыгали" между слотами при ротации
+        self.phone_to_slot = {}  # {phone: slot_index} - закрепление слотов
+        self.next_free_slot = 0  # Следующий свободный слот для назначения
+        # ============= END ФИКСАЦИЯ СЛОТОВ =============
+        
         # ============= TEST MODE (из конфига) =============
         self.test_mode = self.config.get('test_mode', False)
         self.test_channels = self.config.get('test_channels', [])
@@ -1927,7 +1933,30 @@ class UltimateCommentBot:
             'timestamp': current_time
         }
     
-    def can_account_comment_in_channel(self, phone, channel):
+    def get_adaptive_interval(self, channel_members=None):
+        """Адаптивный интервал между комментами своих аккаунтов в зависимости от размера канала
+        
+        Args:
+            channel_members: количество участников канала (None если неизвестно)
+        
+        Returns:
+            tuple: (min_interval, max_interval) в секундах
+        """
+        if channel_members is None:
+            # Если размер неизвестен - используем средние значения
+            return (MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS, MAX_INTERVAL_BETWEEN_OWN_ACCOUNTS)
+        
+        # Маленький канал (<1000) - больше интервал (5-10 мин)
+        if channel_members < 1000:
+            return (300, 600)
+        # Средний канал (1K-10K) - стандартный интервал (3-7 мин)
+        elif channel_members < 10000:
+            return (MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS, MAX_INTERVAL_BETWEEN_OWN_ACCOUNTS)
+        # Большой канал (>10K) - меньше интервал (1-3 мин)
+        else:
+            return (60, 180)
+    
+    def can_account_comment_in_channel(self, phone, channel, channel_members=None, channel_members=None):
         """Проверить, может ли аккаунт комментировать в канале (защита от спама своими аккаунтами)"""
         if channel not in self.last_comment_per_channel:
             return True, 0
@@ -1941,9 +1970,10 @@ class UltimateCommentBot:
             current_time = datetime.now().timestamp()
             time_since_last = current_time - last_timestamp
             
-            # Случайный интервал между MIN и MAX для естественности
+            # Адаптивный интервал в зависимости от размера канала
             import random
-            required_interval = random.randint(MIN_INTERVAL_BETWEEN_OWN_ACCOUNTS, MAX_INTERVAL_BETWEEN_OWN_ACCOUNTS)
+            min_interval, max_interval = self.get_adaptive_interval(channel_members)
+            required_interval = random.randint(min_interval, max_interval)
             
             if time_since_last < required_interval:
                 wait_time = int(required_interval - time_since_last)
@@ -1977,18 +2007,46 @@ class UltimateCommentBot:
         logger.warning(f"🔥 Channel @{channel_username} marked as HOT (reason: {reason}, phone: {phone[-4:]})")
     
     def is_channel_hot(self, channel_username, cooldown_hours=2):
-        """Проверить, является ли канал горячим (недавний FloodWait)"""
+        """Проверить горячесть канала с постепенным возвращением в работу
+        
+        Returns:
+            tuple: (should_skip, reason_or_none)
+            - should_skip=True: полностью пропустить канал
+            - should_skip=False: можно попробовать
+            - reason: описание почему горячий или None
+        """
         if channel_username not in self.hot_channels:
             return False, None
         
         hot_info = self.hot_channels[channel_username]
         current_time = datetime.now().timestamp()
         time_since_hot = current_time - hot_info['timestamp']
-        cooldown_seconds = cooldown_hours * 3600
         
-        if time_since_hot < cooldown_seconds:
-            remaining_minutes = int((cooldown_seconds - time_since_hot) / 60)
-            return True, remaining_minutes
+        # Умная очередь с постепенным возвратом:
+        # 0-30 мин: полный пропуск
+        if time_since_hot < 1800:  # 30 минут
+            remaining_minutes = int((1800 - time_since_hot) / 60)
+            return True, f"Hot (full skip, {remaining_minutes}m left)"
+        
+        # 30-60 мин: осторожное возвращение (1 раз в 3 попытки)
+        elif time_since_hot < 3600:  # 1 час
+            import random
+            if random.random() < 0.33:  # 33% шанс попробовать
+                logger.info(f"⚠️ @{channel_username} в периоде осторожного возврата (30-60мин), пробуем")
+                return False, None
+            else:
+                return True, "Cautious period (30-60m)"
+        
+        # 60-120 мин: частичное возвращение (1 раз в 2 попытки)
+        elif time_since_hot < cooldown_hours * 3600:  # 2 часа
+            import random
+            if random.random() < 0.5:  # 50% шанс
+                logger.info(f"⚠️ @{channel_username} в периоде частичного возврата (1-2ч), пробуем")
+                return False, None
+            else:
+                return True, "Partial return (1-2h)"
+        
+        # >2 часа: полностью остыл
         else:
             # Помечаем последний неразрешенный инцидент как resolved
             if channel_username in self.channel_incidents and self.channel_incidents[channel_username]:
@@ -1999,7 +2057,7 @@ class UltimateCommentBot:
             
             # Прошло достаточно времени - убираем из горячих
             del self.hot_channels[channel_username]
-            logger.info(f"❄️ Channel @{channel_username} cooled down, removed from hot list")
+            logger.info(f"❄️ Channel @{channel_username} fully cooled down (>2h), removed from hot list")
             return False, None
     
     def record_account_incident(self, phone, channel, reason, wait_seconds=0, action_taken=""):
@@ -2327,6 +2385,23 @@ class UltimateCommentBot:
         if time_since_rotation >= self.rotation_interval:
             logger.info(f"⏰ Rotation interval reached ({time_since_rotation:.0f}s >= {self.rotation_interval}s)")
             await self.rotate_accounts()
+    
+    def get_or_assign_slot(self, phone):
+        """Получить закреплённый слот для телефона или назначить новый
+        
+        Это гарантирует что один и тот же аккаунт всегда получает один и тот же slot_index,
+        независимо от порядка в списке активных аккаунтов.
+        """
+        if phone in self.phone_to_slot:
+            return self.phone_to_slot[phone]
+        
+        # Назначаем следующий свободный слот
+        slot = self.next_free_slot
+        self.phone_to_slot[phone] = slot
+        self.next_free_slot += 1
+        
+        logger.info(f"📌 Закрепляем {phone[-10:]} за slot {slot}")
+        return slot
     
     def initialize_slot_channels(self, channels_list, num_slots, mode='distributed'):
         """Инициализация распределения каналов по СЛОТАМ воркеров
@@ -11581,10 +11656,10 @@ class UltimateCommentBot:
                     
                     # ============= NEW: ПРОВЕРКА ГОРЯЧИХ КАНАЛОВ =============
                     # Проверяем, не является ли канал "горячим" (недавний FloodWait)
-                    is_hot, cooldown_minutes = self.is_channel_hot(username)
-                    if is_hot:
+                    should_skip, hot_reason = self.is_channel_hot(username)
+                    if should_skip:
                         logger.info(
-                            f"[{account_name}] 🔥 @{username} is HOT (cooldown: {cooldown_minutes} min), skipping"
+                            f"[{account_name}] 🔥 @{username} is HOT ({hot_reason}), skipping"
                         )
                         continue
                     # ============= END ПРОВЕРКА ГОРЯЧИХ КАНАЛОВ =============
@@ -11606,10 +11681,18 @@ class UltimateCommentBot:
                         continue
                     # ============= END NEW =============
                     
-                    # Anti-spam protection
-                    can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username)
+                    # Anti-spam protection с адаптивным интервалом
+                    # Пытаемся получить размер канала для адаптивного интервала
+                    channel_members = None
+                    if channel_entity and hasattr(channel_entity, 'participants_count'):
+                        channel_members = channel_entity.participants_count
+                    
+                    can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username, channel_members)
                     if not can_comment:
-                        logger.info(f"[{account_name}] @{username} recently commented, skipping")
+                        if channel_members:
+                            logger.info(f"[{account_name}] @{username} recently commented (size: {channel_members}), skipping")
+                        else:
+                            logger.info(f"[{account_name}] @{username} recently commented, skipping")
                         continue
                     
                     # Initialize tracking
@@ -12324,14 +12407,18 @@ class UltimateCommentBot:
             logger.warning("⚠️ Or increase limit with /setparallel")
         
         for i, (phone, data) in enumerate(accounts_list):
-            # Give extra channels to first accounts if there's a remainder
+            # ============= ФИКСИРОВАННЫЙ SLOT ДЛЯ АККАУНТА =============
+            # Получаем закреплённый slot для этого телефона
+            # Это гарантирует что аккаунт всегда будет в одном и том же slot
+            fixed_slot = self.get_or_assign_slot(phone)
+            # ============= END ФИКСИРОВАННЫЙ SLOT =============
             
             logger.info(f"🔧 Creating worker #{i+1}/{len(accounts_list)} for [{data.get('name', phone)}]")
             logger.info(f"   Phone: {phone}")
+            logger.info(f"   Fixed Slot: {fixed_slot} (закреплён за этим аккаунтом)")
             logger.info(f"   Status: {data.get('status', 'unknown')}")
             logger.info(f"   Session: {'✅ EXISTS' if data.get('session') else '❌ MISSING'}")
-            logger.info(f"   Will process: ALL {len(channels_copy)} channels")
-            logger.info(f"   Offset: starts from channel #{(i % len(channels_copy)) + 1}")
+            logger.info(f"   Will process: channels from slot {fixed_slot}")
             
             # Задержка между созданием воркеров для избежания конфликтов
             if i > 0:
@@ -12339,12 +12426,11 @@ class UltimateCommentBot:
                 logger.info(f"⏳ Задержка {delay}s перед созданием воркера #{i+1}...")
                 await asyncio.sleep(delay)
             
-            # Create worker task for this account
-            # Create worker task - каждый воркер получает ВСЕ каналы
+            # Create worker task - используем ФИКСИРОВАННЫЙ slot а не позицию i
             task = asyncio.create_task(
-                self.account_worker(phone, data, channels_copy, i, len(accounts_list), mode=self.worker_mode)
+                self.account_worker(phone, data, channels_copy, fixed_slot, len(accounts_list), mode=self.worker_mode)
             )
-            task.set_name(f"worker_{i}_{phone[-10:]}")
+            task.set_name(f"worker_{fixed_slot}_{phone[-10:]}")
             tasks.append(task)
             self.active_worker_tasks.append(task)  # Отслеживаем для health check
             
