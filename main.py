@@ -91,11 +91,10 @@ ACCOUNT_STATUS_RESERVE = 'reserve'
 ACCOUNT_STATUS_BROKEN = 'broken'
 # ============= END RATE LIMITING & ROTATION SETTINGS =============
 
-# YandexGPT configuration from environment variables
-# Поддержка YC_API_KEY/YC_FOLDER_ID или старых названий
-YANDEX_API_KEY = os.getenv('YC_API_KEY') or os.getenv('YANDEX_API_KEY', '')
-YANDEX_FOLDER_ID = os.getenv('YC_FOLDER_ID') or os.getenv('YANDEX_FOLDER_ID', 'b1g4or5i5s66hklqfg06')
-YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+# YandexGPT REMOVED - not used anymore
+# YANDEX_API_KEY = os.getenv('YC_API_KEY') or os.getenv('YANDEX_API_KEY', '')
+# YANDEX_FOLDER_ID = os.getenv('YC_FOLDER_ID') or os.getenv('YANDEX_FOLDER_ID', 'b1g4or5i5s66hklqfg06')
+# YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 # RockAPI configuration (DeepSeek via RockAPI)
 ROCKAPI_KEY = os.getenv('ROCKAPI_KEY', '')
@@ -148,11 +147,9 @@ def generate_neuro_comment(
     ]
     
     # Check if API key is configured
-    if not YANDEX_API_KEY:
-        logger.warning("❌ YANDEX_API_KEY not configured, using fallback comments")
-        logger.warning("   Причина: переменные окружения YC_API_KEY и YANDEX_API_KEY не установлены")
-        logger.warning("   Решение: установите YC_API_KEY в systemd unit или .env файле")
-        return random.choice(fallback_comments)
+    # YandexGPT DISABLED - return fallback immediately
+    # Функция оставлена для совместимости, но всегда возвращает fallback
+    return random.choice(fallback_comments)
     
     # Типы реакций для разнообразия (женский род, живые эмоции)
     reaction_types = [
@@ -797,56 +794,10 @@ class UltimateCommentBot:
         logger.info("✅ Конфигурация загружена")
         # ============= END ЗАГРУЗКА КОНФИГУРАЦИИ =============
         
-        # ============= YANDEX GPT ENVIRONMENT CHECK =============
-        logger.info("="*60)
-        logger.info("🔍 ПРОВЕРКА YANDEX GPT ОКРУЖЕНИЯ")
-        logger.info("="*60)
-        
-        # Проверяем YC_API_KEY
-        yc_api_key_found = bool(os.getenv('YC_API_KEY'))
-        yandex_api_key_found = bool(os.getenv('YANDEX_API_KEY'))
-        
-        if yc_api_key_found:
-            key_value = os.getenv('YC_API_KEY', '')
-            masked_key = key_value[:8] + '***' + key_value[-4:] if len(key_value) > 12 else '***'
-            logger.info(f"✅ YC_API_KEY найден: {masked_key}")
-            logger.info(f"   Источник: переменная окружения YC_API_KEY")
-        elif yandex_api_key_found:
-            key_value = os.getenv('YANDEX_API_KEY', '')
-            masked_key = key_value[:8] + '***' + key_value[-4:] if len(key_value) > 12 else '***'
-            logger.info(f"✅ YANDEX_API_KEY найден: {masked_key}")
-            logger.info(f"   Источник: переменная окружения YANDEX_API_KEY")
-        else:
-            logger.error("❌ API KEY НЕ НАЙДЕН!")
-            logger.error("   Проверьте переменные окружения: YC_API_KEY или YANDEX_API_KEY")
-            logger.error("   YandexGPT будет ОТКЛЮЧЕН, комментарии будут использовать шаблоны")
-        
-        # Проверяем YC_FOLDER_ID
-        yc_folder_found = bool(os.getenv('YC_FOLDER_ID'))
-        yandex_folder_found = bool(os.getenv('YANDEX_FOLDER_ID'))
-        
-        if yc_folder_found:
-            folder_id = os.getenv('YC_FOLDER_ID', '')
-            logger.info(f"✅ YC_FOLDER_ID найден: {folder_id}")
-            logger.info(f"   Источник: переменная окружения YC_FOLDER_ID")
-        elif yandex_folder_found:
-            folder_id = os.getenv('YANDEX_FOLDER_ID', '')
-            logger.info(f"✅ YANDEX_FOLDER_ID найден: {folder_id}")
-            logger.info(f"   Источник: переменная окружения YANDEX_FOLDER_ID")
-        else:
-            logger.warning(f"⚠️  FOLDER_ID не найден в окружении, используется дефолтный: {YANDEX_FOLDER_ID}")
-        
-        # Итоговый статус
-        yandex_gpt_enabled = bool(YANDEX_API_KEY)
-        if yandex_gpt_enabled:
-            logger.info("")
-            logger.info("✅ YANDEX GPT: ВКЛЮЧЁН")
-            logger.info(f"   Model URI: gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest")
-            logger.info(f"   Endpoint: {YANDEX_GPT_URL}")
-        else:
-            logger.error("")
-            logger.error("❌ YANDEX GPT: ОТКЛЮЧЁН (нет API ключа)")
-            logger.error("   Все комментарии будут использовать шаблоны")
+        # ============= YANDEX GPT ENVIRONMENT CHECK - DISABLED =============
+        # YandexGPT удален из проекта, используется только RockAPI
+        logger.info("💬 COMMENT PROVIDER: RockAPI")
+        logger.info(f"   Endpoint: {ROCK_API_URL}")
         
         logger.info("="*60)
         # ============= END YANDEX GPT ENVIRONMENT CHECK =============
