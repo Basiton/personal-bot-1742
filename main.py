@@ -4055,11 +4055,14 @@ class UltimateCommentBot:
         if not name:
             return None
 
-        # Удаляем markdown-ссылки вида (https://t.me/...)
-        name = re.sub(r"\(https?://t\.me/[^)]+\)", "", name, flags=re.IGNORECASE)
-
-        # Удаляем квадратные скобки
-        name = name.replace("[", "").replace("]", "")
+        # Удаляем полностью markdown-ссылки вида [@username](url) - берем только username
+        markdown_match = re.search(r'\[@?([A-Za-z0-9_]+)\]\(https?://t\.me/[^)]+\)', name)
+        if markdown_match:
+            name = markdown_match.group(1)
+        else:
+            # Если нет markdown, просто удаляем скобки и ссылки
+            name = re.sub(r"\(https?://t\.me/[^)]+\)", "", name, flags=re.IGNORECASE)
+            name = name.replace("[", "").replace("]", "")
 
         name = name.strip()
         if not name:
@@ -4072,7 +4075,8 @@ class UltimateCommentBot:
         if not name:
             return None
 
-        return f"@{name.upper()}"
+        # LOWERCASE для case-insensitive сравнения!
+        return f"@{name.lower()}"
 
     def _get_channel_username_normalized(self, channel):
         """
@@ -12158,6 +12162,11 @@ class UltimateCommentBot:
     async def start_commenting(self):
         """Wrapper to start auto-commenting loop from run()."""
         try:
+            # КРИТИЧНО: Устанавливаем monitoring=True для автозапуска
+            self.monitoring = True
+            self.monitoring_start_time = datetime.now()
+            logger.info("🚀 Auto-start: monitoring enabled")
+            
             await self.pro_auto_comment()
         except Exception as e:
             logger.error(f"Start commenting error: {e}")
@@ -12172,10 +12181,21 @@ class UltimateCommentBot:
         logger.info(f"📊 Total accounts in system: {len(self.accounts_data)}")
         
         # Debug: show all accounts with statuses
+        status_counts = {'active': 0, 'reserve': 0, 'broken': 0, 'other': 0}
         for phone, data in self.accounts_data.items():
             status = data.get('status', 'UNKNOWN')
             has_session = 'session' in data and data.get('session')
+            if status == ACCOUNT_STATUS_ACTIVE:
+                status_counts['active'] += 1
+            elif status == ACCOUNT_STATUS_RESERVE:
+                status_counts['reserve'] += 1
+            elif status == ACCOUNT_STATUS_BROKEN:
+                status_counts['broken'] += 1
+            else:
+                status_counts['other'] += 1
             logger.info(f"   Account {phone[-10:]}: status={status}, has_session={has_session}")
+        
+        logger.info(f"✅ Account statuses: active={status_counts['active']}, reserve={status_counts['reserve']}, broken={status_counts['broken']}, other={status_counts['other']}")
         
         active_accounts = {phone: data for phone, data in self.accounts_data.items()
                          if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
