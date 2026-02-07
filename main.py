@@ -1956,7 +1956,7 @@ class UltimateCommentBot:
         else:
             return (60, 180)
     
-    def can_account_comment_in_channel(self, phone, channel, channel_members=None, channel_members=None):
+    def can_account_comment_in_channel(self, phone, channel, channel_members=None):
         """Проверить, может ли аккаунт комментировать в канале (защита от спама своими аккаунтами)"""
         if channel not in self.last_comment_per_channel:
             return True, 0
