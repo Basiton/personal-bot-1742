@@ -2328,6 +2328,55 @@ class UltimateCommentBot:
             logger.info(f"⏰ Rotation interval reached ({time_since_rotation:.0f}s >= {self.rotation_interval}s)")
             await self.rotate_accounts()
     
+    def initialize_slot_channels(self, channels_list, num_slots, mode='distributed'):
+        """Инициализация распределения каналов по СЛОТАМ воркеров
+        
+        Каналы привязываются к СЛОТАМ (worker 0, 1, 2...), а не к аккаунтам.
+        При ротации новый аккаунт просто занимает слот и получает его каналы.
+        
+        Args:
+            channels_list: Список всех каналов
+            num_slots: Количество worker слотов
+            mode: 'distributed' или 'cyclic'
+        
+        Returns:
+            dict: {slot_index: [channels]}
+        """
+        # Проверяем, есть ли уже сохраненное распределение
+        if hasattr(self, 'slot_channel_assignments') and self.slot_channel_assignments:
+            logger.info("✅ Используем существующее распределение каналов по слотам")
+            return self.slot_channel_assignments
+        
+        logger.info("="*80)
+        logger.info("🔧 ИНИЦИАЛИЗАЦИЯ РАСПРЕДЕЛЕНИЯ КАНАЛОВ ПО СЛОТАМ")
+        logger.info("="*80)
+        
+        self.slot_channel_assignments = {}
+        
+        if mode == 'distributed':
+            # Distributed: каждому слоту свои каналы
+            channels_per_slot = len(channels_list) // num_slots
+            remainder = len(channels_list) % num_slots
+            
+            for slot_idx in range(num_slots):
+                start_idx = slot_idx * channels_per_slot + min(slot_idx, remainder)
+                end_idx = start_idx + channels_per_slot + (1 if slot_idx < remainder else 0)
+                slot_channels = channels_list[start_idx:end_idx]
+                
+                self.slot_channel_assignments[slot_idx] = slot_channels
+                logger.info(f"📍 Slot {slot_idx}: каналы {start_idx+1}-{end_idx} ({len(slot_channels)} шт)")
+        else:
+            # Cyclic: все слоты получают все каналы
+            for slot_idx in range(num_slots):
+                self.slot_channel_assignments[slot_idx] = channels_list.copy()
+                logger.info(f"📍 Slot {slot_idx}: все {len(channels_list)} каналов (cyclic)")
+        
+        logger.info("="*80)
+        logger.info("✅ Распределение по слотам завершено")
+        logger.info("="*80)
+        
+        return self.slot_channel_assignments
+    
     async def activate_next_reserve_account(self, exclude_phone=None, exclude_phones=None):
         """Активировать следующий резервный аккаунт для ротации (возвращает phone активированного)
         
@@ -11242,8 +11291,19 @@ class UltimateCommentBot:
         worker_client = None
         
         try:
-            # В distributed режиме делим каналы между воркерами
-            if mode == 'distributed':
+            # ============= РАСПРЕДЕЛЕНИЕ ПО СЛОТАМ =============
+            # Проверяем, есть ли распределение для этого слота
+            if hasattr(self, 'slot_channel_assignments') and worker_index in self.slot_channel_assignments:
+                my_channels = self.slot_channel_assignments[worker_index]
+                logger.info("="*60)
+                logger.info(f"WORKER STARTED: account={phone}, slot={worker_index}/{total_workers}")
+                logger.info(f"   Name: {account_name}")
+                logger.info(f"   Mode: SLOT-BASED (каналы закреплены за slot {worker_index})")
+                logger.info(f"   My channels: {len(my_channels)} каналов (из slot {worker_index})")
+                logger.info(f"   Status: {account_data.get('status', 'unknown')}")
+                logger.info("="*60)
+            elif mode == 'distributed':
+                # Fallback: динамический расчет если slot_channel_assignments отсутствует
                 channels_per_worker = len(all_channels) // total_workers
                 remainder = len(all_channels) % total_workers
                 
@@ -11252,7 +11312,7 @@ class UltimateCommentBot:
                 my_channels = all_channels[start_idx:end_idx]
                 
                 logger.info("="*60)
-                logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
+                logger.info(f"WORKER STARTED: account={phone}, slot={worker_index}/{total_workers}")
                 logger.info(f"   Name: {account_name}")
                 logger.info(f"   Mode: DISTRIBUTED (dedicated channels)")
                 logger.info(f"   My channels: {start_idx+1}-{end_idx} ({len(my_channels)} total)")
@@ -11261,13 +11321,14 @@ class UltimateCommentBot:
             else:  # cyclic mode
                 my_channels = all_channels
                 logger.info("="*60)
-                logger.info(f"WORKER STARTED: account={phone}, parallel_idx={worker_index+1}/{total_workers}")
+                logger.info(f"WORKER STARTED: account={phone}, slot={worker_index}/{total_workers}")
                 logger.info(f"   Name: {account_name}")
                 logger.info(f"   Mode: CYCLIC (all channels with offset)")
                 logger.info(f"   Total channels: {len(all_channels)}")
                 logger.info(f"   Offset: starts from channel #{(worker_index % len(all_channels)) + 1}")
                 logger.info(f"   Status: {account_data.get('status', 'unknown')}")
                 logger.info("="*60)
+            # ============= END РАСПРЕДЕЛЕНИЕ ПО СЛОТАМ =============
             
             # Offset delay to spread workers
             initial_offset = worker_index * 10
@@ -12224,6 +12285,12 @@ class UltimateCommentBot:
         tasks = []
         self.active_worker_tasks.clear()  # Очищаем старый список
         self.worker_slots.clear()  # Очищаем информацию о слотах
+        
+        # ============= ИНИЦИАЛИЗАЦИЯ РАСПРЕДЕЛЕНИЯ ПО СЛОТАМ =============
+        # Вызываем ДО создания воркеров, чтобы закрепить каналы за слотами
+        logger.info("🔧 Инициализация распределения каналов по worker слотам...")
+        self.initialize_slot_channels(channels_copy, num_accounts, mode=self.worker_mode)
+        # ============= END ИНИЦИАЛИЗАЦИЯ =============
         
         logger.info("="*80)
         logger.info(f"🚀 CREATING {len(accounts_list)} PARALLEL WORKERS")
