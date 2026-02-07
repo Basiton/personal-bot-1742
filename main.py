@@ -966,7 +966,8 @@ class UltimateCommentBot:
         # Хранилище последних комментариев для дедупликации
         # {channel_username: [(comment_text, timestamp, phone), ...]}
         self.recent_comments = {}
-        self.recent_comments_limit = 20  # Храним последние 20 комментариев на канал
+        self.recent_comments_limit = 100  # Храним последние 100 комментариев на канал
+        self.recent_comments_time_limit = 7200  # Храним комментарии за последние 2 часа
         # ============= END ANTI-SPAM & DEDUPLICATION =============
         
         self.init_database()
@@ -1646,7 +1647,7 @@ class UltimateCommentBot:
         
         return True, "ok"
     
-    def is_comment_duplicate(self, channel_username, comment_text, min_word_count=5):
+    def is_comment_duplicate(self, channel_username, comment_text, min_word_count=3):
         """
         Проверить, не является ли комментарий дубликатом недавних
         
@@ -1658,7 +1659,7 @@ class UltimateCommentBot:
         Returns:
             (is_duplicate: bool, reason: str)
         """
-        # Проверка минимальной длины
+        # Проверка минимальной длины (ОСЛАБЛЕНО: 3 слова вместо 5)
         words = comment_text.split()
         if len(words) < min_word_count:
             return True, f"comment_too_short_{len(words)}_words"
@@ -1683,6 +1684,17 @@ class UltimateCommentBot:
         if channel_username not in self.recent_comments:
             return False, "ok"
         
+        # Очищаем старые комментарии (старше 2 часов)
+        current_time = datetime.now().timestamp()
+        self.recent_comments[channel_username] = [
+            (text, ts, ph) for text, ts, ph in self.recent_comments[channel_username]
+            if current_time - ts < self.recent_comments_time_limit
+        ]
+        
+        # Если после очистки список пуст - комментарий уникален
+        if not self.recent_comments[channel_username]:
+            return False, "ok"
+        
         # Проверяем на совпадение с недавними комментариями
         for old_comment, timestamp, phone in self.recent_comments[channel_username]:
             normalized_old = re.sub(r'\\s+', ' ', old_comment.lower().strip())
@@ -1692,7 +1704,7 @@ class UltimateCommentBot:
             if normalized_new == normalized_old:
                 return True, f"exact_duplicate_from_{phone}"
             
-            # Очень похожие (более 80% совпадения)
+            # Очень похожие (ОСЛАБЛЕНО: более 90% вместо 80%)
             if len(normalized_new) > 10 and len(normalized_old) > 10:
                 # Простая проверка на похожесть по количеству общих слов
                 words_new = set(normalized_new.split())
@@ -1700,7 +1712,7 @@ class UltimateCommentBot:
                 if words_new and words_old:
                     common_words = words_new & words_old
                     similarity = len(common_words) / max(len(words_new), len(words_old))
-                    if similarity > 0.8:
+                    if similarity > 0.9:  # ОСЛАБЛЕНО с 0.8 до 0.9
                         return True, f"similar_duplicate_{int(similarity*100)}%_from_{phone}"
         
         return False, "ok"
@@ -11697,6 +11709,17 @@ class UltimateCommentBot:
                         self.commented_posts[username] = set()
                     
                     client = worker_client
+                    
+                    # КРИТИЧНО: Проверяем подключение перед каждым запросом
+                    if not client.is_connected():
+                        logger.warning(f"[{account_name}] Client disconnected, reconnecting...")
+                        try:
+                            await client.connect()
+                            logger.info(f"[{account_name}] Reconnected successfully")
+                        except Exception as reconn_err:
+                            logger.error(f"[{account_name}] Reconnect failed: {reconn_err}")
+                            await asyncio.sleep(5)
+                            continue
                     
                     try:
                         # Get/join channel
