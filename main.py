@@ -277,40 +277,67 @@ def generate_neuro_comment(
             
             # Проверяем структуру ответа
             if "result" not in data:
-            prompt = f"""Ты девушка, которая листает телеграм-каналы и пишет пару слов, когда что-то реально цепляет.
+                logger.error(f"❌ Неожиданная структура ответа (нет 'result'): {json.dumps(data, ensure_ascii=False)[:500]}")
+                logger.warning("⚠️  Использую fallback шаблоны")
+                return random.choice(fallback_comments)
+            
+            if "alternatives" not in data["result"]:
+                logger.error(f"❌ Неожиданная структура ответа (нет 'alternatives'): {json.dumps(data, ensure_ascii=False)[:500]}")
+                logger.warning("⚠️  Использую fallback шаблоны")
+                return random.choice(fallback_comments)
+            
+            raw_comment = data["result"]["alternatives"][0]["message"]["text"].strip()
+            logger.info(f"📝 Сырой комментарий от YandexGPT: '{raw_comment}'")
+            
+            # Постобработка для "человечности"
+            final_comment = humanize_comment(raw_comment)
+            logger.info(f"✨ Финальный комментарий после обработки: '{final_comment}'")
+            
+            # Логирование (если включено)
+            if ENABLE_COMMENT_LOGGING:
+                logger.info(f"[COMMENT_GEN] Raw: {raw_comment}")
+                logger.info(f"[COMMENT_GEN] Final: {final_comment}")
+            
+            logger.info("🎉 YandexGPT: комментарий успешно сгенерирован")
+            return final_comment
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON ответа: {e}")
+            logger.error(f"   Response text: {response.text[:500]}")
+            logger.warning("⚠️  Использую fallback шаблоны")
+            return random.choice(fallback_comments)
+        except KeyError as e:
+            logger.error(f"❌ Отсутствует ожидаемое поле в ответе: {e}")
+            logger.error(f"   Response data: {json.dumps(data, ensure_ascii=False)[:500]}")
+            logger.warning("⚠️  Использую fallback шаблоны")
+            return random.choice(fallback_comments)
+            
+    except requests.exceptions.Timeout:
+        logger.error("❌ YandexGPT API timeout (30 секунд)")
+        logger.error("   Причина: API не ответил в течение 30 секунд")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"❌ YandexGPT connection error: {e}")
+        logger.error("   Причина: не удалось подключиться к API (проверьте интернет)")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
+    except Exception as e:
+        logger.error(f"❌ YandexGPT unexpected error: {e}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
 
-        Пост, который ты комментируешь:
-        {post_text[:800]}
 
-        СДЕЛАЙ: один короткий комментарий (6-15 слов). Без кавычек, без вариантов и пояснений. Просто живая фраза.
-
-        Как реагировать ({type_description}):
-        - зацепись за конкретную деталь из поста (цифру, факт, образ, мысль)
-        - проговори чувство: удивилась, порадовалась, стало тревожно, завидовала по-доброму, улыбнулась
-        - можешь упомянуть свой опыт или задать уточнение, если уместно
-        - пиши так, будто отвечаешь подруге в чате, а не публике
-        - {"Эмодзи не используй совсем" if not use_emoji else "Максимум один лёгкий эмодзи в конце"}
-
-        Важно — только женский род: видела, читала, думала, заметила, пробовала, сталкивалась.
-
-        Чего нельзя:
-        • начинать с «Интересно», «Круто», «Супер», «Отлично», «Ого»
-        • канцелярит и формальности вроде «благодарю», «желаю успехов», «спасибо за информацию»
-        • слова-паразиты: «честно говоря», «на самом деле», «в общем», «вообще», «короче», «кстати»
-        • несколько вариантов, списки, пояснения типа «это хорошо потому что...»
-        • рекламный тон: «подписывайся», «жми», «обязательно попробуй»
-        • излишек знаков и эмодзи
-
-        Примеры живых эмоций:
-        ✓ Ух ты, 40% рост — я реально впечатлилась
-        ✓ Чуть завидую, что решилась на такой запуск
-        ✓ Сразу улыбнулась, когда дочитала до финала
-        ✓ Меня насторожило про сроки, как это контролируешь?
-        ✓ Беру на заметку, сама спотыкалась на этом этапе
-        ✓ По-хорошему греет такая история
-        ✓ Стало спокойнее после этих цифр
-
-        Просто напиши один эмоциональный комментарий как человек:"""
+def humanize_comment(text: str) -> str:
+    """
+    Постобработка комментария для большей естественности.
+    Убирает шаблонные начала, слова-паразиты, спам-фразы.
+    Контролирует количество эмодзи.
+    Защита от антиспам систем Telegram.
+    """
+    # Убираем лишние пробелы
+    text = " ".join(text.split())
     
     # ===== УБИРАЕМ КАВЫЧКИ В НАЧАЛЕ И КОНЦЕ =====
     # AI иногда возвращает комментарий в кавычках - убираем их
