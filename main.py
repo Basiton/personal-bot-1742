@@ -797,7 +797,7 @@ class UltimateCommentBot:
         # ============= YANDEX GPT ENVIRONMENT CHECK - DISABLED =============
         # YandexGPT удален из проекта, используется только RockAPI
         logger.info("💬 COMMENT PROVIDER: RockAPI")
-        logger.info(f"   Endpoint: {ROCK_API_URL}")
+        logger.info(f"   Endpoint: {ROCKAPI_BASE_URL}")
         
         logger.info("="*60)
         # ============= END YANDEX GPT ENVIRONMENT CHECK =============
