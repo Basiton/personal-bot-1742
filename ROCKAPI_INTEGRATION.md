@@ -21,12 +21,21 @@
 ```bash
 # RockAPI конфигурация (обязательно)
 ROCKAPI_KEY=ваш_api_ключ_rockapi
-ROCKAPI_MODEL=deepseek-chat
+ROCKAPI_MODEL=deepseek-chat  # ВАЖНО: используйте только deepseek-chat!
 ROCKAPI_BASE_URL=https://api.rockapi.ru/deepseek
 
 # Выбор провайдера (rockapi или yandex)
 COMMENT_PROVIDER=rockapi
 ```
+
+**⚠️ ВАЖНО: Защита от дорогих моделей**
+
+Бот автоматически проверяет используемую модель и **принудительно заменяет** её на `deepseek-chat`, если указана другая модель (например, `deepseek-reasoner`). Это защищает от случайного использования дорогих моделей.
+
+Разрешённые модели:
+- ✅ `deepseek-chat` — основная недорогая модель (рекомендуется)
+
+Если вы случайно установите `ROCKAPI_MODEL=deepseek-reasoner`, бот автоматически переключится на `deepseek-chat` и выдаст предупреждение в логах.
 
 ### 2. Проверка настроек
 

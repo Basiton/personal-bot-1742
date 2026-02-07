@@ -102,6 +102,17 @@ ROCKAPI_KEY = os.getenv('ROCKAPI_KEY', '')
 ROCKAPI_MODEL = os.getenv('ROCKAPI_MODEL', 'deepseek-chat')
 ROCKAPI_BASE_URL = os.getenv('ROCKAPI_BASE_URL', 'https://api.rockapi.ru/deepseek')
 
+# Защита от использования дорогих моделей DeepSeek
+# Список разрешённых недорогих моделей
+ALLOWED_MODELS = ['deepseek-chat']
+# Если указана неразрешённая модель, принудительно используем deepseek-chat
+if ROCKAPI_MODEL not in ALLOWED_MODELS:
+    logger = logging.getLogger('telegram_bot')
+    logger.warning(f"⚠️ ROCKAPI_MODEL='{ROCKAPI_MODEL}' не в списке разрешённых моделей")
+    logger.warning(f"   Разрешённые модели: {', '.join(ALLOWED_MODELS)}")
+    logger.warning(f"   Принудительно используется 'deepseek-chat' для экономии")
+    ROCKAPI_MODEL = 'deepseek-chat'
+
 # Выбор провайдера для генерации комментариев: 'yandex' или 'rockapi'
 COMMENT_PROVIDER = os.getenv('COMMENT_PROVIDER', 'rockapi').lower()
 
