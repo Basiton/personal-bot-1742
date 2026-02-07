@@ -97,6 +97,14 @@ YANDEX_API_KEY = os.getenv('YC_API_KEY') or os.getenv('YANDEX_API_KEY', '')
 YANDEX_FOLDER_ID = os.getenv('YC_FOLDER_ID') or os.getenv('YANDEX_FOLDER_ID', 'b1g4or5i5s66hklqfg06')
 YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
+# RockAPI configuration (DeepSeek via RockAPI)
+ROCKAPI_KEY = os.getenv('ROCKAPI_KEY', '')
+ROCKAPI_MODEL = os.getenv('ROCKAPI_MODEL', 'deepseek-chat')
+ROCKAPI_BASE_URL = os.getenv('ROCKAPI_BASE_URL', 'https://api.rockapi.ru/deepseek')
+
+# Выбор провайдера для генерации комментариев: 'yandex' или 'rockapi'
+COMMENT_PROVIDER = os.getenv('COMMENT_PROVIDER', 'rockapi').lower()
+
 # Опция логирования комментариев для отладки промптов
 ENABLE_COMMENT_LOGGING = os.getenv('LOG_COMMENTS', '').lower() in ('true', '1', 'yes')
 
@@ -484,6 +492,210 @@ def humanize_comment(text: str) -> str:
         text = text[0].upper() + text[1:]
     
     return text
+
+
+def generate_comment_rockapi(
+    post_text: str,
+    channel_theme: str = "general",
+    temperature: float = 0.88,
+    max_tokens: int = 100,
+    comment_type: str = None,
+) -> str:
+    """
+    Генерирует живой комментарий к посту от лица девушки с помощью RockAPI (DeepSeek).
+    Использует тот же промпт и параметры, что и YandexGPT.
+    Стиль: непринуждённый женский, эмоциональный, живой.
+    Длина: 6-15 слов.
+    """
+    # Fallback comments if API is not configured or fails (женский род, БЕЗ шаблонных начал)
+    fallback_comments = [
+        "Мне понравилось",
+        "Полезная информация",
+        "Рада, что прочитала",
+        "Хорошо написано",
+        "Не думала об этом раньше",
+        "Возьму на заметку",
+        "Познавательно",
+        "Прямо в точку"
+    ]
+    
+    # Check if API key is configured
+    if not ROCKAPI_KEY:
+        logger.warning("❌ ROCKAPI_KEY not configured, using fallback comments")
+        logger.warning("   Причина: переменная окружения ROCKAPI_KEY не установлена")
+        logger.warning("   Решение: установите ROCKAPI_KEY в systemd unit или .env файле")
+        return random.choice(fallback_comments)
+    
+    # Типы реакций для разнообразия (женский род, живые эмоции)
+    reaction_types = [
+        ("впечатление", "отреагировать на содержание с удивлением или интересом (не ожидала, впечатлилась, мне понравилось)"),
+        ("резонанс", "показать, что тема близка и знакома (тоже сталкивалась, прямо про меня, замечала)"),
+        ("вопрос", "задать короткий живой вопрос из любопытства (а как, интересно, пробовала?)"),
+        ("поддержка", "одобрить или поддержать идею автора (согласна, правильно, именно так)"),
+        ("опыт", "упомянуть свой опыт кратко (пробовала, делала, использовала)"),
+        ("оценка", "дать краткую оценку с конкретикой из поста (цифры впечатляют, результат хороший)")
+    ]
+    
+    # Выбираем тип реакции (если не передан извне)
+    if not comment_type:
+        chosen_type, type_description = random.choice(reaction_types)
+    else:
+        # Находим описание для переданного типа
+        type_description = next((desc for t, desc in reaction_types if t == comment_type), reaction_types[0][1])
+        chosen_type = comment_type
+    
+    # Контроль эмодзи: использовать умеренно (~30% случаев)
+    use_emoji = random.random() < 0.30
+    
+    # Промпт для живых комментариев от девушки (защита от спам-фильтров)
+    # ИСПОЛЬЗУЕМ ТОТ ЖЕ ПРОМПТ, ЧТО И В generate_neuro_comment
+    prompt = f"""Напиши живой естественный комментарий к посту от имени девушки.
+
+ОБЯЗАТЕЛЬНО: Только ЖЕНСКИЙ РОД! (видела, читала, думала, поняла, попробовала, заметила, сталкивалась)
+
+СТИЛЬ: Непринуждённый, как девушка пишет знакомым в чате. Без шаблонов и штампов.
+
+ТИП РЕАКЦИИ: {type_description}
+
+ДЛИНА: 6-15 слов (не короче 6, не длиннее 15 слов).
+
+ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
+• Реагируй на КОНКРЕТИКУ из поста (цифры, факты, детали)
+• НЕ начинай с шаблонных слов (Интересно, Круто, Классно, Отлично, Супер, Ого)
+• Используй разные начала: цифры из поста, вопросы, личный опыт, оценку
+• Пиши естественно, без излишних восторгов
+• {"Без эмодзи" if not use_emoji else "Можешь добавить 1 эмодзи в конце"}
+
+СТРОГО ЗАПРЕЩЕНО - АНТИСПАМ:
+❌ Мужской род (видел, читал, понял, сделал, думал)
+❌ Слова-паразиты: "честно говоря", "на самом деле", "в общем", "как бы", "типа", "короче", "кстати", "вообще"
+❌ Начинать со слов: "Интересно", "Круто", "Классно", "Отлично", "Супер", "Ого", "Вау"
+❌ Спам-слова: "невероятно", "потрясающе", "фантастика", "100%", "гарантирую", "однозначно", "обязательно попробуй"
+❌ Призывы: "жми", "переходи", "регистрируйся", "подпишись", "смотри", "читай обязательно"
+❌ Излишние восклицания: "!!!", "???", "🔥🔥🔥"
+❌ Формальности: "благодарю", "желаю успехов", "спасибо за информацию"
+
+ПРИМЕРЫ ХОРОШИХ КОММЕНТАРИЕВ (разные начала):
+✓ "40% ускорение — не думала что настолько"
+✓ "Тоже сталкивалась с этим, прямо в точку"
+✓ "Пробовала этот рецепт, получилось вкусно"
+✓ "В 23 года запустить — смелая была 🔥"
+✓ "А как с масштабированием на больших данных?"
+✓ "Заметила похожий эффект у себя"
+✓ "15 минут на приготовление — быстро и удобно"
+
+ПЛОХИЕ ПРИМЕРЫ (так НЕ пиши):
+❌ "Интересно, не знала!" (шаблонное начало)
+❌ "Круто, обязательно попробую!" (шаблон + призыв)
+❌ "Честно говоря, впечатлилась" (слово-паразит)
+❌ "Невероятно! Потрясающе! 🔥🔥🔥" (спам-слова + много эмодзи)
+❌ "Видел похожее" (мужской род)
+
+Тема: {channel_theme}
+
+Пост:
+{post_text[:800]}
+
+Твой комментарий (начни БЕЗ шаблонных слов):"""
+
+    # RockAPI использует OpenAI-совместимый формат
+    headers = {
+        "Authorization": f"Bearer {ROCKAPI_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": ROCKAPI_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": float(temperature),
+        "max_tokens": int(max_tokens),
+    }
+
+    # Подробное логирование запроса
+    logger.info("🤖 ROCKAPI: начинаем генерацию комментария")
+    logger.info(f"   Model: {ROCKAPI_MODEL}")
+    logger.info(f"   Temperature: {temperature}, Max tokens: {max_tokens}")
+    logger.info(f"   Prompt length: {len(prompt)} chars")
+    logger.info(f"   Post text length: {len(post_text)} chars")
+    logger.info(f"   Channel theme: {channel_theme}")
+    
+    try:
+        api_url = f"{ROCKAPI_BASE_URL}/v1/chat/completions"
+        logger.info(f"📡 Отправляем запрос к RockAPI: {api_url}")
+        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        
+        logger.info(f"📥 Получен ответ от RockAPI: HTTP {response.status_code}")
+        
+        if response.status_code != 200:
+            logger.error(f"❌ RockAPI error: HTTP {response.status_code}")
+            logger.error(f"   Response headers: {dict(response.headers)}")
+            
+            try:
+                error_data = response.json()
+                logger.error(f"   Error response body: {json.dumps(error_data, ensure_ascii=False, indent=2)}")
+            except:
+                logger.error(f"   Response text: {response.text[:500]}")
+            
+            logger.warning("⚠️  Использую fallback шаблоны из-за ошибки API")
+            return random.choice(fallback_comments)
+        
+        # Парсим успешный ответ (OpenAI-совместимый формат)
+        try:
+            data = response.json()
+            logger.info("✅ JSON успешно распарсен")
+            
+            # OpenAI format: {"choices": [{"message": {"content": "..."}}]}
+            if "choices" not in data or not data["choices"]:
+                logger.error(f"❌ Неожиданная структура ответа (нет 'choices'): {json.dumps(data, ensure_ascii=False)[:500]}")
+                logger.warning("⚠️  Использую fallback шаблоны")
+                return random.choice(fallback_comments)
+            
+            raw_comment = data["choices"][0]["message"]["content"].strip()
+            logger.info(f"📝 Сырой комментарий от RockAPI: '{raw_comment}'")
+            
+            # Постобработка для "человечности" (используем ту же функцию)
+            final_comment = humanize_comment(raw_comment)
+            logger.info(f"✨ Финальный комментарий после обработки: '{final_comment}'")
+            
+            # Логирование (если включено)
+            if ENABLE_COMMENT_LOGGING:
+                logger.info(f"[COMMENT_GEN_ROCKAPI] Raw: {raw_comment}")
+                logger.info(f"[COMMENT_GEN_ROCKAPI] Final: {final_comment}")
+            
+            logger.info("🎉 RockAPI: комментарий успешно сгенерирован")
+            return final_comment
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Ошибка парсинга JSON ответа: {e}")
+            logger.error(f"   Response text: {response.text[:500]}")
+            logger.warning("⚠️  Использую fallback шаблоны")
+            return random.choice(fallback_comments)
+        except (KeyError, IndexError) as e:
+            logger.error(f"❌ Отсутствует ожидаемое поле в ответе: {e}")
+            logger.error(f"   Response data: {json.dumps(data, ensure_ascii=False)[:500]}")
+            logger.warning("⚠️  Использую fallback шаблоны")
+            return random.choice(fallback_comments)
+            
+    except requests.exceptions.Timeout:
+        logger.error("❌ RockAPI timeout (30 секунд)")
+        logger.error("   Причина: API не ответил в течение 30 секунд")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ RockAPI request error: {e}")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
+    except Exception as e:
+        logger.error(f"❌ Неожиданная ошибка при вызове RockAPI: {e}")
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        logger.warning("⚠️  Использую fallback шаблоны")
+        return random.choice(fallback_comments)
+
 
 def normalize_account_id(phone_or_id):
     """
@@ -11446,10 +11658,17 @@ class UltimateCommentBot:
                             # Генерируем до 3 попыток для получения уникального комментария
                             comment = None
                             for attempt in range(3):
-                                temp_comment = generate_neuro_comment(
-                                    post_text=post_text,
-                                    channel_theme=channel_theme_str
-                                )
+                                # Выбираем провайдера на основе переменной окружения
+                                if COMMENT_PROVIDER == 'rockapi':
+                                    temp_comment = generate_comment_rockapi(
+                                        post_text=post_text,
+                                        channel_theme=channel_theme_str
+                                    )
+                                else:
+                                    temp_comment = generate_neuro_comment(
+                                        post_text=post_text,
+                                        channel_theme=channel_theme_str
+                                    )
                                 
                                 # Проверка на дублирование
                                 is_dup, dup_reason = self.is_comment_duplicate(username, temp_comment, min_word_count=5)
@@ -11480,10 +11699,17 @@ class UltimateCommentBot:
                                 
                                 if comment in self._last_test_comments:
                                     logger.warning(f"[{account_name}] Duplicate comment detected, regenerating...")
-                                    comment = generate_neuro_comment(
-                                        post_text=post_text,
-                                        channel_theme=channel_theme_str
-                                    )
+                                    # Выбираем провайдера на основе переменной окружения
+                                    if COMMENT_PROVIDER == 'rockapi':
+                                        comment = generate_comment_rockapi(
+                                            post_text=post_text,
+                                            channel_theme=channel_theme_str
+                                        )
+                                    else:
+                                        comment = generate_neuro_comment(
+                                            post_text=post_text,
+                                            channel_theme=channel_theme_str
+                                        )
                                     if comment in self._last_test_comments:
                                         base_comment = random.choice(self.templates)
                                         comment = self.generate_comment_variation(base_comment)
