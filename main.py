@@ -8132,14 +8132,25 @@ class UltimateCommentBot:
             if not await self.is_admin(event.sender_id): return
             self.monitoring = False
             
-            # Сохраняем прогресс перед остановкой
-            processed_count = len(self.commenting_progress.get('processed_channels', []))
+            # Диагностика прогресса ДО сохранения
+            processed_list = self.commenting_progress.get('processed_channels', [])
+            processed_count = len(processed_list)
             total_channels = len(self.channels)
             remaining = total_channels - processed_count
             
-            logger.info(f"💾 Сохранение прогресса перед остановкой...")
+            logger.info("="*80)
+            logger.info("🛑 ОСТАНОВКА МОНИТОРИНГА")
+            logger.info("="*80)
+            logger.info(f"📊 Прогресс в памяти:")
             logger.info(f"   Обработано: {processed_count}/{total_channels} каналов")
+            logger.info(f"   Осталось: {remaining} каналов")
+            if processed_count > 0:
+                logger.info(f"   Последние 3: {processed_list[-3:]}")
+            
+            # Принудительно сохраняем прогресс
+            logger.info(f"💾 Сохранение прогресса на диск...")
             self.save_data()
+            logger.info(f"✅ Прогресс сохранён в bot_data.json")
             
             # Закрываем все клиенты аккаунтов
             if self.account_clients:
@@ -8153,11 +8164,21 @@ class UltimateCommentBot:
                 self.account_clients.clear()
                 logger.info("✅ Все клиенты закрыты")
             
-            progress_text = ""
+            # Формируем сообщение о прогрессе
             if processed_count > 0:
-                progress_text = f"\n\n📊 Прогресс сохранён: {processed_count}/{total_channels} каналов\n💡 При следующем `/startmon` продолжится с оставшихся {remaining} каналов"
+                percentage = int((processed_count / total_channels) * 100) if total_channels > 0 else 0
+                progress_text = (
+                    f"\n\n📊 **Прогресс сохранён**\n"
+                    f"✅ Обработано: {processed_count}/{total_channels} каналов ({percentage}%)\n"
+                    f"⏳ Осталось: {remaining} каналов\n\n"
+                    f"💡 При следующем `/startmon` продолжится с оставшихся каналов"
+                )
+            else:
+                logger.warning("⚠️ Прогресс пуст - возможно мониторинг только запустился")
+                progress_text = "\n\nℹ️ Прогресс пуст (мониторинг только запустился или не успел обработать каналы)"
             
-            await event.respond(f"✅ Автокомментарии остановлены{progress_text}")
+            logger.info("=" * 80)
+            await event.respond(f"✅ **Автокомментарии остановлены**{progress_text}")
         
         @self.bot_client.on(events.NewMessage(pattern='/resetprogress'))
         async def reset_progress(event):
@@ -11857,13 +11878,13 @@ class UltimateCommentBot:
                                 self.commenting_progress['processed_channels'].append(username_normalized)
                                 self.commenting_progress['last_update'] = datetime.now().timestamp()
                                 
-                                # Сохраняем прогресс каждые 10 каналов или раз в 5 минут
+                                # Сохраняем прогресс каждые 3 канала или раз в 2 минуты (было 10/5мин)
                                 last_save = self.commenting_progress.get('last_save', 0)
-                                if (len(self.commenting_progress['processed_channels']) % 10 == 0 or 
-                                    datetime.now().timestamp() - last_save > 300):
+                                if (len(self.commenting_progress['processed_channels']) % 3 == 0 or 
+                                    datetime.now().timestamp() - last_save > 120):
                                     self.commenting_progress['last_save'] = datetime.now().timestamp()
                                     self.save_data()
-                                    logger.debug(f"💾 Progress saved: {len(self.commenting_progress['processed_channels'])} channels processed")
+                                    logger.info(f"💾 Progress saved: {len(self.commenting_progress['processed_channels'])} channels processed")
                             # ============= КОНЕЦ ОБНОВЛЕНИЯ ПРОГРЕССА =============
                             
                             if self.conn:
