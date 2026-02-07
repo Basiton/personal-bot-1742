@@ -11682,17 +11682,10 @@ class UltimateCommentBot:
                     # ============= END NEW =============
                     
                     # Anti-spam protection с адаптивным интервалом
-                    # Пытаемся получить размер канала для адаптивного интервала
-                    channel_members = None
-                    if channel_entity and hasattr(channel_entity, 'participants_count'):
-                        channel_members = channel_entity.participants_count
-                    
-                    can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username, channel_members)
+                    # Размер канала получим позже, после получения channel_entity
+                    can_comment, wait_for_channel = self.can_account_comment_in_channel(phone, username, channel_members=None)
                     if not can_comment:
-                        if channel_members:
-                            logger.info(f"[{account_name}] @{username} recently commented (size: {channel_members}), skipping")
-                        else:
-                            logger.info(f"[{account_name}] @{username} recently commented, skipping")
+                        logger.info(f"[{account_name}] @{username} recently commented, skipping")
                         continue
                     
                     # Initialize tracking
