@@ -12858,21 +12858,27 @@ class UltimateCommentBot:
                         target_rate = self.messages_per_hour
                     
                     # Базовая задержка по rate limit
-                    base_delay = (3600 // target_rate) if target_rate > 0 else 60
+                    base_delay = (3600 // target_rate) if target_rate > 0 else 180
                     
                     # Применяем глобальный множитель задержки (при FloodWait)
                     base_delay = int(base_delay * self.global_delay_multiplier)
                     
-                    # КРИТИЧНО: Увеличиваем рандомизацию для естественности
-                    # Было: 0.8-1.2 (±20%), стало: 0.7-1.5 (±35%)
-                    # Это значит при 180s: от 126s до 270s (2.1-4.5 минуты)
-                    min_delay = int(base_delay * 0.7)
-                    max_delay = int(base_delay * 1.5)
+                    # КРИТИЧНО: Увеличиваем рандомизацию для естественности и защиты от банов
+                    # Было: 0.7-1.5 (±35%), стало: 1.2-2.0 (+20-100%)
+                    # Это значит при 180s: от 216s до 360s (3.6-6 минут)
+                    min_delay = int(base_delay * 1.2)
+                    max_delay = int(base_delay * 2.0)
                     delay = random.randint(min_delay, max_delay)
+                    
+                    # ЗАЩИТА: Гарантируем минимальную задержку 180 секунд (3 минуты) для безопасности
+                    MIN_SAFE_DELAY = 180  # 3 минуты - безопасный минимум для Telegram
+                    if delay < MIN_SAFE_DELAY:
+                        delay = random.randint(MIN_SAFE_DELAY, MIN_SAFE_DELAY + 60)
+                        logger.info(f"[{account_name}] ⚠️ Задержка увеличена до безопасного минимума: {delay}s")
                     
                     # Добавляем случайную микрозадержку для разнесения воркеров
                     # Если несколько воркеров готовы отправить одновременно - микрозадержка разнесет их
-                    micro_delay = random.randint(5, 25)  # 5-25 секунд
+                    micro_delay = random.randint(10, 40)  # 10-40 секунд (было 5-25)
                     delay += micro_delay
                     # ============= END УЛУЧШЕННАЯ ЗАДЕРЖКА =============
                     
@@ -12897,9 +12903,10 @@ class UltimateCommentBot:
                 logger.info(f"   Total: {len(commented_channels)}")
                 logger.info("="*60)
                 
-                # Break between cycles
-                cycle_break = random.randint(30, 60)
-                logger.info(f"[{account_name}] Break: {cycle_break}s")
+                # Break between cycles - увеличено для естественности и защиты от банов
+                # Было: 30-60 секунд, стало: 3-5 минут
+                cycle_break = random.randint(180, 300)  # 3-5 минут для естественного поведения
+                logger.info(f"[{account_name}] Break: {cycle_break}s ({cycle_break//60} мин)")
                 await asyncio.sleep(cycle_break)
         
         except Exception as outer_e:
