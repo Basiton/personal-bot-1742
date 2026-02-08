@@ -1485,6 +1485,14 @@ class UltimateCommentBot:
         reason_str = f" ({reason})" if reason else ""
         logger.info(f"🔄 Account {account_name}: {old_status} → {status}{reason_str}")
         
+        # КРИТИЧНО: Очищаем привязку слота при переходе в RESERVE или BROKEN
+        # Это позволяет слоту быть переиспользованным другим аккаунтом
+        if status in (ACCOUNT_STATUS_RESERVE, ACCOUNT_STATUS_BROKEN):
+            if phone in self.phone_to_slot:
+                old_slot = self.phone_to_slot[phone]
+                del self.phone_to_slot[phone]
+                logger.info(f"🔓 Освобожден slot {old_slot} от аккаунта {account_name}")
+        
         self.save_data()
         # Синхронизация с конфигом
         self.sync_active_accounts_with_config()
@@ -2363,7 +2371,9 @@ class UltimateCommentBot:
         независимо от порядка в списке активных аккаунтов.
         """
         if phone in self.phone_to_slot:
-            return self.phone_to_slot[phone]
+            slot = self.phone_to_slot[phone]
+            logger.info(f"♻️ Аккаунт {phone[-10:]} уже имеет slot {slot}")
+            return slot
         
         # Назначаем следующий свободный слот
         slot = self.next_free_slot
@@ -2387,11 +2397,6 @@ class UltimateCommentBot:
         Returns:
             dict: {slot_index: [channels]}
         """
-        # Проверяем, есть ли уже сохраненное распределение
-        if hasattr(self, 'slot_channel_assignments') and self.slot_channel_assignments:
-            logger.info("✅ Используем существующее распределение каналов по слотам")
-            return self.slot_channel_assignments
-        
         logger.info("="*80)
         logger.info("🔧 ИНИЦИАЛИЗАЦИЯ РАСПРЕДЕЛЕНИЯ КАНАЛОВ ПО СЛОТАМ")
         logger.info("="*80)
@@ -2606,6 +2611,17 @@ class UltimateCommentBot:
             logger.info(f"   Total workers: {current_total_workers}")
             logger.info(f"   Mode: {mode}")
             logger.info("="*80)
+            
+            # КРИТИЧНО: Обновляем phone_to_slot для нового аккаунта
+            # Новый аккаунт должен занять освободившийся слот
+            self.phone_to_slot[replacement_phone] = worker_index
+            logger.info(f"📌 Привязываем replacement аккаунт {replacement_phone[-10:]} к slot {worker_index}")
+            
+            # КРИТИЧНО: Обновляем slot_channel_assignments для этого слота!
+            # Новый воркер должен работать с осиротевшими каналами, а не старым распределением
+            if hasattr(self, 'slot_channel_assignments'):
+                self.slot_channel_assignments[worker_index] = orphaned_channels
+                logger.info(f"✅ Обновлен slot {worker_index}: {len(orphaned_channels)} каналов")
             
             # Создаём новую задачу worker'а с ОСИРОТЕВШИМИ каналами!
             task = asyncio.create_task(
@@ -2947,6 +2963,98 @@ class UltimateCommentBot:
                                  if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
                 
                 expected_workers = min(len(active_accounts), self.max_parallel_accounts)
+                
+                # ============= ПРОВЕРКА: Останавливаем воркеры с неактивными аккаунтами =============
+                # Критично для ручной смены аккаунтов!
+                active_phones_set = set(active_accounts.keys())
+                workers_to_stop = []
+                
+                for slot_idx, slot_info in list(self.worker_slots.items()):
+                    worker_phone = slot_info.get('phone')
+                    if worker_phone and worker_phone not in active_phones_set:
+                        # Этот воркер использует аккаунт который больше не ACTIVE!
+                        account_status = self.accounts_data.get(worker_phone, {}).get('status', 'UNKNOWN')
+                        account_name = self.accounts_data.get(worker_phone, {}).get('name', worker_phone[-10:])
+                        logger.warning(f"⚠️ Worker в slot {slot_idx} использует неактивный аккаунт!")
+                        logger.warning(f"   Account: {account_name} ({worker_phone})")
+                        logger.warning(f"   Status: {account_status} (нужен ACTIVE)")
+                        workers_to_stop.append((slot_idx, worker_phone, slot_info))
+                
+                # Останавливаем и заменяем неактивные воркеры
+                # КРИТИЧНО: Отслеживаем уже назначенные аккаунты чтобы избежать дублей
+                already_assigned = set()
+                
+                for slot_idx, worker_phone, slot_info in workers_to_stop:
+                    logger.info("="*60)
+                    logger.info(f"🔄 ЗАМЕНА НЕАКТИВНОГО ВОРКЕРА")
+                    logger.info(f"   Slot: {slot_idx}")
+                    logger.info(f"   Old account: {worker_phone}")
+                    logger.info(f"   Причина: аккаунт больше не ACTIVE")
+                    logger.info("="*60)
+                    
+                    # КРИТИЧНО: Останавливаем старый воркер
+                    old_task_name = f"worker_{slot_idx}_{worker_phone[-10:]}"
+                    for task in self.active_worker_tasks:
+                        if old_task_name in task.get_name():
+                            logger.info(f"🛑 Отменяю старый воркер: {task.get_name()}")
+                            task.cancel()
+                            break
+                    
+                    # Получаем каналы этого слота
+                    slot_channels = slot_info.get('channels', [])
+                    if not slot_channels and hasattr(self, 'slot_channel_assignments'):
+                        slot_channels = self.slot_channel_assignments.get(slot_idx, [])
+                    
+                    # Пытаемся найти активный аккаунт для замены
+                    replacement_phone = None
+                    
+                    # Получаем список работающих воркеров (исключая текущий останавливаемый)
+                    existing_worker_phones = set()
+                    for s_idx, s_info in self.worker_slots.items():
+                        s_phone = s_info.get('phone')
+                        if s_phone and s_phone != worker_phone:  # НЕ включаем останавливаемый
+                            existing_worker_phones.add(s_phone)
+                    
+                    # Добавляем уже назначенные в этой сессии
+                    existing_worker_phones.update(already_assigned)
+                    
+                    logger.info(f"🔍 Ищу замену для slot {slot_idx}:")
+                    logger.info(f"   Активных аккаунтов: {len(active_phones_set)}")
+                    logger.info(f"   Уже работают: {len(existing_worker_phones)}")
+                    
+                    # Ищем свободный активный аккаунт
+                    for phone in active_phones_set:
+                        if phone not in existing_worker_phones:
+                            replacement_phone = phone
+                            already_assigned.add(phone)  # Отмечаем как назначенный
+                            logger.info(f"   ✅ Выбран: {phone}")
+                            break
+                    
+                    if replacement_phone:
+                        logger.info(f"✅ Найден replacement: {replacement_phone}")
+                        
+                        # Обновляем информацию о слоте ПЕРЕД запуском
+                        self.worker_slots[slot_idx] = {
+                            'phone': replacement_phone,
+                            'channels': slot_channels,
+                            'mode': slot_info.get('mode', 'distributed'),
+                            'total_workers': slot_info.get('total_workers', expected_workers)
+                        }
+                        
+                        # Запускаем замену
+                        mode = slot_info.get('mode', 'distributed')
+                        total_workers = slot_info.get('total_workers', expected_workers)
+                        success = await self.launch_replacement_worker(slot_idx, slot_channels, mode, total_workers)
+                        
+                        if not success:
+                            logger.warning(f"⚠️ Не удалось запустить replacement для slot {slot_idx}")
+                    else:
+                        logger.warning(f"⚠️ Нет доступных аккаунтов для замены slot {slot_idx}")
+                        logger.warning(f"   Все активные аккаунты уже работают или заняты")
+                        # Перераспределяем каналы
+                        if slot_channels:
+                            await self.redistribute_channels_to_active_workers(slot_idx, slot_channels)
+                # ============= END ПРОВЕРКА =============
                 
                 # Подсчёт живых воркеров - КРИТИЧНО для диагностики!
                 alive_workers = 0
@@ -5292,9 +5400,23 @@ class UltimateCommentBot:
 **🤖 АВТО:**
 `/startmon` - ЗАПУСТИТЬ (с автоматической ротацией)
 `/stopmon` - остановить
+`/workers` - показать кто сейчас работает 🆕
+`/restart` - заменить аккаунты (сохранит прогресс) 🆕
+`/addworker` - добавить воркера БЕЗ остановки других 🆕
 `/safetyinfo` - настройки безопасности
 `/showprogress` - показать прогресс комментирования 🆕
 `/resetprogress` - сбросить прогресс (начать с начала) 🆕
+
+**🔄 КАК ЗАМЕНИТЬ АККАУНТЫ:** 🆕
+1️⃣ Измени статусы: `/toggleaccount +номер`
+2️⃣ Запусти замену: `/restart` 
+3️⃣ Готово! Прогресс сохранён ✅
+
+**➕ КАК ДОБАВИТЬ ВОРКЕРА:** 🆕
+1️⃣ Увеличь лимит: `/setparallel 4` (было 3)
+2️⃣ Активируй аккаунт: `/toggleaccount +номер`
+3️⃣ Добавь воркера: `/addworker`
+✅ Остальные продолжат работать!
 
 **📊 СТАТИСТИКА:**
 `/stats` - подробная статистика
@@ -8243,8 +8365,334 @@ class UltimateCommentBot:
                 logger.warning("⚠️ Прогресс пуст - возможно мониторинг только запустился")
                 progress_text = "\n\nℹ️ Прогресс пуст (мониторинг только запустился или не успел обработать каналы)"
             
-            logger.info("=" * 80)
+            logger.info("="*80)
             await event.respond(f"✅ **Автокомментарии остановлены**{progress_text}")
+        
+        @self.bot_client.on(events.NewMessage(pattern='/workers'))
+        async def show_workers(event):
+            """Показать текущих работающих воркеров"""
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.monitoring:
+                await event.respond("ℹ️ Комментирование не запущено")
+                return
+            
+            # Собираем информацию о воркерах
+            workers_info = []
+            active_phones = set()
+            
+            for slot_idx, slot_info in sorted(self.worker_slots.items()):
+                phone = slot_info.get('phone')
+                if phone:
+                    active_phones.add(phone)
+                    name = self.accounts_data.get(phone, {}).get('name', phone[-10:])
+                    status = self.accounts_data.get(phone, {}).get('status', '?')
+                    channels_count = len(slot_info.get('channels', []))
+                    
+                    # Проверяем есть ли живой task
+                    task_alive = False
+                    task_name = f"worker_{slot_idx}_{phone[-10:]}"
+                    for task in self.active_worker_tasks:
+                        if task_name in task.get_name() and not task.done():
+                            task_alive = True
+                            break
+                    
+                    status_icon = "🟢" if task_alive else "🔴"
+                    workers_info.append(
+                        f"{status_icon} **Slot {slot_idx}:** {name}\n"
+                        f"   📱 {phone}\n"
+                        f"   📊 Status: {status}\n"
+                        f"   📢 Channels: {channels_count}"
+                    )
+            
+            if not workers_info:
+                await event.respond("⚠️ Нет активных воркеров (запускаются...)")
+                return
+            
+            # Статистика
+            active_count = sum(1 for s in self.accounts_data.values() 
+                             if s.get('status') == ACCOUNT_STATUS_ACTIVE and s.get('session'))
+            alive_tasks = sum(1 for t in self.active_worker_tasks if not t.done())
+            
+            header = (
+                f"👷 **РАБОТАЮЩИЕ ВОРКЕРЫ** ({len(workers_info)})\n\n"
+                f"📊 **Статистика:**\n"
+                f"  • Active accounts: {active_count}\n"
+                f"  • Alive tasks: {alive_tasks}\n"
+                f"  • Max parallel: {self.max_parallel_accounts}\n\n"
+            )
+            
+            text = header + "\n\n".join(workers_info)
+            
+            # Предупреждение если есть неактивные
+            inactive_workers = []
+            for phone in active_phones:
+                status = self.accounts_data.get(phone, {}).get('status')
+                if status != ACCOUNT_STATUS_ACTIVE:
+                    name = self.accounts_data.get(phone, {}).get('name', phone[-10:])
+                    inactive_workers.append(f"{name} ({status})")
+            
+            if inactive_workers:
+                text += "\n\n⚠️ **ВНИМАНИЕ:**\n"
+                text += "Эти воркеры используют неактивные аккаунты:\n"
+                text += "\n".join(f"  • {w}" for w in inactive_workers)
+                text += "\n\n💡 Используй /restart для замены"
+            
+            await event.respond(text)
+        
+        @self.bot_client.on(events.NewMessage(pattern='/addworker'))
+        async def add_worker(event):
+            """Добавить нового воркера к уже работающим (без остановки других)
+            
+            ИСПОЛЬЗОВАНИЕ:
+            1. Активируй новый аккаунт: /toggleaccount +номер
+            2. Увеличь лимит: /setparallel 4 (было 3)
+            3. Добавь воркера: /addworker
+            """
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.monitoring:
+                await event.respond(
+                    "ℹ️ Комментирование не запущено.\n"
+                    "Используй /startmon сначала."
+                )
+                return
+            
+            # Проверяем активные аккаунты
+            active_accounts = {phone: data for phone, data in self.accounts_data.items()
+                             if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session')}
+            
+            # Проверяем текущих воркеров
+            current_workers = len(self.worker_slots)
+            max_allowed = self.max_parallel_accounts
+            
+            if current_workers >= max_allowed:
+                await event.respond(
+                    f"⚠️ **Достигнут лимит воркеров**\n\n"
+                    f"Текущих: {current_workers}\n"
+                    f"Максимум: {max_allowed}\n\n"
+                    f"💡 Увеличь лимит: `/setparallel {max_allowed + 1}`"
+                )
+                return
+            
+            if len(active_accounts) <= current_workers:
+                await event.respond(
+                    f"⚠️ **Нет свободных активных аккаунтов**\n\n"
+                    f"Active accounts: {len(active_accounts)}\n"
+                    f"Текущих воркеров: {current_workers}\n\n"
+                    f"💡 Активируй новый аккаунт: `/toggleaccount +номер`"
+                )
+                return
+            
+            # Ищем аккаунт без воркера
+            existing_worker_phones = set(s.get('phone') for s in self.worker_slots.values() if s.get('phone'))
+            
+            new_phone = None
+            new_data = None
+            for phone, data in active_accounts.items():
+                if phone not in existing_worker_phones:
+                    new_phone = phone
+                    new_data = data
+                    break
+            
+            if not new_phone:
+                await event.respond("❌ Не найден свободный активный аккаунт")
+                return
+            
+            account_name = new_data.get('name', new_phone[-10:])
+            
+            # Получаем необработанные каналы
+            processed_channels = set(self.commenting_progress.get('processed_channels', []))
+            all_channels = self.channels.copy()
+            
+            # Фильтруем необработанные
+            unprocessed = [
+                ch for ch in all_channels
+                if self._get_channel_username_normalized(ch) not in processed_channels
+            ]
+            
+            if not unprocessed:
+                await event.respond(
+                    "ℹ️ **Все каналы уже обработаны**\n\n"
+                    "Нечего добавить новому воркеру.\n"
+                    "Используй /resetprogress для нового цикла."
+                )
+                return
+            
+            await event.respond(
+                f"🔄 **ДОБАВЛЕНИЕ НОВОГО ВОРКЕРА**\n\n"
+                f"👤 Аккаунт: {account_name}\n"
+                f"📱 Phone: {new_phone}\n"
+                f"📢 Channels: {len(unprocessed)} (необработанные)\n\n"
+                f"⏳ Запуск через 3 секунды..."
+            )
+            
+            await asyncio.sleep(3)
+            
+            # Определяем новый slot
+            new_slot = max(self.worker_slots.keys()) + 1 if self.worker_slots else 0
+            
+            # Регистрируем slot
+            self.phone_to_slot[new_phone] = new_slot
+            
+            # Добавляем в slot_channel_assignments
+            if hasattr(self, 'slot_channel_assignments'):
+                self.slot_channel_assignments[new_slot] = unprocessed
+            
+            logger.info("="*80)
+            logger.info(f"➕ ДОБАВЛЕНИЕ ВОРКЕРА")
+            logger.info(f"   Slot: {new_slot}")
+            logger.info(f"   Account: {account_name} ({new_phone})")
+            logger.info(f"   Channels: {len(unprocessed)}")
+            logger.info("="*80)
+            
+            # Создаем воркера
+            mode = self.worker_mode
+            total_workers = current_workers + 1  # Новое общее количество
+            
+            task = asyncio.create_task(
+                self.account_worker(new_phone, new_data, unprocessed, new_slot, total_workers, mode=mode)
+            )
+            task.set_name(f"worker_{new_slot}_{new_phone[-10:]}")
+            
+            # Добавляем в отслеживание
+            self.active_worker_tasks.append(task)
+            
+            # Обновляем slot info
+            self.worker_slots[new_slot] = {
+                'phone': new_phone,
+                'channels': unprocessed,
+                'mode': mode,
+                'total_workers': total_workers,
+                'cycle_number': 1,
+                'current_channel_index': 0
+            }
+            
+            logger.info(f"✅ Worker добавлен: {task.get_name()}")
+            logger.info(f"📊 Total active workers: {len(self.active_worker_tasks)}")
+            
+            await event.respond(
+                f"✅ **ВОРКЕР ДОБАВЛЕН!**\n\n"
+                f"👷 Slot {new_slot}: {account_name}\n"
+                f"📢 Обрабатывает: {len(unprocessed)} каналов\n\n"
+                f"📊 **Теперь работает:**\n"
+                f"  • Всего воркеров: {total_workers}\n"
+                f"  • Max parallel: {max_allowed}\n\n"
+                f"🚀 Старт через ~30 секунд"
+            )
+        
+        @self.bot_client.on(events.NewMessage(pattern='/restart'))
+        async def restart_commenting(event):
+            """Перезапустить комментирование с новыми активными аккаунтами
+            
+            ИСПОЛЬЗОВАНИЕ:
+            1. Смените статусы аккаунтов через /toggleaccount
+            2. Отправьте /restart
+            3. Готово! Новые аккаунты продолжат с сохраненным прогрессом
+            """
+            if not await self.is_admin(event.sender_id): return
+            
+            if not self.monitoring:
+                await event.respond(
+                    "ℹ️ **Комментирование не запущено**\n\n"
+                    "Используй /startmon для запуска."
+                )
+                return
+            
+            # Получаем текущих и новых активных
+            old_active = []
+            for slot_idx, slot_info in self.worker_slots.items():
+                phone = slot_info.get('phone')
+                if phone:
+                    name = self.accounts_data.get(phone, {}).get('name', phone[-10:])
+                    old_active.append(name)
+            
+            new_active = []
+            for phone, data in self.accounts_data.items():
+                if data.get('status') == ACCOUNT_STATUS_ACTIVE and data.get('session'):
+                    new_active.append(data.get('name', phone[-10:]))
+            
+            # Показываем что меняется
+            changes_text = "🔄 **БУДЕТ ПРОИЗВЕДЕНА ЗАМЕНА:**\n\n"
+            changes_text += f"**Старые аккаунты:** ({len(old_active)})\n"
+            changes_text += "  " + ", ".join(old_active) + "\n\n"
+            changes_text += f"**→ Новые аккаунты:** ({len(new_active)})\n"
+            changes_text += "  " + ", ".join(new_active) + "\n\n"
+            changes_text += "⏳ Запуск через 5 сек... (отмените сейчас если ошибка)"
+            
+            await event.respond(changes_text)
+            await asyncio.sleep(5)
+            
+            await event.respond("🔄 Перезапуск...")
+            
+            logger.info("="*80)
+            logger.info("🔄 ПЕРЕЗАПУСК КОММЕНТИРОВАНИЯ")
+            logger.info(f"   Старые: {old_active}")
+            logger.info(f"   Новые: {new_active}")
+            logger.info("="*80)
+            
+            # Сохраняем прогресс
+            processed_count = len(self.commenting_progress.get('processed_channels', []))
+            total_channels = len(self.channels)
+            remaining = total_channels - processed_count
+            
+            logger.info(f"💾 Сохранение прогресса: {processed_count}/{total_channels} каналов")
+            self.save_data()
+            
+            # Останавливаем мониторинг
+            self.monitoring = False
+            
+            # Отменяем все активные воркеры
+            cancelled_count = 0
+            for task in self.active_worker_tasks:
+                if not task.done():
+                    task.cancel()
+                    cancelled_count += 1
+            
+            logger.info(f"🛑 Отменено {cancelled_count} воркеров")
+            
+            # Ждем завершения
+            await asyncio.sleep(3)
+            
+            # Очищаем воркеры
+            self.active_worker_tasks.clear()
+            self.worker_slots.clear()
+            
+            # Закрываем старые клиенты
+            if self.account_clients:
+                logger.info(f"🔌 Закрытие {len(self.account_clients)} клиентов...")
+                for phone, client in list(self.account_clients.items()):
+                    try:
+                        await client.disconnect()
+                    except Exception as e:
+                        logger.error(f"Ошибка закрытия {phone}: {e}")
+                self.account_clients.clear()
+            
+            logger.info("✅ Остановка завершена")
+            
+            # Ждем еще немного
+            await asyncio.sleep(2)
+            
+            # Запускаем заново
+            logger.info("🚀 Запуск с новыми аккаунтами...")
+            self.monitoring = True
+            asyncio.create_task(self.pro_auto_comment())
+            
+            logger.info("="*80)
+            
+            # Финальное сообщение
+            percentage = int((processed_count / total_channels) * 100) if total_channels > 0 else 0
+            
+            await event.respond(
+                f"✅ **ЗАМЕНА ЗАВЕРШЕНА!**\n\n"
+                f"**Теперь работают:** ({len(new_active)})\n"
+                f"  {', '.join(new_active)}\n\n"
+                f"📊 **Прогресс:**\n"
+                f"  ✅ Обработано: {processed_count}/{total_channels} ({percentage}%)\n"
+                f"  ⏳ Осталось: {remaining} каналов\n\n"
+                f"🚀 Новые аккаунты продолжат с {processed_count+1}-го канала\n"
+                f"⏱️ Старт через ~30 секунд"
+            )
         
         @self.bot_client.on(events.NewMessage(pattern='/resetprogress'))
         async def reset_progress(event):
@@ -11422,6 +11870,16 @@ class UltimateCommentBot:
             # Проверяем, есть ли распределение для этого слота
             if hasattr(self, 'slot_channel_assignments') and worker_index in self.slot_channel_assignments:
                 my_channels = self.slot_channel_assignments[worker_index]
+                
+                # ЗАЩИТА: проверяем что каналы есть
+                if not my_channels:
+                    logger.error("="*60)
+                    logger.error(f"❌ WORKER ERROR: slot {worker_index} has NO channels!")
+                    logger.error(f"   Account: {account_name} ({phone})")
+                    logger.error(f"   This should not happen! Check slot assignment logic.")
+                    logger.error("="*60)
+                    return  # Выходим из воркера
+                
                 logger.info("="*60)
                 logger.info(f"WORKER STARTED: account={phone}, slot={worker_index}/{total_workers}")
                 logger.info(f"   Name: {account_name}")
@@ -11438,6 +11896,17 @@ class UltimateCommentBot:
                 end_idx = start_idx + channels_per_worker + (1 if worker_index < remainder else 0)
                 my_channels = all_channels[start_idx:end_idx]
                 
+                # ЗАЩИТА: проверяем что каналы есть
+                if not my_channels:
+                    logger.error("="*60)
+                    logger.error(f"❌ WORKER ERROR: distributed mode assigned 0 channels!")
+                    logger.error(f"   Account: {account_name} ({phone})")
+                    logger.error(f"   Worker index: {worker_index}/{total_workers}")
+                    logger.error(f"   Total channels: {len(all_channels)}")
+                    logger.error(f"   Calculated range: {start_idx}-{end_idx}")
+                    logger.error("="*60)
+                    return  # Выходим из воркера
+                
                 logger.info("="*60)
                 logger.info(f"WORKER STARTED: account={phone}, slot={worker_index}/{total_workers}")
                 logger.info(f"   Name: {account_name}")
@@ -11447,6 +11916,16 @@ class UltimateCommentBot:
                 logger.info("="*60)
             else:  # cyclic mode
                 my_channels = all_channels
+                
+                # ЗАЩИТА: проверяем что каналы есть
+                if not my_channels:
+                    logger.error("="*60)
+                    logger.error(f"❌ WORKER ERROR: cyclic mode has 0 channels!")
+                    logger.error(f"   Account: {account_name} ({phone})")
+                    logger.error(f"   Total channels passed: {len(all_channels)}")
+                    logger.error("="*60)
+                    return  # Выходим из воркера
+                
                 logger.info("="*60)
                 logger.info(f"WORKER STARTED: account={phone}, slot={worker_index}/{total_workers}")
                 logger.info(f"   Name: {account_name}")
@@ -12344,6 +12823,13 @@ class UltimateCommentBot:
         logger.info("🚀 PRO_AUTO_COMMENT STARTED")
         logger.info("="*80)
         
+        # ============= СБРОС ПРИВЯЗОК СЛОТОВ ПРИ СТАРТЕ =============
+        # Очень важно! Иначе аккаунты получают старые номера слотов при перезапуске
+        self.phone_to_slot.clear()
+        self.next_free_slot = 0
+        logger.info("🔄 Сброшены привязки слотов, будут назначены заново")
+        # ============= END СБРОС =============
+        
         # ============= NEW: Работаем только с активными аккаунтами (статус 'active') =============
         logger.info(f"📊 Total accounts in system: {len(self.accounts_data)}")
         
@@ -12573,6 +13059,8 @@ class UltimateCommentBot:
         # ============= ИНИЦИАЛИЗАЦИЯ РАСПРЕДЕЛЕНИЯ ПО СЛОТАМ =============
         # Вызываем ДО создания воркеров, чтобы закрепить каналы за слотами
         logger.info("🔧 Инициализация распределения каналов по worker слотам...")
+        # КРИТИЧНО: Очищаем старое распределение, создаем новое
+        self.slot_channel_assignments = {}
         self.initialize_slot_channels(channels_copy, num_accounts, mode=self.worker_mode)
         # ============= END ИНИЦИАЛИЗАЦИЯ =============
         
