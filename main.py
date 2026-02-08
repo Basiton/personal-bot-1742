@@ -12019,6 +12019,21 @@ class UltimateCommentBot:
                         await self.handle_account_ban(phone, "Not authorized (session expired)")
                         return
                     
+                    # ============= ОБНОВЛЕНИЕ user_id =============
+                    # Получаем user_id для проверки авторства постов
+                    try:
+                        me = await worker_client.get_me()
+                        if me and me.id:
+                            # Обновляем user_id в accounts_data если его нет или он изменился
+                            current_user_id = self.accounts_data[phone].get('user_id')
+                            if current_user_id != me.id:
+                                self.accounts_data[phone]['user_id'] = me.id
+                                logger.info(f"🆔 [{account_name}] user_id обновлён: {me.id}")
+                                # Не сохраняем сразу, сохраним при следующем save_data()
+                    except Exception as e_me:
+                        logger.warning(f"⚠️ [{account_name}] Не удалось получить user_id: {e_me}")
+                    # ============= END ОБНОВЛЕНИЕ user_id =============
+                    
                     self.account_clients[phone] = worker_client
                     logger.info(f"✅ [{account_name}] Клиент создан и сохранён для переиспользования")
                     
@@ -12456,6 +12471,25 @@ class UltimateCommentBot:
                             logger.info(f"🧪 Check comment eligibility for chat={discussion_entity.id}")
                             msgs = await client.get_messages(discussion_entity, limit=10)
                             
+                            # КРИТИЧНО: Получаем user_id текущего аккаунта для проверки самокомментирования
+                            my_user_id = self.accounts_data.get(phone, {}).get('user_id')
+                            if not my_user_id:
+                                try:
+                                    me = await client.get_me()
+                                    my_user_id = me.id
+                                    self.accounts_data[phone]['user_id'] = my_user_id
+                                    self.save_data()  # Сохраняем user_id для будущих запусков
+                                    logger.info(f"[{account_name}] Сохранен user_id={my_user_id}")
+                                except Exception as e_me:
+                                    logger.warning(f"[{account_name}] Не удалось получить my user_id: {e_me}")
+                            
+                            # КРИТИЧНО: Получаем список всех наших user_id для проверки
+                            our_user_ids = set()
+                            for acc_phone, acc_data in self.accounts_data.items():
+                                uid = acc_data.get('user_id')
+                                if uid:
+                                    our_user_ids.add(uid)
+                            
                             reply_id = None
                             post_text = ""
                             for msg in msgs:
@@ -12463,19 +12497,30 @@ class UltimateCommentBot:
                                     f"🧵 New post event: chat={discussion_entity.id}, "
                                     f"sender={msg.sender_id}, message_id={msg.id}"
                                 )
+                                
+                                # 🛡️ ЗАЩИТА ОТ САМОКОММЕНТИРОВАНИЯ: Проверяем автора поста
+                                if msg.sender_id and msg.sender_id in our_user_ids:
+                                    logger.warning(
+                                        f"🛡️ [{account_name}] ⚠️ @{username} msg_id={msg.id} - "
+                                        f"автор один из НАШИХ аккаунтов (user_id={msg.sender_id})! Пропускаю пост"
+                                    )
+                                    continue  # Пропускаем этот пост, ищем следующий
+                                
                                 if msg.id not in self.commented_posts[username]:
                                     reply_id = msg.id
                                     post_text = msg.text or msg.message or ""
                                     break
                             
-                            if not reply_id and msgs:
-                                reply_id = msgs[0].id
-                                post_text = msgs[0].text or msgs[0].message or ""
-                                if len(self.commented_posts[username]) > 30:
-                                    oldest_ids = sorted(list(self.commented_posts[username]))[:15]
-                                    for old_id in oldest_ids:
-                                        self.commented_posts[username].discard(old_id)
+                            # 🛡️ КРИТИЧНО: Если не нашли подходящий пост (все от наших аккаунтов) - пропускаем канал
+                            if not reply_id:
+                                logger.warning(
+                                    f"🛡️ [{account_name}] ⚠️ @{username} - не нашел подходящих постов "
+                                    f"(все либо от наших аккаунтов, либо уже прокомментированы). Пропускаю канал"
+                                )
+                                await asyncio.sleep(2)
+                                continue
                             
+                            # Если текст поста пустой - берём из основного канала
                             if not post_text:
                                 try:
                                     channel_msgs = await client.get_messages(channel_entity, limit=5)
@@ -12590,6 +12635,13 @@ class UltimateCommentBot:
                             if reply_id:
                                 await client.send_message(discussion_entity, comment, reply_to=reply_id)
                                 self.commented_posts[username].add(reply_id)
+                                
+                                # Чистка старых записей (если их стало больше 30)
+                                if len(self.commented_posts[username]) > 30:
+                                    oldest_ids = sorted(list(self.commented_posts[username]))[:15]
+                                    for old_id in oldest_ids:
+                                        self.commented_posts[username].discard(old_id)
+                                    logger.debug(f"[{account_name}] Очищено {len(oldest_ids)} старых msg_id для @{username}")
                             else:
                                 await client.send_message(discussion_entity, comment)
                             
