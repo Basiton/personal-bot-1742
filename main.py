@@ -1138,6 +1138,13 @@ class UltimateCommentBot:
                 self.admins = data.get('admins', [])
                 raw_test_channels = data.get('test_channels', [])
                 self.test_channels = [self._normalize_channel_username(ch) for ch in raw_test_channels if self._normalize_channel_username(ch)]
+                
+                # КРИТИЧНО: Загружаем прогресс комментирования (было забыто!)
+                self.commenting_progress = data.get('commenting_progress', {})
+                processed_count = len(self.commenting_progress.get('processed_channels', []))
+                if processed_count > 0:
+                    logger.info(f"♻️  Восстановлен прогресс комментирования: {processed_count} каналов уже обработано")
+                
                 logger.info(f"✅ Loaded {len(self.accounts_data)} accounts, {len(self.channels)} channels, {len(self.templates)} templates")
         except FileNotFoundError:
             logger.warning(f"⚠️ {DB_NAME} not found - starting with empty data")
@@ -1539,6 +1546,52 @@ class UltimateCommentBot:
             if username and data.get('username') == username:
                 return True, phone
         return False, None
+    
+    def get_my_showcase_channels(self):
+        """
+        Получить список всех showcase каналов моих аккаунтов
+        Возвращает set с username каналов (нормализованные, без @)
+        
+        КРИТИЧНО: Используется для защиты от самокомментирования!
+        Аккаунты НЕ должны комментировать в своих showcase каналах.
+        """
+        showcase_usernames = set()
+        
+        for phone, data in self.accounts_data.items():
+            showcase = data.get('showcase_channel')
+            if showcase:
+                username = showcase.get('username', '')
+                if username:
+                    # Нормализуем: убираем @, приводим к lowercase
+                    normalized = str(username).strip().lstrip('@').lower()
+                    if normalized:
+                        showcase_usernames.add(normalized)
+        
+        if showcase_usernames:
+            logger.debug(f"🛡️ My showcase channels: {showcase_usernames}")
+        
+        return showcase_usernames
+    
+    def is_my_showcase_channel(self, channel_username):
+        """
+        Проверить, является ли канал showcase каналом одного из моих аккаунтов
+        
+        Args:
+            channel_username: username канала (может быть с @ или без)
+        
+        Returns:
+            bool: True если это мой showcase канал
+        """
+        if not channel_username:
+            return False
+        
+        # Нормализуем входной username
+        normalized = str(channel_username).strip().lstrip('@').lower()
+        
+        # Получаем все showcase каналы
+        my_showcases = self.get_my_showcase_channels()
+        
+        return normalized in my_showcases
     
     async def get_recent_thread_authors(self, client, discussion_entity, limit=5):
         """
@@ -12239,6 +12292,22 @@ class UltimateCommentBot:
                     else:
                         username = str(channel)
                     username = str(username).strip().lstrip('@')
+                    
+                    # ============= КРИТИЧНО: ЗАЩИТА ОТ САМОКОММЕНТИРОВАНИЯ =============
+                    # Проверяем, не является ли канал showcase каналом одного из наших аккаунтов
+                    if self.is_my_showcase_channel(username):
+                        logger.warning(
+                            f"🛡️ [{account_name}] ⚠️ @{username} - это МОЙ showcase канал! "
+                            f"Пропускаю (защита от самокомментирования)"
+                        )
+                        # КРИТИЧНО: Добавляем в обработанные чтобы больше не пытаться
+                        username_normalized = username.lower() if username else username
+                        if username_normalized not in self.commenting_progress.get('processed_channels', []):
+                            if 'processed_channels' not in self.commenting_progress:
+                                self.commenting_progress['processed_channels'] = []
+                            self.commenting_progress['processed_channels'].append(username_normalized)
+                        continue
+                    # ============= END ЗАЩИТА ОТ САМОКОММЕНТИРОВАНИЯ =============
                     
                     # ============= NEW: ПРОВЕРКА ПРОГРЕССА (пропускаем обработанные) =============
                     username_normalized = username.lower() if username else username
