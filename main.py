@@ -2533,9 +2533,26 @@ class UltimateCommentBot:
         ВАЖНО: Используем old_channels (осиротевшие каналы) для продолжения работы с того же места!
         """
         try:
-            # ============= ИСПОЛЬЗУЕМ ОСИРОТЕВШИЕ КАНАЛЫ =============
+            # ============= ИСПОЛЬЗУЕМ ОСИРОТЕВШИЕ КАНАЛЫ С ФИЛЬТРАЦИЕЙ ПО ПРОГРЕССУ =============
             # Новый воркер продолжает с тех каналов, которые обрабатывал старый
+            # НО убираем уже обработанные (согласно commenting_progress)
             orphaned_channels = old_channels if old_channels else []
+            
+            # КРИТИЧНО: Фильтруем по прогрессу!
+            processed_channels = set(self.commenting_progress.get('processed_channels', []))
+            if processed_channels:
+                original_count = len(orphaned_channels)
+                orphaned_channels = [
+                    ch for ch in orphaned_channels
+                    if self._get_channel_username_normalized(ch) not in processed_channels
+                ]
+                filtered_count = original_count - len(orphaned_channels)
+                if filtered_count > 0:
+                    logger.info(f"🔍 Прогресс: отфильтровано {filtered_count} обработанных каналов из {original_count}")
+                    logger.info(f"   Осталось необработанных: {len(orphaned_channels)}")
+            # ============= END ФИЛЬТРАЦИЯ =============
+            
+            orphaned_channels = orphaned_channels if orphaned_channels else []
             
             # Получаем АКТУАЛЬНОЕ количество активных аккаунтов
             active_accounts = [(p, data) for p, data in self.accounts_data.items() 
@@ -11740,6 +11757,15 @@ class UltimateCommentBot:
                     else:
                         username = str(channel)
                     username = str(username).strip().lstrip('@')
+                    
+                    # ============= NEW: ПРОВЕРКА ПРОГРЕССА (пропускаем обработанные) =============
+                    username_normalized = username.lower() if username else username
+                    if username_normalized in self.commenting_progress.get('processed_channels', []):
+                        logger.debug(
+                            f"[{account_name}] ⏭️ @{username} уже обработан (в прогрессе), пропускаю"
+                        )
+                        continue
+                    # ============= END ПРОВЕРКА ПРОГРЕССА =============
                     
                     # ============= NEW: ПРОВЕРКА ГОРЯЧИХ КАНАЛОВ =============
                     # Проверяем, не является ли канал "горячим" (недавний FloodWait)
