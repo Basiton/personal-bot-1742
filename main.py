@@ -15,7 +15,14 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
 from telethon.tl.functions.users import GetFullUserRequest
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import (
+    SessionPasswordNeededError,
+    UserDeactivatedBanError,
+    AuthKeyUnregisteredError,
+    PhoneNumberBannedError,
+    SessionRevokedError,
+    UserDeactivatedError
+)
 
 # Импорт модуля управления конфигурацией
 from config_manager import load_config, save_config, update_config_value, get_config_value
@@ -10875,6 +10882,19 @@ class UltimateCommentBot:
                                 f"💡 Это означает что аккаунт имеет ограничения.\n"
                                 f"Попробуйте другой аккаунт или обратитесь к администратору."
                             )
+                        # Проверяем на другие критические ошибки (через строки для совместимости)
+                        elif any(pattern in error_msg or pattern in error_type for pattern in 
+                                ["USER_DEACTIVATED", "AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", 
+                                 "PHONE_NUMBER_BANNED", "UserDeactivatedBan", "AuthKeyUnregistered"]):
+                            logger.error(f"🚨 PROFILE UPDATE: CRITICAL ERROR detected: {error_type}")
+                            await self.handle_account_ban(phone, f"Critical error (setname): {error_type}")
+                            await event.respond(
+                                f"🚨 **Критическая ошибка аккаунта `{phone}`**\n\n"
+                                f"Тип: {error_type}\n"
+                                f"Аккаунт имеет критическую проблему.\n"
+                                f"❌ Статус изменён на: **BROKEN**\n\n"
+                                f"💡 Используйте `/auth {phone}` для повторной авторизации"
+                            )
                         else:
                             await event.respond(
                                 f"❌ **Ошибка при обновлении имени для `{phone}`**\n\n"
@@ -11032,11 +11052,25 @@ class UltimateCommentBot:
                                 f"💡 Сократите текст и попробуйте снова"
                             )
                         elif "FROZEN" in error_msg or "USER_DEACTIVATED" in error_msg:
+                            # Не помечаем как broken для FROZEN - это не критично
                             await event.respond(
                                 f"❌ **Аккаунт `{phone}` заморожен/деактивирован**\n\n"
                                 f"⚠️ Telegram полностью ограничил этот аккаунт\n"
                                 f"🚫 Изменение профиля невозможно\n\n"
                                 f"💡 Используйте другой активный аккаунт"
+                            )
+                        # Проверяем на критические ошибки (через строки)
+                        elif any(pattern in error_msg or pattern in error_type for pattern in
+                                ["AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "PHONE_NUMBER_BANNED",
+                                 "UserDeactivatedBan", "AuthKeyUnregistered"]):
+                            logger.error(f"🚨 PROFILE UPDATE: CRITICAL ERROR detected: {error_type}")
+                            await self.handle_account_ban(phone, f"Critical error (setbio): {error_type}")
+                            await event.respond(
+                                f"🚨 **Критическая ошибка аккаунта `{phone}`**\n\n"
+                                f"Тип: {error_type}\n"
+                                f"Аккаунт имеет критическую проблему.\n"
+                                f"❌ Статус изменён на: **BROKEN**\n\n"
+                                f"💡 Используйте `/auth {phone}` для повторной авторизации"
                             )
                         elif "FLOOD_WAIT" in error_msg:
                             # Извлекаем время ожидания из ошибки
@@ -11259,6 +11293,19 @@ class UltimateCommentBot:
                             f"• Попробуйте /setname или /setbio\n"
                             f"• Или выберите другой аккаунт для /setavatar"
                         )
+                    # Проверяем на критические ошибки (через строки)
+                    elif any(pattern in error_msg or pattern in type(e).__name__ for pattern in
+                            ["USER_DEACTIVATED", "AUTH_KEY_UNREGISTERED", "SESSION_REVOKED",
+                             "PHONE_NUMBER_BANNED", "UserDeactivatedBan", "AuthKeyUnregistered"]):
+                        logger.error(f"🚨 PROFILE UPDATE: CRITICAL ERROR detected: {type(e).__name__}")
+                        await self.handle_account_ban(phone, f"Critical error (setavatar): {type(e).__name__}")
+                        await event.respond(
+                            f"🚨 **Критическая ошибка аккаунта `{phone}`**\n\n"
+                            f"Тип: {type(e).__name__}\n"
+                            f"Аккаунт имеет критическую проблему.\n"
+                            f"❌ Статус изменён на: **BROKEN**\n\n"
+                            f"💡 Используйте `/auth {phone}` для повторной авторизации"
+                        )
                     else:
                         await event.respond(
                             f"❌ **Ошибка при загрузке аватарки для `{phone}`**\n\n"
@@ -11417,37 +11464,59 @@ class UltimateCommentBot:
                     if not await worker_client.is_user_authorized():
                         logger.error(f"❌ [{account_name}] Account not authorized! Marking as BROKEN")
                         # Автоматически помечаем аккаунт как сломанный
-                        account_data['status'] = ACCOUNT_STATUS_BROKEN
-                        self.save_data()
-                        
-                        # Уведомляем админа
-                        try:
-                            await self.bot_client.send_message(
-                                BOT_OWNER_ID,
-                                f"⚠️ **АККАУНТ ПОТЕРЯЛ АВТОРИЗАЦИЮ**\n\n"
-                                f"Аккаунт: `{account_name}`\n"
-                                f"Телефон: `{phone}`\n\n"
-                                f"❌ Статус изменён на: **BROKEN**\n"
-                                f"💡 Используйте `/auth {phone}` для реавторизации\n"
-                                f"💡 Или `/toggleaccount {phone}` для активации после входа"
-                            )
-                        except:
-                            pass
-                        
+                        await self.handle_account_ban(phone, "Not authorized (session expired)")
                         return
                     
                     self.account_clients[phone] = worker_client
                     logger.info(f"✅ [{account_name}] Клиент создан и сохранён для переиспользования")
                     
+                except (UserDeactivatedBanError, UserDeactivatedError) as deactivated_err:
+                    # Аккаунт деактивирован Telegram
+                    logger.error(f"🚫 [{account_name}] ACCOUNT DEACTIVATED BY TELEGRAM!")
+                    logger.error(f"   Error: {deactivated_err}")
+                    await self.handle_account_ban(phone, f"Account deactivated: {type(deactivated_err).__name__}")
+                    return
+                
+                except (AuthKeyUnregisteredError, SessionRevokedError) as auth_err:
+                    # Сессия больше не валидна
+                    logger.error(f"🔑 [{account_name}] SESSION INVALID!")
+                    logger.error(f"   Error: {auth_err}")
+                    await self.handle_account_ban(phone, f"Session invalid: {type(auth_err).__name__}")
+                    return
+                
+                except PhoneNumberBannedError as banned_err:
+                    # Номер телефона забанен
+                    logger.error(f"⛔ [{account_name}] PHONE NUMBER BANNED!")
+                    logger.error(f"   Error: {banned_err}")
+                    await self.handle_account_ban(phone, "Phone number banned by Telegram")
+                    return
+                
                 except Exception as conn_error:
-                    if 'AuthKeyDuplicated' in str(conn_error):
+                    err_text = str(conn_error)
+                    err_type = type(conn_error).__name__
+                    
+                    # Проверяем на критические ошибки в строковом виде (для совместимости)
+                    critical_patterns = [
+                        "USER_DEACTIVATED", "AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", 
+                        "PHONE_NUMBER_BANNED", "UserDeactivatedBan", "AuthKeyUnregistered"
+                    ]
+                    
+                    is_critical = any(pattern in err_text or pattern in err_type for pattern in critical_patterns)
+                    
+                    if is_critical:
+                        logger.error(f"🚨 [{account_name}] CRITICAL CONNECTION ERROR: {err_type}")
+                        logger.error(f"   Error: {conn_error}")
+                        await self.handle_account_ban(phone, f"Critical connection error: {err_type}")
+                        return
+                    elif 'AuthKeyDuplicated' in err_text:
                         logger.error(f"❌ [{account_name}] AuthKeyDuplicatedError - аккаунт используется в другом месте")
                         logger.error(f"   Пропускаю этот аккаунт...")
+                        return
                     else:
                         logger.error(f"❌ [{account_name}] Ошибка подключения: {conn_error}")
                         import traceback
                         logger.error(traceback.format_exc())
-                    return
+                        return
             else:
                 worker_client = self.account_clients[phone]
                 logger.info(f"♻️ [{account_name}] Переиспользую существующий клиент")
@@ -11457,8 +11526,47 @@ class UltimateCommentBot:
                     logger.warning(f"⚠️ [{account_name}] Клиент отключён, переподключаюсь...")
                     try:
                         await worker_client.connect()
+                        
+                        # Проверяем авторизацию после переподключения
+                        if not await worker_client.is_user_authorized():
+                            logger.error(f"❌ [{account_name}] Lost authorization after reconnect!")
+                            await self.handle_account_ban(phone, "Lost authorization (session expired)")
+                            return
+                        
                         logger.info(f"✅ [{account_name}] Клиент успешно переподключён")
+                    
+                    except (UserDeactivatedBanError, UserDeactivatedError) as deactivated_err:
+                        logger.error(f"🚫 [{account_name}] ACCOUNT DEACTIVATED!")
+                        await self.handle_account_ban(phone, f"Account deactivated: {type(deactivated_err).__name__}")
+                        return
+                    
+                    except (AuthKeyUnregisteredError, SessionRevokedError) as auth_err:
+                        logger.error(f"🔑 [{account_name}] SESSION INVALID!")
+                        await self.handle_account_ban(phone, f"Session invalid: {type(auth_err).__name__}")
+                        return
+                    
+                    except PhoneNumberBannedError as banned_err:
+                        logger.error(f"⛔ [{account_name}] PHONE NUMBER BANNED!")
+                        await self.handle_account_ban(phone, "Phone number banned")
+                        return
+                    
                     except Exception as reconnect_err:
+                        err_text = str(reconnect_err)
+                        err_type = type(reconnect_err).__name__
+                        
+                        # Проверяем на критические ошибки
+                        critical_patterns = [
+                            "USER_DEACTIVATED", "AUTH_KEY_UNREGISTERED", "SESSION_REVOKED",
+                            "PHONE_NUMBER_BANNED", "UserDeactivatedBan", "AuthKeyUnregistered"
+                        ]
+                        
+                        is_critical = any(pattern in err_text or pattern in err_type for pattern in critical_patterns)
+                        
+                        if is_critical:
+                            logger.error(f"🚨 [{account_name}] CRITICAL RECONNECT ERROR: {err_type}")
+                            await self.handle_account_ban(phone, f"Critical reconnect error: {err_type}")
+                            return
+                        
                         logger.error(f"❌ [{account_name}] Ошибка переподключения: {reconnect_err}")
                         # Удаляем из кэша и пытаемся создать заново
                         del self.account_clients[phone]
@@ -11473,10 +11581,22 @@ class UltimateCommentBot:
                                 retry_delay=3
                             )
                             await worker_client.connect()
+                            
+                            # Проверяем авторизацию нового клиента
+                            if not await worker_client.is_user_authorized():
+                                logger.error(f"❌ [{account_name}] New client not authorized!")
+                                await self.handle_account_ban(phone, "Not authorized after client recreation")
+                                return
+                            
                             self.account_clients[phone] = worker_client
                             logger.info(f"✅ [{account_name}] Новый клиент создан и подключён")
                         except Exception as new_client_err:
                             logger.error(f"❌ [{account_name}] Не удалось создать новый клиент: {new_client_err}")
+                            # Если это критическая ошибка - помечаем аккаунт как broken
+                            new_err_text = str(new_client_err)
+                            new_err_type = type(new_client_err).__name__
+                            if any(pattern in new_err_text or pattern in new_err_type for pattern in critical_patterns):
+                                await self.handle_account_ban(phone, f"Failed to recreate client: {new_err_type}")
                             return
             
             logger.info(f"[{account_name}] Client ready")
@@ -11952,9 +12072,40 @@ class UltimateCommentBot:
                                 except Exception as db_err:
                                     logger.error(f"DB log error: {db_err}")
                         
+                        except (UserDeactivatedBanError, UserDeactivatedError) as deactivated_err:
+                            # Аккаунт деактивирован Telegram - критичная ошибка!
+                            logger.error(f"🚫 [{account_name}] ACCOUNT DEACTIVATED BY TELEGRAM!")
+                            logger.error(f"   Error: {deactivated_err}")
+                            logger.error(f"   This account is permanently banned/deleted")
+                            logger.error(f"   Marking as BROKEN...")
+                            
+                            await self.handle_account_ban(phone, f"Account deactivated: {type(deactivated_err).__name__}")
+                            break  # Выходим из цикла, аккаунт больше не работает
+                        
+                        except (AuthKeyUnregisteredError, SessionRevokedError) as auth_err:
+                            # Сессия больше не валидна - критичная ошибка!
+                            logger.error(f"🔑 [{account_name}] SESSION INVALID!")
+                            logger.error(f"   Error: {auth_err}")
+                            logger.error(f"   Session was revoked or auth key unregistered")
+                            logger.error(f"   Marking as BROKEN...")
+                            
+                            await self.handle_account_ban(phone, f"Session invalid: {type(auth_err).__name__}")
+                            break  # Выходим из цикла, нужна реавторизация
+                        
+                        except PhoneNumberBannedError as banned_err:
+                            # Номер телефона забанен - критичная ошибка!
+                            logger.error(f"⛔ [{account_name}] PHONE NUMBER BANNED!")
+                            logger.error(f"   Error: {banned_err}")
+                            logger.error(f"   This phone number is permanently banned by Telegram")
+                            logger.error(f"   Marking as BROKEN...")
+                            
+                            await self.handle_account_ban(phone, "Phone number banned by Telegram")
+                            break  # Выходим из цикла, номер забанен навсегда
+                        
                         except Exception as send_exc:
                             logger.error(f"❌ Comment error: {send_exc}", exc_info=True)
                             err_text = str(send_exc)
+                            err_type = type(send_exc).__name__
                             
                             if self.test_mode:
                                 logger.error(f"TEST MODE ERROR:")
@@ -11964,21 +12115,41 @@ class UltimateCommentBot:
                             
                             logger.error(f"[{account_name}] Send error for @{username}: {err_text}")
                             
-                            # ============= ПРОВЕРКА НА БАН АККАУНТА =============
-                            # Если аккаунт забанен в каналах - это серьёзно!
+                            # ============= ПРОВЕРКА НА КРИТИЧНЫЕ ОШИБКИ (строковые проверки для совместимости) =============
+                            # Проверяем строковое представление для случаев, когда exception не был пойман выше
+                            critical_error_patterns = [
+                                ("USER_DEACTIVATED", "Account deactivated"),
+                                ("AUTH_KEY_UNREGISTERED", "Auth key unregistered"),
+                                ("SESSION_REVOKED", "Session revoked"),
+                                ("PHONE_NUMBER_BANNED", "Phone number banned"),
+                                ("UserDeactivatedBan", "Account banned"),
+                                ("AuthKeyUnregistered", "Auth key invalid"),
+                            ]
+                            
+                            is_critical = False
+                            for pattern, reason in critical_error_patterns:
+                                if pattern in err_text or pattern in err_type:
+                                    logger.error(f"🚨 [{account_name}] CRITICAL ERROR DETECTED: {pattern}")
+                                    logger.error(f"   Reason: {reason}")
+                                    logger.error(f"   Marking account as BROKEN...")
+                                    await self.handle_account_ban(phone, f"{reason} ({pattern})")
+                                    is_critical = True
+                                    break
+                            
+                            if is_critical:
+                                break  # Прерываем цикл для критичных ошибок
+                            
+                            # Проверка на бан в каналах (не критично, но серьезно)
                             if "UserBannedInChannelError" in err_text or "You're banned from sending messages" in err_text:
                                 logger.error(f"⚠️ [{account_name}] ACCOUNT IS BANNED IN CHANNELS!")
                                 logger.error(f"   This account cannot comment anywhere")
                                 logger.error(f"   Marking account as BROKEN...")
                                 
-                                # Помечаем аккаунт как сломанный
                                 await self.handle_account_ban(phone, "Banned from channels")
-                                
-                                # Прерываем цикл - нет смысла пробовать другие каналы
-                                break
-                            # ============= END ПРОВЕРКА НА БАН =============
+                                break  # Прерываем цикл
+                            # ============= END ПРОВЕРКА НА КРИТИЧНЫЕ ОШИБКИ =============
                             
-                            # Error handling...
+                            # Error handling для некритичных ошибок...
                             permanent_errors = [
                                 "You can't write in this chat",
                                 "CHAT_WRITE_FORBIDDEN",
@@ -12042,13 +12213,9 @@ class UltimateCommentBot:
                                     logger.error(f"Error processing FloodWait: {fw_err}")
                                     await asyncio.sleep(60)
                                     continue
-                            elif "USER_DEACTIVATED" in err_text or "AUTH_KEY_UNREGISTERED" in err_text:
-                                logger.error(f"[{account_name}] ACCOUNT BANNED!")
-                                await self.handle_account_ban(phone, "Account Deactivated")
-                                break
                             else:
+                                # Для других некритичных ошибок просто ждем и продолжаем
                                 await asyncio.sleep(3)
-                                # Для других ошибок тоже переходим к следующему каналу
                                 continue
                     
                     except Exception as e:
