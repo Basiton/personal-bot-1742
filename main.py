@@ -11936,11 +11936,14 @@ class UltimateCommentBot:
                 logger.info("="*60)
             # ============= END РАСПРЕДЕЛЕНИЕ ПО СЛОТАМ =============
             
-            # Offset delay to spread workers
-            initial_offset = worker_index * 10
+            # ============= УВЕЛИЧЕННЫЙ OFFSET ДЛЯ РАСПРЕДЕЛЕНИЯ ВОРКЕРОВ =============
+            # Каждый воркер стартует с большим интервалом для естественности
+            # При 20 msg/hour задержка ~180s, offset должен быть 60-90s
+            initial_offset = worker_index * 60  # Было 10, стало 60 секунд
             if initial_offset > 0:
-                logger.info(f"[{account_name}] Offset delay: {initial_offset}s")
+                logger.info(f"[{account_name}] Offset delay: {initial_offset}s (распределение стартов)")
                 await asyncio.sleep(initial_offset)
+            # ============= END OFFSET =============
             
             # Получаем или создаем клиент (один на аккаунт, переиспользуется всеми воркерами)
             if phone not in self.account_clients:
@@ -12727,29 +12730,42 @@ class UltimateCommentBot:
                         logger.error(f"[{account_name}] Error on @{username}: {str(e)[:100]}")
                         await asyncio.sleep(3)
                     
-                    # Delay between comments
+                    # ============= УЛУЧШЕННАЯ ЗАДЕРЖКА МЕЖДУ КОММЕНТАРИЯМИ =============
                     if self.test_mode:
                         target_rate = self.test_mode_speed_limit
                     else:
                         target_rate = self.messages_per_hour
                     
+                    # Базовая задержка по rate limit
                     base_delay = (3600 // target_rate) if target_rate > 0 else 60
                     
-                    # ============= NEW: ПРИМЕНЯЕМ ГЛОБАЛЬНЫЙ МНОЖИТЕЛЬ ЗАДЕРЖКИ =============
-                    # Если были частые FloodWait - увеличиваем задержку
+                    # Применяем глобальный множитель задержки (при FloodWait)
                     base_delay = int(base_delay * self.global_delay_multiplier)
-                    # ============= END NEW =============
                     
-                    delay = random.randint(int(base_delay * 0.8), int(base_delay * 1.2))
+                    # КРИТИЧНО: Увеличиваем рандомизацию для естественности
+                    # Было: 0.8-1.2 (±20%), стало: 0.7-1.5 (±35%)
+                    # Это значит при 180s: от 126s до 270s (2.1-4.5 минуты)
+                    min_delay = int(base_delay * 0.7)
+                    max_delay = int(base_delay * 1.5)
+                    delay = random.randint(min_delay, max_delay)
                     
-                    # Логируем с указанием множителя, если он != 1.0
+                    # Добавляем случайную микрозадержку для разнесения воркеров
+                    # Если несколько воркеров готовы отправить одновременно - микрозадержка разнесет их
+                    micro_delay = random.randint(5, 25)  # 5-25 секунд
+                    delay += micro_delay
+                    # ============= END УЛУЧШЕННАЯ ЗАДЕРЖКА =============
+                    
+                    # Логируем задержку с деталями
                     if self.global_delay_multiplier > 1.0:
                         logger.info(
-                            f"[{account_name}] Waiting {delay}s (target: {target_rate} msg/hour, "
-                            f"multiplier: {self.global_delay_multiplier:.2f}x)"
+                            f"[{account_name}] Waiting {delay}s (base: {base_delay}s, range: {min_delay}-{max_delay}s, "
+                            f"target: {target_rate} msg/hour, multiplier: {self.global_delay_multiplier:.2f}x)"
                         )
                     else:
-                        logger.info(f"[{account_name}] Waiting {delay}s (target: {target_rate} msg/hour)")
+                        logger.info(
+                            f"[{account_name}] Waiting {delay}s (base: {base_delay}s, range: {min_delay}-{max_delay}s, "
+                            f"target: {target_rate} msg/hour)"
+                        )
                     
                     await asyncio.sleep(delay)
                 
