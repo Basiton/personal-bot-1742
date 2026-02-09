@@ -1145,6 +1145,15 @@ class UltimateCommentBot:
                 if processed_count > 0:
                     logger.info(f"♻️  Восстановлен прогресс комментирования: {processed_count} каналов уже обработано")
                 
+                # Загружаем историю прокомментированных постов
+                commented_posts_data = data.get('commented_posts', {})
+                self.commented_posts = {
+                    channel: set(post_ids) for channel, post_ids in commented_posts_data.items()
+                }
+                total_commented = sum(len(posts) for posts in self.commented_posts.values())
+                if total_commented > 0:
+                    logger.info(f"📝 Восстановлена история: {total_commented} прокомментированных постов в {len(self.commented_posts)} каналах")
+                
                 logger.info(f"✅ Loaded {len(self.accounts_data)} accounts, {len(self.channels)} channels, {len(self.templates)} templates")
         except FileNotFoundError:
             logger.warning(f"⚠️ {DB_NAME} not found - starting with empty data")
@@ -1170,6 +1179,11 @@ class UltimateCommentBot:
         БЕЗОПАСНО: создаёт бэкап перед каждым сохранением.
         Использует НОВУЮ структуру 'accounts_data' (старая 'accounts' больше не сохраняется).
         """
+        # Конвертируем commented_posts из {channel: set()} в {channel: list()} для JSON
+        commented_posts_serializable = {
+            channel: list(post_ids) for channel, post_ids in self.commented_posts.items()
+        }
+        
         data = {
             'accounts_data': self.accounts_data,  # НОВАЯ структура
             'channels': self.channels,
@@ -1177,7 +1191,8 @@ class UltimateCommentBot:
             'bio_links': self.bio_links,
             'admins': self.admins,
             'test_channels': self.test_channels,
-            'commenting_progress': self.commenting_progress  # Прогресс комментинга
+            'commenting_progress': self.commenting_progress,  # Прогресс комментинга
+            'commented_posts': commented_posts_serializable  # История прокомментированных постов
         }
         
         # Создаём бэкап текущего файла (если существует)
@@ -12466,10 +12481,10 @@ class UltimateCommentBot:
                             await asyncio.sleep(2)
                             continue
                         
-                        # Get messages
+                        # Get messages (увеличено до 20 для 400+ каналов)
                         try:
                             logger.info(f"🧪 Check comment eligibility for chat={discussion_entity.id}")
-                            msgs = await client.get_messages(discussion_entity, limit=10)
+                            msgs = await client.get_messages(discussion_entity, limit=20)
                             
                             # КРИТИЧНО: Получаем user_id текущего аккаунта для проверки самокомментирования
                             my_user_id = self.accounts_data.get(phone, {}).get('user_id')
@@ -12636,9 +12651,9 @@ class UltimateCommentBot:
                                 await client.send_message(discussion_entity, comment, reply_to=reply_id)
                                 self.commented_posts[username].add(reply_id)
                                 
-                                # Чистка старых записей (если их стало больше 30)
-                                if len(self.commented_posts[username]) > 30:
-                                    oldest_ids = sorted(list(self.commented_posts[username]))[:15]
+                                # Чистка старых записей (если их стало больше 500 - для 400+ каналов)
+                                if len(self.commented_posts[username]) > 500:
+                                    oldest_ids = sorted(list(self.commented_posts[username]))[:100]
                                     for old_id in oldest_ids:
                                         self.commented_posts[username].discard(old_id)
                                     logger.debug(f"[{account_name}] Очищено {len(oldest_ids)} старых msg_id для @{username}")
@@ -12651,6 +12666,12 @@ class UltimateCommentBot:
                             # ============= NEW: Сохраняем комментарий в историю для дедупликации =============
                             self.add_comment_to_history(username, comment, phone)
                             # ============= END NEW =============
+                            
+                            # Периодическое сохранение истории (каждые 10 комментариев)
+                            total_comments = sum(len(posts) for posts in self.commented_posts.values())
+                            if total_comments % 10 == 0:
+                                self.save_data()
+                                logger.debug(f"💾 История сохранена (всего {total_comments} комментариев в памяти)")
                             
                             # Logging with MODE indicator
                             short_comment = comment[:50] if len(comment) > 50 else comment
